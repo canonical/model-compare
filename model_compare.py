@@ -268,27 +268,6 @@ def aa_scrape_entries() -> list:
                         False,
                     )
 
-    stream = []
-    for chunk in re.finditer(
-        r'self\.__next_f\.push\(\[1,\s*("(?:[^"\\]|\\.)*")\]\)', html
-    ):
-        try:
-            stream.append(json.loads(chunk.group(1)))
-        except ValueError:
-            pass
-    flight = "".join(stream)
-    for match in re.finditer(
-        r'"slug":"([^"]+)"|"name":"([^"]+)"|"intelligenceIndex":(-?\d+(?:\.\d+)?)',
-        flight,
-    ):
-        slug, name, index = match.group(1), match.group(2), match.group(3)
-        if index is not None:
-            estimated = (
-                '"intelligenceIndexIsEstimated":true'
-                in flight[match.end() : match.end() + 80]
-            )
-            add(slug, name, float(index), estimated)
-
     return list(entries.values())
 
 
@@ -470,7 +449,7 @@ def compute_scores(candidates, args, quality_by_id):
     high = math.log10(max(prices) + 0.01)
     price_span = (high - low) or 1.0
     floor_ctx = max(args.min_context, 1000)
-    cap_ctx = max(4.0 * floor_ctx, 1_000_000.0)
+    cap_ctx = 4.0 * floor_ctx
     ctx_span = math.log(cap_ctx / floor_ctx) or 1.0
 
     for cand in candidates:
