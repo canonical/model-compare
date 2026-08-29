@@ -167,6 +167,14 @@ def parse_price(value) -> float | None:
         return None
 
 
+def coerce_int(value, default: int = 0) -> int:
+    """Best-effort int coercion for external fields that may be str/float/None."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def parse_iso_datetime(value):
     if not value:
         return None
@@ -188,7 +196,27 @@ def aa_api_entries(api_key: str) -> list:
     payload = fetch_json(AA_API_URL, headers={"x-api-key": api_key}, timeout=30)
     found = []
 
-    def walk(node):
+    def pick_index(node: dict):
+        # Prefer the canonical field name; only fall back to a substring match
+        # so a future sibling metric like "estimatedIntelligenceCost" can't win
+        # by sheer dict-ordering luck.
+        canonical = node.get("artificialAnalysisIntelligenceIndex")
+        if isinstance(canonical, (int, float)):
+            return float(canonical)
+        for key, val in node.items():
+            key_l = key.lower()
+            if (
+                isinstance(val, (int, float))
+                and "intelligence" in key_l
+                and "estimated" not in key_l
+                and "cost" not in key_l
+            ):
+                return float(val)
+        return None
+
+    def walk(node, depth=0):
+        if depth > 100:
+            return
         if isinstance(node, dict):
             ident = (
                 node.get("id")
@@ -196,17 +224,7 @@ def aa_api_entries(api_key: str) -> list:
                 or node.get("model")
                 or node.get("name")
             )
-            index = None
-            for key, val in node.items():
-                key_l = key.lower()
-                if (
-                    isinstance(val, (int, float))
-                    and "intelligence" in key_l
-                    and "estimated" not in key_l
-                    and "cost" not in key_l
-                ):
-                    index = float(val)
-                    break
+            index = pick_index(node)
             if ident and index is not None:
                 found.append(
                     {
@@ -216,10 +234,10 @@ def aa_api_entries(api_key: str) -> list:
                     }
                 )
             for val in node.values():
-                walk(val)
+                walk(val, depth + 1)
         elif isinstance(node, list):
             for val in node:
-                walk(val)
+                walk(val, depth + 1)
 
     walk(payload)
     deduped = {}
@@ -311,7 +329,10 @@ def build_aa_lookup(entries):
     for entry in entries:
         key = entry.get("key") or ""
         name = entry.get("name") or key
-        index = float(entry["index"])
+        raw_index = entry.get("index")
+        if not isinstance(raw_index, (int, float)):
+            continue
+        index = float(raw_index)
 
         def put(tier, raw):
             normalized = norm_key(raw)
@@ -335,6 +356,8 @@ def match_quality(model, exact, fuzzy):
     model_id = model["id"]
     name = model.get("name") or ""
     display = PROVIDER_PREFIX_RE.sub("", name).strip()
+    # Assumes model_id contains a "/" (provider/base). build_candidates drops
+    # malformed ids upstream, so base is never empty here.
     provider, _, base = model_id.split(":", 1)[0].partition("/")
 
     for tier, raw in (
@@ -380,7 +403,7 @@ def build_candidates(models, args):
         if "/" not in model_id:
             drop("malformed id")
             continue
-        context = model.get("context_length") or 0
+        context = coerce_int(model.get("context_length"), 0)
         if context < args.min_context:
             drop("context")
             continue
@@ -439,6 +462,11 @@ def build_candidates(models, args):
 
 def compute_scores(candidates, args, quality_by_id):
     weights = dict(PRIORITY_WEIGHTS[args.priority])
+    # Deliberate asymmetry: the quality weight is dropped (and the remaining
+    # weights renormalized) only when *no* candidate has a quality score, so a
+    # quality-blind pool is ranked purely on price/context/age. When *some*
+    # candidates match, the quality weight is kept and unmatched candidates take
+    # quality_score = 0 -- they are penalized rather than silently reweighted.
     if not any(c["id"] in quality_by_id for c in candidates):
         weights.pop("quality")
         total = sum(weights.values())
@@ -693,6 +721,14 @@ def main(argv=None) -> int:
     except Exception as exc:
         warn(f"could not fetch the OpenRouter catalog: {exc}")
         return 1
+    try:
+        return run(args, models, or_cached)
+    except Exception as exc:
+        warn(f"could not rank models: {exc}")
+        return 1
+
+
+def run(args, models, or_cached) -> int:
     aa_entries, aa_source, aa_cached = fetch_aa_entries(args)
     exact, fuzzy = build_aa_lookup(aa_entries)
 
