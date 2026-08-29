@@ -115,6 +115,16 @@ polite.
 | `--no-require-tools` | off | allow models without tool calling |
 | `--no-cache` / `--cache-ttl S` | 6h | cache control |
 
+## Tests
+
+A `pytest` suite in `test_model_compare.py` covers the pure logic — input
+coercion, candidate filtering, scoring math, and Artificial Analysis
+matching — with no network access (external calls are stubbed). Run it with:
+
+```console
+$ pytest
+```
+
 ## License
 
 GPL-3.0 — see [LICENSE](LICENSE).
