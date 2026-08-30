@@ -8,6 +8,7 @@ These cover pure functions only -- no network access is performed. Run with:
 from __future__ import annotations
 
 import json
+import time
 from argparse import Namespace
 
 import pytest
@@ -193,6 +194,15 @@ def test_build_candidates_discount_filter_without_data_drops_all():
     assert dropped["no discount"] == 1
 
 
+def test_build_candidates_discount_filter_ignores_negligible_discount():
+    models = [make_model(id="acme/sliver")]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(discount=True), {"acme/sliver": 0.004}
+    )
+    assert candidates == []
+    assert dropped["no discount"] == 1
+
+
 def test_build_candidates_stores_discount():
     models = [make_model(id="acme/model-a")]
     candidates, _ = mc.build_candidates(models, make_args(), {"acme/model-a": 0.75})
@@ -289,16 +299,70 @@ def test_fetch_discount_map_fetch_failure_returns_empty(monkeypatch, tmp_path):
     assert cached is False
 
 
+def test_fetch_discount_map_does_not_cache_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+
+    def fake_fetch(*a, **k):
+        calls.append(1)
+        return {"data": {"models": []}}
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    args = make_args(no_cache=False, cache_ttl=3600)
+    first, cached1 = mc.fetch_discount_map(args)
+    second, cached2 = mc.fetch_discount_map(args)
+    assert first == second == {}
+    assert (cached1, cached2) == (False, False)
+    assert len(calls) == 2
+    assert not (tmp_path / "model-compare" / "openrouter-discounts.json").exists()
+
+
+def test_fetch_discount_map_treats_empty_cached_map_as_miss(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+
+    def fake_fetch(*a, **k):
+        calls.append(1)
+        return {
+            "data": {
+                "models": [
+                    {
+                        "slug": "acme/a",
+                        "endpoint": {
+                            "variant": "standard",
+                            "pricing": {"discount": 0.25},
+                        },
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    cache_dir = tmp_path / "model-compare"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "openrouter-discounts.json").write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {}})
+    )
+    result, cached = mc.fetch_discount_map(make_args(no_cache=False, cache_ttl=3600))
+    assert len(calls) == 1
+    assert cached is False
+    assert result == {"acme/a": 0.25}
+
+
 @pytest.mark.parametrize(
     "value,expected",
     [
         (None, "--"),
         (0, "--"),
         (0.0, "--"),
+        (0.004, "--"),
+        (0.005, "--"),
+        (0.006, "1%"),
+        (0.049, "5%"),
         (0.5, "50%"),
         (0.561, "56%"),
         (0.75, "75%"),
-        (0.049, "5%"),
+        (-0.1, "--"),
     ],
 )
 def test_fmt_discount(value, expected):
@@ -319,8 +383,9 @@ def test_print_table_dash_without_discount(capsys):
     top[0].update({"score": 0.9, "quality": None, "discount": None})
     mc.print_table(top, 1, {"price": 1.0}, "note")
     out = capsys.readouterr().out
+    data_row = next(line for line in out.splitlines() if line.strip().startswith("1"))
     assert "DISC" in out
-    assert "--" in out
+    assert "--" in data_row
 
 
 def test_print_json_includes_discount(capsys):
@@ -334,6 +399,14 @@ def test_print_json_includes_discount(capsys):
 def test_print_json_discount_null_when_absent(capsys):
     rows = [_cand("a/x", 1.0)]
     rows[0].update({"score": 0.9, "discount": None})
+    mc.print_json(rows)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["discount"] is None
+
+
+def test_print_json_discount_null_for_negligible(capsys):
+    rows = [_cand("a/x", 1.0)]
+    rows[0].update({"score": 0.9, "discount": 0.004})
     mc.print_json(rows)
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["discount"] is None

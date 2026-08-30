@@ -173,7 +173,7 @@ def fetch_discount_map(args):
     """
     if not args.no_cache:
         cached = load_cache("openrouter-discounts", args.cache_ttl)
-        if cached is not None:
+        if cached:
             return cached, True
     try:
         payload = fetch_json(OPENROUTER_DISCOUNTS_URL, timeout=30)
@@ -196,6 +196,12 @@ def fetch_discount_map(args):
         variant = endpoint.get("variant") or ""
         key = slug if variant in ("", "standard") else f"{slug}:{variant}"
         discounts.setdefault(key, float(raw))
+    if not discounts:
+        # An intact endpoint always yields hundreds of entries (discount: 0 is
+        # still an entry); an empty map means the response shape changed --
+        # never cache that, so the next run recovers on its own.
+        warn("no discount entries found; treating discounts as unavailable")
+        return {}, False
     save_cache("openrouter-discounts", discounts)
     return discounts, False
 
@@ -460,7 +466,7 @@ def build_candidates(models, args, discounts):
             drop("batch")
             continue
         discount = (discounts or {}).get(model_id)
-        if args.discount and not discount:
+        if args.discount and not has_discount(discount):
             drop("no discount")
             continue
         modality = (model.get("architecture") or {}).get("modality") or ""
@@ -600,8 +606,15 @@ def fmt_age(age_days) -> str:
     return f"{age_days:.0f}d"
 
 
+def has_discount(value) -> bool:
+    # Only discounts that survive .0% rounding count; smaller slivers and
+    # malformed (negative) values are treated as no discount everywhere:
+    # the DISC column, --json output, and the --discount filter.
+    return bool(value) and value > 0 and f"{value:.0%}" != "0%"
+
+
 def fmt_discount(value) -> str:
-    return f"{value:.0%}" if value else "--"
+    return f"{value:.0%}" if has_discount(value) else "--"
 
 
 def print_table(top, total_candidates, weights, quality_note):
@@ -672,7 +685,9 @@ def print_json(top):
             "input_usd_per_m": round(cand["price_in"], 6),
             "output_usd_per_m": round(cand["price_out"], 6),
             "blended_usd_per_m": round(cand["blended"], 6),
-            "discount": round(cand["discount"], 4) if cand["discount"] else None,
+            "discount": round(cand["discount"], 4)
+            if has_discount(cand["discount"])
+            else None,
             "context_tokens": cand["context"],
             "age_days": round(cand["age_days"], 1)
             if cand["age_days"] is not None
