@@ -34,6 +34,7 @@ Examples:
   model_compare.py                          top 5, balanced
   model_compare.py --best                   print only "#1 model id" (parseable)
   model_compare.py --priority price --top 3 three cheapest-sensible picks
+  model_compare.py --discount               only currently-discounted models
   MODEL=$(model_compare.py --best)          shell integration
 """
 
@@ -52,6 +53,9 @@ import urllib.request
 from datetime import datetime, timezone
 
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_DISCOUNTS_URL = (
+    "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text"
+)
 AA_MODELS_PAGE_URL = "https://artificialanalysis.ai/models"
 AA_API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
 USER_AGENT = "model-compare/1.0 (https://github.com/rkratky/model-compare)"
@@ -158,6 +162,42 @@ def fetch_openrouter_models(args):
         raise RuntimeError("OpenRouter API returned no models")
     save_cache("openrouter-models", models)
     return models, False
+
+
+def fetch_discount_map(args):
+    """Map of public model id -> current discount fraction (e.g. 0.5).
+
+    Comes from the OpenRouter frontend models API -- the same data the
+    website's ?discount=true filter uses. It is undocumented and may change;
+    on any failure the map is empty and discounts simply show as "--".
+    """
+    if not args.no_cache:
+        cached = load_cache("openrouter-discounts", args.cache_ttl)
+        if cached is not None:
+            return cached, True
+    try:
+        payload = fetch_json(OPENROUTER_DISCOUNTS_URL, timeout=30)
+    except Exception as exc:
+        warn(f"could not fetch discount data: {exc}")
+        return {}, False
+    data = payload.get("data") if isinstance(payload, dict) else None
+    entries = data.get("models") if isinstance(data, dict) else None
+    discounts = {}
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("slug") or ""
+        if not slug or slug.startswith("~"):
+            continue
+        endpoint = entry.get("endpoint") or {}
+        raw = (endpoint.get("pricing") or {}).get("discount")
+        if not isinstance(raw, (int, float)):
+            continue
+        variant = endpoint.get("variant") or ""
+        key = slug if variant in ("", "standard") else f"{slug}:{variant}"
+        discounts.setdefault(key, float(raw))
+    save_cache("openrouter-discounts", discounts)
+    return discounts, False
 
 
 def parse_price(value) -> float | None:
@@ -389,7 +429,7 @@ def match_quality(model, exact, fuzzy):
 # ---------------------------------------------------------------------------
 
 
-def build_candidates(models, args):
+def build_candidates(models, args, discounts):
     now = time.time()
     require_tools = not args.no_require_tools
     dropped = {}
@@ -415,6 +455,13 @@ def build_candidates(models, args):
             continue
         if args.exclude_free and price_in == 0 and price_out == 0:
             drop("free")
+            continue
+        if not args.include_batch and model_id.endswith(":batch"):
+            drop("batch")
+            continue
+        discount = (discounts or {}).get(model_id)
+        if args.discount and not discount:
+            drop("no discount")
             continue
         modality = (model.get("architecture") or {}).get("modality") or ""
         output_modality = (
@@ -454,6 +501,7 @@ def build_candidates(models, args):
                 "price_out": price_out_m,
                 "blended": blended_m,
                 "age_days": age_days,
+                "discount": discount,
             }
         )
 
@@ -552,8 +600,22 @@ def fmt_age(age_days) -> str:
     return f"{age_days:.0f}d"
 
 
+def fmt_discount(value) -> str:
+    return f"{value:.0%}" if value else "--"
+
+
 def print_table(top, total_candidates, weights, quality_note):
-    headers = ["RANK", "MODEL", "QUAL", "$IN/M", "$OUT/M", "CTX", "AGE", "SCORE"]
+    headers = [
+        "RANK",
+        "MODEL",
+        "QUAL",
+        "$IN/M",
+        "$OUT/M",
+        "DISC",
+        "CTX",
+        "AGE",
+        "SCORE",
+    ]
     rows = []
     for rank, cand in enumerate(top, 1):
         rows.append(
@@ -563,6 +625,7 @@ def print_table(top, total_candidates, weights, quality_note):
                 "-" if cand["quality"] is None else f"{cand['quality']:.1f}",
                 fmt_price(cand["price_in"]),
                 fmt_price(cand["price_out"]),
+                fmt_discount(cand["discount"]),
                 fmt_context(cand["context"]),
                 fmt_age(cand["age_days"]),
                 f"{cand['score']:.3f}",
@@ -595,7 +658,7 @@ def print_table(top, total_candidates, weights, quality_note):
     )
     print(
         "quality: Artificial Analysis intelligence index (- = unknown); prices in USD per 1M tokens; "
-        "AGE = time since listed on OpenRouter"
+        "DISC = active discount; AGE = time since listed on OpenRouter"
     )
 
 
@@ -609,6 +672,7 @@ def print_json(top):
             "input_usd_per_m": round(cand["price_in"], 6),
             "output_usd_per_m": round(cand["price_out"], 6),
             "blended_usd_per_m": round(cand["blended"], 6),
+            "discount": round(cand["discount"], 4) if cand["discount"] else None,
             "context_tokens": cand["context"],
             "age_days": round(cand["age_days"], 1)
             if cand["age_days"] is not None
@@ -694,6 +758,16 @@ def parse_args(argv=None):
         help="drop zero-cost listings such as rate-limited :free variants",
     )
     parser.add_argument(
+        "--include-batch",
+        action="store_true",
+        help="keep ':batch' variants (asynchronous completion; cheaper but unsuitable for interactive agents)",
+    )
+    parser.add_argument(
+        "--discount",
+        action="store_true",
+        help="only list models with an active discount",
+    )
+    parser.add_argument(
         "--no-cache",
         action="store_true",
         help="bypass the local response cache and refetch",
@@ -729,10 +803,11 @@ def main(argv=None) -> int:
 
 
 def run(args, models, or_cached) -> int:
+    discounts, disc_cached = fetch_discount_map(args)
     aa_entries, aa_source, aa_cached = fetch_aa_entries(args)
     exact, fuzzy = build_aa_lookup(aa_entries)
 
-    candidates, dropped = build_candidates(models, args)
+    candidates, dropped = build_candidates(models, args, discounts)
     if not candidates:
         warn(
             f"no models satisfy the filters (min-context={args.min_context}, "
@@ -775,6 +850,8 @@ def run(args, models, or_cached) -> int:
         source_note = []
         if or_cached:
             source_note.append("catalog cached")
+        if disc_cached:
+            source_note.append("discounts cached")
         if aa_cached and aa_source:
             source_note.append("quality cached")
         if source_note:

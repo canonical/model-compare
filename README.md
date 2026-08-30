@@ -78,8 +78,9 @@ with priority-dependent weights:
 
 Below-minimum context, non-text outputs (image/audio), listings without
 tool-calling support (`--no-require-tools` to relax), unparseable/negative
-prices, expired listings, and (with `--exclude-free`) rate-limited `:free`
-variants.
+prices, expired listings, `:batch` variants (asynchronous completion — no
+good for interactive agents; `--include-batch` to keep them), and (with
+`--exclude-free`) rate-limited `:free` variants.
 
 ## Artificial Analysis data, in short
 
@@ -97,6 +98,20 @@ honored) with a 6-hour TTL (`--cache-ttl`); `--no-cache` forces a refetch. The
 cache keeps repeated invocations (e.g. in shell prompts or wrappers) fast and
 polite.
 
+## Discounts
+
+The `DISC` column and the `--discount` filter use the same data as the
+website's [`?discount=true` model filter](https://openrouter.ai/models?discount=true):
+OpenRouter's frontend models API reports, per model variant, the fraction by
+which the listed price is currently discounted (e.g. `75%`). The endpoint is
+undocumented, so the tool degrades gracefully — if it breaks, every model
+shows `--` and `--discount` returns nothing.
+
+Ranking always uses the listed (undiscounted) prices; the discount is shown
+as information. Variants are matched individually, so a `:batch` twin of a
+discounted model only shows a discount when that variant itself is
+discounted.
+
 ## Options
 
 | flag | default | meaning |
@@ -112,14 +127,17 @@ polite.
 | `--quality-ref N` | 70 | index counting as full quality score |
 | `--aa-api-key KEY` | `$AA_API_KEY` | Artificial Analysis API key |
 | `--exclude-free` | off | drop `:free` variants |
+| `--include-batch` | off | keep `:batch` (async completion) variants |
+| `--discount` | off | only models with an active discount |
 | `--no-require-tools` | off | allow models without tool calling |
 | `--no-cache` / `--cache-ttl S` | 6h | cache control |
 
 ## Tests
 
 A `pytest` suite in `test_model_compare.py` covers the pure logic — input
-coercion, candidate filtering, scoring math, and Artificial Analysis
-matching — with no network access (external calls are stubbed). Run it with:
+coercion, candidate filtering, scoring math, discount parsing, and
+Artificial Analysis matching — with no network access (external calls are
+stubbed). Run it with:
 
 ```console
 $ pytest

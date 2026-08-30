@@ -7,6 +7,7 @@ These cover pure functions only -- no network access is performed. Run with:
 
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 
 import pytest
@@ -29,6 +30,8 @@ def make_args(**overrides):
         aa_api_key=None,
         no_require_tools=True,
         exclude_free=False,
+        include_batch=False,
+        discount=False,
         no_cache=True,
         cache_ttl=0,
     )
@@ -78,7 +81,9 @@ def test_coerce_int_custom_default():
 def test_build_candidates_survives_string_context_length():
     # Regression: string context_length must not raise a TypeError.
     models = [make_model(context_length="2000000")]
-    candidates, dropped = mc.build_candidates(models, make_args(min_context=1_000_000))
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=1_000_000), {}
+    )
     assert len(candidates) == 1
     assert candidates[0]["context"] == 2_000_000
     assert "context" not in dropped
@@ -91,61 +96,247 @@ def test_build_candidates_survives_string_context_length():
 
 def test_build_candidates_drops_malformed_id():
     models = [make_model(id="no-slash")]
-    candidates, dropped = mc.build_candidates(models, make_args())
+    candidates, dropped = mc.build_candidates(models, make_args(), {})
     assert candidates == []
     assert dropped["malformed id"] == 1
 
 
 def test_build_candidates_drops_low_context():
     models = [make_model(context_length=1000)]
-    candidates, dropped = mc.build_candidates(models, make_args(min_context=1_000_000))
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=1_000_000), {}
+    )
     assert candidates == []
     assert dropped["context"] == 1
 
 
 def test_build_candidates_drops_bad_pricing():
     models = [make_model(pricing={"prompt": "x", "completion": "0.1"})]
-    candidates, dropped = mc.build_candidates(models, make_args())
+    candidates, dropped = mc.build_candidates(models, make_args(), {})
     assert candidates == []
     assert dropped["pricing"] == 1
 
 
 def test_build_candidates_drops_negative_pricing():
     models = [make_model(pricing={"prompt": "-1", "completion": "0.1"})]
-    candidates, dropped = mc.build_candidates(models, make_args())
+    candidates, dropped = mc.build_candidates(models, make_args(), {})
     assert candidates == []
     assert dropped["pricing"] == 1
 
 
 def test_build_candidates_exclude_free():
     models = [make_model(pricing={"prompt": "0", "completion": "0"})]
-    candidates, dropped = mc.build_candidates(models, make_args(exclude_free=True))
+    candidates, dropped = mc.build_candidates(models, make_args(exclude_free=True), {})
     assert candidates == []
     assert dropped["free"] == 1
 
 
 def test_build_candidates_drops_non_text_output():
     models = [make_model(architecture={"modality": "text->image"})]
-    candidates, dropped = mc.build_candidates(models, make_args())
+    candidates, dropped = mc.build_candidates(models, make_args(), {})
     assert candidates == []
     assert dropped["modality"] == 1
 
 
 def test_build_candidates_requires_tools_when_asked():
     models = [make_model(supported_parameters=["tools"])]  # missing tool_choice
-    candidates, dropped = mc.build_candidates(models, make_args(no_require_tools=False))
+    candidates, dropped = mc.build_candidates(
+        models, make_args(no_require_tools=False), {}
+    )
     assert candidates == []
     assert dropped["tool calling"] == 1
 
 
 def test_build_candidates_blended_price():
     models = [make_model(pricing={"prompt": "0.000001", "completion": "0.000005"})]
-    candidates, _ = mc.build_candidates(models, make_args(input_share=0.75))
+    candidates, _ = mc.build_candidates(models, make_args(input_share=0.75), {})
     cand = candidates[0]
     assert cand["price_in"] == pytest.approx(1.0)
     assert cand["price_out"] == pytest.approx(5.0)
     # 0.75*1 + 0.25*5 = 2.0
     assert cand["blended"] == pytest.approx(2.0)
+
+
+# ---------------------------------------------------------------------------
+# batch variants and discounts
+# ---------------------------------------------------------------------------
+
+
+def test_build_candidates_drops_batch_by_default():
+    models = [make_model(id="acme/model-a:batch")]
+    candidates, dropped = mc.build_candidates(models, make_args(), {})
+    assert candidates == []
+    assert dropped["batch"] == 1
+
+
+def test_build_candidates_keeps_batch_with_include_batch():
+    models = [make_model(id="acme/model-a:batch")]
+    candidates, dropped = mc.build_candidates(models, make_args(include_batch=True), {})
+    assert [c["id"] for c in candidates] == ["acme/model-a:batch"]
+    assert not dropped
+
+
+def test_build_candidates_discount_filter_keeps_discounted_only():
+    models = [make_model(id="acme/discounted"), make_model(id="acme/normal")]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(discount=True), {"acme/discounted": 0.5}
+    )
+    assert [c["id"] for c in candidates] == ["acme/discounted"]
+    assert dropped["no discount"] == 1
+    assert candidates[0]["discount"] == 0.5
+
+
+def test_build_candidates_discount_filter_without_data_drops_all():
+    models = [make_model()]
+    candidates, dropped = mc.build_candidates(models, make_args(discount=True), {})
+    assert candidates == []
+    assert dropped["no discount"] == 1
+
+
+def test_build_candidates_stores_discount():
+    models = [make_model(id="acme/model-a")]
+    candidates, _ = mc.build_candidates(models, make_args(), {"acme/model-a": 0.75})
+    assert candidates[0]["discount"] == 0.75
+
+
+# ---------------------------------------------------------------------------
+# discount data source (OpenRouter frontend models API)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_discount_map_builds_variant_aware_keys(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    payload = {
+        "data": {
+            "models": [
+                {
+                    "slug": "acme/a",
+                    "endpoint": {
+                        "variant": "standard",
+                        "pricing": {"discount": 0.5, "prompt": "0.1"},
+                    },
+                },
+                {
+                    "slug": "acme/b",
+                    "endpoint": {"variant": "free", "pricing": {"discount": 0}},
+                },
+                {
+                    "slug": "acme/c",
+                    "endpoint": {
+                        "variant": "batch",
+                        "pricing": {"discount": 0.75},
+                    },
+                },
+                {
+                    "slug": "~acme/private",
+                    "endpoint": {
+                        "variant": "standard",
+                        "pricing": {"discount": 0.9},
+                    },
+                },
+                {"slug": "acme/no-endpoint", "endpoint": None},
+                {
+                    "slug": "acme/no-discount-field",
+                    "endpoint": {"variant": "standard", "pricing": {}},
+                },
+            ]
+        }
+    }
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    result, cached = mc.fetch_discount_map(make_args(no_cache=True))
+    assert cached is False
+    assert result == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
+
+
+def test_fetch_discount_map_caches_result(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+
+    def fake_fetch(*a, **k):
+        calls.append(1)
+        return {
+            "data": {
+                "models": [
+                    {
+                        "slug": "acme/a",
+                        "endpoint": {
+                            "variant": "standard",
+                            "pricing": {"discount": 0.25},
+                        },
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    args = make_args(no_cache=False, cache_ttl=3600)
+    first, cached1 = mc.fetch_discount_map(args)
+    second, cached2 = mc.fetch_discount_map(args)
+    assert len(calls) == 1
+    assert (cached1, cached2) == (False, True)
+    assert first == second == {"acme/a": 0.25}
+
+
+def test_fetch_discount_map_fetch_failure_returns_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(mc, "fetch_json", boom)
+    result, cached = mc.fetch_discount_map(make_args(no_cache=True))
+    assert result == {}
+    assert cached is False
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, "--"),
+        (0, "--"),
+        (0.0, "--"),
+        (0.5, "50%"),
+        (0.561, "56%"),
+        (0.75, "75%"),
+        (0.049, "5%"),
+    ],
+)
+def test_fmt_discount(value, expected):
+    assert mc.fmt_discount(value) == expected
+
+
+def test_print_table_shows_disc_column(capsys):
+    top = [_cand("a/x", 1.0)]
+    top[0].update({"score": 0.9, "quality": None, "discount": 0.5})
+    mc.print_table(top, 1, {"price": 1.0}, "note")
+    out = capsys.readouterr().out
+    assert "DISC" in out
+    assert "50%" in out
+
+
+def test_print_table_dash_without_discount(capsys):
+    top = [_cand("a/x", 1.0)]
+    top[0].update({"score": 0.9, "quality": None, "discount": None})
+    mc.print_table(top, 1, {"price": 1.0}, "note")
+    out = capsys.readouterr().out
+    assert "DISC" in out
+    assert "--" in out
+
+
+def test_print_json_includes_discount(capsys):
+    rows = [_cand("a/x", 1.0)]
+    rows[0].update({"score": 0.9, "discount": 0.25})
+    mc.print_json(rows)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["discount"] == 0.25
+
+
+def test_print_json_discount_null_when_absent(capsys):
+    rows = [_cand("a/x", 1.0)]
+    rows[0].update({"score": 0.9, "discount": None})
+    mc.print_json(rows)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["discount"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +353,9 @@ def _cand(model_id, blended, context=2_000_000, age_days: float | None = 0.0):
         "price_out": blended,
         "blended": blended,
         "age_days": age_days,
+        "quality": None,
+        "discount": None,
+        "score": 0.0,
     }
 
 
