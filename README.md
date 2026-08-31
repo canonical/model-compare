@@ -21,6 +21,30 @@ $ ./model_compare.py --priority price --top 3
 No dependencies beyond Python 3.10+ (stdlib only). Exit codes: `0` success,
 `1` fetch failure, `2` no candidates survive the filters.
 
+## Team usage: published picks
+
+A daily [GitHub Actions workflow](.github/workflows/publish.yml) publishes
+[the picks](https://canonical.github.io/model-compare/) — a top-10 table per
+priority (`balanced` / `price` / `quality`) with copy buttons for the current
+#1 model, the ready-made `opencode --model …` command, and the curl variant —
+plus a machine-readable `best.txt` for teammates who don't want to run the
+script:
+
+```console
+$ opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"
+```
+
+Tip: save it as an alias so every launch picks up the fresh value:
+
+```console
+$ alias oc-best='opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"'
+```
+
+One-time setup: enable **Settings → Pages → Source: GitHub Actions**. The
+build (`build_site_data.py`) validates every payload and fails loudly, so a
+broken run never deploys a broken site. `best.txt` always serves the
+*balanced* #1, regardless of which tab the page shows.
+
 ## How it works
 
 ### Data sources

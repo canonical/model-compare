@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'"
+    />
+    <title>model-compare — best value-for-money LLMs</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family:
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+        max-width: 60rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        line-height: 1.45;
+      }
+      h1 {
+        font-size: 1.4rem;
+        margin-bottom: 0.25rem;
+      }
+      .sub {
+        color: gray;
+        margin-top: 0;
+        font-size: 0.95rem;
+      }
+      .tabs {
+        display: flex;
+        gap: 0.5rem;
+        margin: 1.25rem 0 0.75rem;
+      }
+      .tabs button {
+        border: 1px solid #999;
+        background: transparent;
+        color: inherit;
+        padding: 0.35rem 0.9rem;
+        border-radius: 999px;
+        cursor: pointer;
+        font: inherit;
+      }
+      .tabs button.active {
+        background: #333;
+        color: #fff;
+        border-color: #333;
+      }
+      .actions button {
+        border: 1px solid #333;
+        background: #333;
+        color: #fff;
+        padding: 0.4rem 0.9rem;
+        margin-top: 1rem;
+        border-radius: 6px;
+        cursor: pointer;
+        font: inherit;
+      }
+      .actions button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .hint {
+        font-size: 0.85rem;
+        color: gray;
+        margin: 0.6rem 0 0;
+      }
+      code {
+        font-family: ui-monospace, monospace;
+        font-size: 0.9em;
+      }
+      .status {
+        color: #b00;
+        margin: 0.75rem 0;
+      }
+      #table {
+        border-collapse: collapse;
+        width: 100%;
+        margin-top: 1rem;
+        font-family: ui-monospace, monospace;
+        font-size: 0.9rem;
+      }
+      #table th,
+      #table td {
+        padding: 0.3rem 0.6rem;
+        text-align: right;
+        border-bottom: 1px solid #ddd;
+        white-space: nowrap;
+      }
+      #table th:nth-child(2),
+      #table td:nth-child(2) {
+        text-align: left;
+      }
+      #table thead th {
+        border-bottom: 2px solid #333;
+      }
+      #copybuttons {
+        border: none;
+      }
+      #copybuttons td:nth-child(2) {
+        padding-top: 0.7rem;
+      }
+      footer {
+        margin-top: 1.5rem;
+        font-size: 0.85rem;
+        color: gray;
+      }
+      a {
+        color: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>model-compare</h1>
+    <p class="sub">
+      Best value-for-money LLM on OpenRouter, refreshed daily by
+      <a href="https://github.com/canonical/model-compare"
+        >canonical/model-compare</a
+      >.
+    </p>
+
+    <p class="hint">
+      Tip: save the <code>curl</code> variant as a shell alias, so every launch
+      picks up the fresh value:
+    </p>
+    <p class="hint">
+      <code id="alias-hint"></code>
+    </p>
+    <p class="hint">
+      <code>best.txt</code> always serves the <em>balanced</em> #1, regardless
+      of the tab shown here.
+    </p>
+
+    <div class="tabs" id="tabs">
+      <button type="button" data-priority="balanced" class="active">
+        balanced
+      </button>
+      <button type="button" data-priority="price">price</button>
+      <button type="button" data-priority="quality">quality</button>
+    </div>
+
+    <p class="status" id="status" hidden></p>
+    <table id="table">
+      <thead>
+        <tr>
+          <th>RANK</th>
+          <th>MODEL</th>
+          <th>QUAL</th>
+          <th>$IN/M</th>
+          <th>$OUT/M</th>
+          <th>DISC</th>
+          <th>CTX</th>
+          <th>AGE</th>
+          <th>SCORE</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+
+    <div class="actions">
+      <p class="hint">Copy to clipboard:</p>
+      <table id="copybuttons">
+        <tr>
+          <td>
+            <button type="button" id="copy-model" disabled>#1 model</button>
+          </td>
+          <td><code id="model-value">—</code></td>
+        </tr>
+        <tr>
+          <td>
+            <button type="button" id="copy-command" disabled>
+              OpenCode with #1
+            </button>
+          </td>
+          <td><code id="command-value">—</code></td>
+        </tr>
+        <tr>
+          <td>
+            <button type="button" id="copy-curl" disabled>
+              OpenCode with curl
+            </button>
+          </td>
+          <td>
+            <code
+              >opencode --model "$(curl -fsSL
+              https://canonical.github.io/model-compare/best.txt)"</code
+            >
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <footer>
+      data generated <span id="generated">—</span> · source:
+      <a href="https://github.com/canonical/model-compare"
+        >canonical/model-compare</a
+      >
+    </footer>
+
+    <script>
+      "use strict";
+      var BEST_URL = "https://canonical.github.io/model-compare/best.txt";
+      var OPENCODE_PREFIX = "opencode --model ";
+      var CURL_COMMAND = OPENCODE_PREFIX + '"$(curl -fsSL ' + BEST_URL + ')"';
+
+      var els = {
+        tbody: document.getElementById("tbody"),
+        status: document.getElementById("status"),
+        generated: document.getElementById("generated"),
+        copyModel: document.getElementById("copy-model"),
+        copyCommand: document.getElementById("copy-command"),
+        copyCurl: document.getElementById("copy-curl"),
+        modelValue: document.getElementById("model-value"),
+        commandValue: document.getElementById("command-value"),
+        aliasHint: document.getElementById("alias-hint"),
+      };
+      var data = null;
+      var current = "balanced";
+
+      // NOTE: fmtPrice/fmtContext/fmtAge mirror the fmt_* helpers in
+      // model_compare.py -- display-only duplication, keep them in sync.
+      function fmtPrice(v) {
+        if (v === 0) return "0";
+        if (v >= 100) return v.toFixed(0);
+        if (v >= 10) return v.toFixed(1);
+        if (v >= 1) return v.toFixed(2);
+        return v.toFixed(3);
+      }
+
+      function fmtContext(v) {
+        if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
+        if (v >= 1e3) return Math.round(v / 1e3) + "K";
+        return String(v);
+      }
+
+      function fmtAge(d) {
+        if (d === null || d === undefined) return "-";
+        if (d >= 365) return (d / 365).toFixed(1) + "y";
+        if (d >= 60) return Math.round(d / 30.44) + "mo";
+        return Math.round(d) + "d";
+      }
+
+      function topModel() {
+        var rows = data && data.priorities[current];
+        return rows && rows.length ? rows[0].model : null;
+      }
+
+      function copyText(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          return navigator.clipboard.writeText(text).then(
+            function () {
+              return true;
+            },
+            function () {
+              return legacyCopy(text);
+            },
+          );
+        }
+        return Promise.resolve(legacyCopy(text));
+      }
+
+      function legacyCopy(text) {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        var ok = false;
+        try {
+          ok = document.execCommand("copy");
+        } catch (err) {
+          ok = false;
+        }
+        ta.remove();
+        return ok;
+      }
+
+      function flash(btn, ok) {
+        var old = btn.textContent;
+        btn.textContent = ok ? "Copied!" : "Copy failed";
+        setTimeout(function () {
+          btn.textContent = old;
+        }, 1500);
+      }
+
+      function wireCopy(btn, getText) {
+        btn.addEventListener("click", function () {
+          var text = getText();
+          if (text === null || text === undefined) return;
+          copyText(text).then(function (ok) {
+            flash(btn, ok);
+          });
+        });
+      }
+
+      function render() {
+        var rows = (data && data.priorities[current]) || [];
+        els.tbody.textContent = "";
+        rows.forEach(function (row, i) {
+          var tr = document.createElement("tr");
+          var cells = [
+            String(i + 1),
+            row.model,
+            row.quality_index === null ? "-" : row.quality_index.toFixed(1),
+            fmtPrice(row.input_usd_per_m),
+            fmtPrice(row.output_usd_per_m),
+            row.discount === null ? "--" : Math.round(row.discount * 100) + "%",
+            fmtContext(row.context_tokens),
+            fmtAge(row.age_days),
+            row.score.toFixed(3),
+          ];
+          cells.forEach(function (cell) {
+            var td = document.createElement("td");
+            td.textContent = cell;
+            tr.appendChild(td);
+          });
+          els.tbody.appendChild(tr);
+        });
+        var model = topModel();
+        var hasTop = model !== null;
+        els.copyModel.disabled = !hasTop;
+        els.copyCommand.disabled = !hasTop;
+        els.modelValue.textContent = model === null ? "—" : model;
+        els.commandValue.textContent =
+          model === null ? "—" : OPENCODE_PREFIX + model;
+      }
+
+      function init() {
+        els.aliasHint.textContent = "alias oc-best='" + CURL_COMMAND + "'";
+        els.copyCurl.disabled = false;
+        wireCopy(els.copyModel, topModel);
+        wireCopy(els.copyCommand, function () {
+          var model = topModel();
+          return model === null ? null : OPENCODE_PREFIX + model;
+        });
+        wireCopy(els.copyCurl, function () {
+          return CURL_COMMAND;
+        });
+
+        Array.prototype.forEach.call(
+          document.querySelectorAll("#tabs button"),
+          function (btn) {
+            btn.addEventListener("click", function () {
+              current = btn.dataset.priority;
+              Array.prototype.forEach.call(
+                document.querySelectorAll("#tabs button"),
+                function (b) {
+                  b.classList.toggle("active", b === btn);
+                },
+              );
+              if (data) render();
+            });
+          },
+        );
+
+        fetch("data.json", { cache: "no-cache" })
+          .then(function (r) {
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            return r.json();
+          })
+          .then(function (payload) {
+            data = payload;
+            els.generated.textContent = new Date(
+              data.generated_at,
+            ).toLocaleString();
+            render();
+          })
+          .catch(function (err) {
+            els.status.textContent = "Could not load data.json: " + err.message;
+            els.status.hidden = false;
+          });
+      }
+
+      init();
+    </script>
+  </body>
+</html>
