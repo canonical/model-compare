@@ -807,6 +807,131 @@ def test_aa_api_depth_guard_does_not_recurse_forever(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# aa_scrape_entries (JSON-LD page scrape fallback)
+# ---------------------------------------------------------------------------
+
+
+def _aa_html(*models):
+    """Build a minimal artificialanalysis.ai page with JSON-LD benchmark data."""
+    data = [
+        {
+            "label": label,
+            "detailsUrl": f"https://artificialanalysis.ai/models/{slug}",
+            "artificialAnalysisIntelligenceIndex": index,
+        }
+        for slug, label, index in models
+    ]
+    block = json.dumps({"@type": "ItemList", "data": data})
+    return (
+        "<html><head>"
+        '<script type="application/ld+json">' + block + "</script>"
+        "</head><body></body></html>"
+    ).encode("utf-8")
+
+
+def test_aa_scrape_extracts_index(monkeypatch):
+    html = _aa_html(
+        ("gpt-4o", "GPT-4o", 60.0),
+        ("claude-3-5-sonnet", "Claude 3.5 Sonnet", 55.0),
+    )
+    monkeypatch.setattr(mc, "http_get", lambda *a, **k: html)
+    entries = mc.aa_scrape_entries()
+    by_key = {e["key"]: e for e in entries}
+    assert by_key["gpt-4o"]["index"] == 60.0
+    assert by_key["gpt-4o"]["name"] == "GPT-4o"
+    assert by_key["claude-3-5-sonnet"]["index"] == 55.0
+
+
+def test_aa_scrape_skips_entries_without_index(monkeypatch):
+    html = _aa_html(("gpt-4o", "GPT-4o", 60.0))
+    # Add a second JSON-LD block without the index field; must be ignored.
+    noise = b'<script type="application/ld+json">{"@type":"ItemList","data":[{"label":"No Index"}]}</script>'
+    monkeypatch.setattr(mc, "http_get", lambda *a, **k: html + noise)
+    entries = mc.aa_scrape_entries()
+    assert [e["key"] for e in entries] == ["gpt-4o"]
+
+
+def test_aa_scrape_bad_json_block_is_tolerated(monkeypatch):
+    html = _aa_html(("gpt-4o", "GPT-4o", 60.0))
+    bad = b'<script type="application/ld+json">{not valid json}</script>'
+    monkeypatch.setattr(mc, "http_get", lambda *a, **k: html + bad)
+    entries = mc.aa_scrape_entries()
+    assert [e["key"] for e in entries] == ["gpt-4o"]
+
+
+# ---------------------------------------------------------------------------
+# realistic OpenRouter frontend payload (discount + ZDR key shape)
+# ---------------------------------------------------------------------------
+
+
+def _realistic_openrouter_payload():
+    """Mirror the real frontend `models/find` response shape with real slugs."""
+    return {
+        "data": {
+            "models": [
+                {
+                    "slug": "openai/gpt-4o",
+                    "endpoint": {
+                        "variant": "standard",
+                        "pricing": {"prompt": "0.1", "discount": 0.5},
+                    },
+                },
+                {
+                    "slug": "openai/gpt-4o",
+                    "endpoint": {
+                        "variant": "free",
+                        "pricing": {"prompt": "0", "discount": 0},
+                    },
+                },
+                {
+                    "slug": "anthropic/claude-sonnet-4-20250514",
+                    "endpoint": {
+                        "variant": "batch",
+                        "pricing": {"prompt": "0.1", "discount": 0.25},
+                    },
+                },
+                {
+                    "slug": "~acme/private",
+                    "endpoint": {
+                        "variant": "standard",
+                        "pricing": {"prompt": "0.1", "discount": 0.9},
+                    },
+                },
+            ]
+        }
+    }
+
+
+def test_fetch_discount_map_realistic_slugs(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        mc, "fetch_json", lambda *a, **k: _realistic_openrouter_payload()
+    )
+    result, cached = mc.fetch_discount_map(make_args(no_cache=True))
+    assert cached is False
+    # Real catalog ids use "provider/model" and ":variant" suffixes.
+    assert result == {
+        "openai/gpt-4o": 0.5,
+        "openai/gpt-4o:free": 0.0,
+        "anthropic/claude-sonnet-4-20250514:batch": 0.25,
+    }
+
+
+def test_fetch_zdr_set_realistic_slugs(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        mc, "fetch_json", lambda *a, **k: _realistic_openrouter_payload()
+    )
+    ids, cached = mc.fetch_zdr_set(make_args(no_cache=True))
+    assert cached is False
+    assert ids == {
+        "openai/gpt-4o",
+        "openai/gpt-4o:free",
+        "anthropic/claude-sonnet-4-20250514:batch",
+    }
+
+
+# ---------------------------------------------------------------------------
 # formatting helpers
 # ---------------------------------------------------------------------------
 

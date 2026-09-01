@@ -30,7 +30,7 @@ No dependencies beyond Python 3.10+ (stdlib only). Exit codes: `0` success,
 
 ## Team usage: published picks
 
-A daily [GitHub Actions workflow](.github/workflows/publish.yml) publishes
+A [GitHub Actions workflow](.github/workflows/publish.yml) publishes
 [the picks](https://canonical.github.io/model-compare/) — a top-10 table per
 priority (`balanced` / `price` / `quality`) with copy buttons for the current
 #1 model, the ready-made `opencode --model …` command, and the curl variant —
