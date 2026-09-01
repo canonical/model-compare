@@ -127,3 +127,20 @@ def test_main_fails_loudly_on_bad_best(tmp_path, capsys):
     assert bsd.main(argv) == 1
     assert "error:" in capsys.readouterr().err
     assert not (tmp_path / "data.json").exists()
+
+
+def test_main_rejects_duplicate_priority(tmp_path, capsys):
+    best_file = tmp_path / "best.txt"
+    best_file.write_text("acme/model-a\n")
+    f = tmp_path / "rows.json"
+    f.write_text(json.dumps([make_row()]))
+    out = tmp_path / "data.json"
+    argv = ["--best-file", str(best_file), "--output", str(out)]
+    for name in ("balanced", "price", "quality", "balanced"):
+        argv += ["--priority", f"{name}={f}"]
+    assert bsd.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "duplicate" in err
+    assert "balanced" in err
+    assert not out.exists()

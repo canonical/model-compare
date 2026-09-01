@@ -93,14 +93,22 @@ def main(argv=None) -> int:
         priorities = {}
         for pair in args.priority:
             name, rows = parse_priority_pair(pair)
+            if name in priorities:
+                raise ValueError(
+                    f"duplicate --priority {name!r} (want each priority once)"
+                )
             priorities[name] = rows
         data = build_data(best, priorities)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    with open(args.output, "w") as fh:
-        json.dump(data, fh, indent=2)
-        fh.write("\n")
+    try:
+        with open(args.output, "w") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

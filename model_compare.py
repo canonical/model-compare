@@ -153,8 +153,10 @@ def save_cache(name: str, payload) -> None:
         return
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as fh:
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w") as fh:
             json.dump({"fetched_at": time.time(), "payload": payload}, fh)
+        os.replace(tmp_path, path)
     except OSError as exc:
         warn(f"could not write cache: {exc}")
 
@@ -389,7 +391,7 @@ def aa_scrape_entries() -> list:
 def fetch_aa_entries(args):
     if not args.no_cache:
         cached = load_cache("aa-intelligence", args.cache_ttl)
-        if cached is not None:
+        if isinstance(cached, dict):
             return cached.get("entries", []), cached.get("source"), True
     api_key = args.aa_api_key or os.environ.get("AA_API_KEY")
     if api_key:
@@ -455,7 +457,7 @@ def match_quality(model, exact, fuzzy):
     display = PROVIDER_PREFIX_RE.sub("", name).strip()
     # Assumes model_id contains a "/" (provider/base). build_candidates drops
     # malformed ids upstream, so base is never empty here.
-    provider, _, base = model_id.split(":", 1)[0].partition("/")
+    _, _, base = model_id.split(":", 1)[0].partition("/")
 
     for tier, raw in (
         (0, model_id),

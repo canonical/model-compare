@@ -121,7 +121,7 @@
   <body>
     <h1>model-compare</h1>
     <p class="sub">
-      Best value-for-money LLM on OpenRouter, refreshed daily by
+      Best value-for-money LLM on OpenRouter, refreshed every 6 hrs by
       <a href="https://github.com/canonical/model-compare"
         >canonical/model-compare</a
       >.
@@ -189,10 +189,7 @@
             </button>
           </td>
           <td>
-            <code
-              >opencode --model "$(curl -fsSL
-              https://canonical.github.io/model-compare/best.txt)"</code
-            >
+            <code id="curl-value"></code>
           </td>
         </tr>
       </table>
@@ -207,7 +204,7 @@
 
     <script>
       "use strict";
-      var BEST_URL = "https://canonical.github.io/model-compare/best.txt";
+      var BEST_URL = new URL("best.txt", window.location.href).href;
       var OPENCODE_PREFIX = "opencode --model ";
       var CURL_COMMAND = OPENCODE_PREFIX + '"$(curl -fsSL ' + BEST_URL + ')"';
 
@@ -221,6 +218,7 @@
         modelValue: document.getElementById("model-value"),
         commandValue: document.getElementById("command-value"),
         aliasHint: document.getElementById("alias-hint"),
+        curlValue: document.getElementById("curl-value"),
       };
       var data = null;
       var current = "balanced";
@@ -338,6 +336,7 @@
 
       function init() {
         els.aliasHint.textContent = "alias oc-best='" + CURL_COMMAND + "'";
+        els.curlValue.textContent = CURL_COMMAND;
         els.copyCurl.disabled = false;
         wireCopy(els.copyModel, topModel);
         wireCopy(els.copyCommand, function () {
