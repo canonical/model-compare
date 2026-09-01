@@ -33,6 +33,7 @@ def make_args(**overrides):
         exclude_free=False,
         include_batch=False,
         discount=False,
+        no_zdr=False,
         no_cache=True,
         cache_ttl=0,
     )
@@ -83,7 +84,7 @@ def test_build_candidates_survives_string_context_length():
     # Regression: string context_length must not raise a TypeError.
     models = [make_model(context_length="2000000")]
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=1_000_000), {}
+        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}
     )
     assert len(candidates) == 1
     assert candidates[0]["context"] == 2_000_000
@@ -97,7 +98,7 @@ def test_build_candidates_survives_string_context_length():
 
 def test_build_candidates_drops_malformed_id():
     models = [make_model(id="no-slash")]
-    candidates, dropped = mc.build_candidates(models, make_args(), {})
+    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"})
     assert candidates == []
     assert dropped["malformed id"] == 1
 
@@ -105,7 +106,7 @@ def test_build_candidates_drops_malformed_id():
 def test_build_candidates_drops_low_context():
     models = [make_model(context_length=1000)]
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=1_000_000), {}
+        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}
     )
     assert candidates == []
     assert dropped["context"] == 1
@@ -113,28 +114,30 @@ def test_build_candidates_drops_low_context():
 
 def test_build_candidates_drops_bad_pricing():
     models = [make_model(pricing={"prompt": "x", "completion": "0.1"})]
-    candidates, dropped = mc.build_candidates(models, make_args(), {})
+    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"})
     assert candidates == []
     assert dropped["pricing"] == 1
 
 
 def test_build_candidates_drops_negative_pricing():
     models = [make_model(pricing={"prompt": "-1", "completion": "0.1"})]
-    candidates, dropped = mc.build_candidates(models, make_args(), {})
+    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"})
     assert candidates == []
     assert dropped["pricing"] == 1
 
 
 def test_build_candidates_exclude_free():
     models = [make_model(pricing={"prompt": "0", "completion": "0"})]
-    candidates, dropped = mc.build_candidates(models, make_args(exclude_free=True), {})
+    candidates, dropped = mc.build_candidates(
+        models, make_args(exclude_free=True), {}, {"acme/model-a"}
+    )
     assert candidates == []
     assert dropped["free"] == 1
 
 
 def test_build_candidates_drops_non_text_output():
     models = [make_model(architecture={"modality": "text->image"})]
-    candidates, dropped = mc.build_candidates(models, make_args(), {})
+    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"})
     assert candidates == []
     assert dropped["modality"] == 1
 
@@ -142,7 +145,7 @@ def test_build_candidates_drops_non_text_output():
 def test_build_candidates_requires_tools_when_asked():
     models = [make_model(supported_parameters=["tools"])]  # missing tool_choice
     candidates, dropped = mc.build_candidates(
-        models, make_args(no_require_tools=False), {}
+        models, make_args(no_require_tools=False), {}, {"acme/model-a"}
     )
     assert candidates == []
     assert dropped["tool calling"] == 1
@@ -150,7 +153,9 @@ def test_build_candidates_requires_tools_when_asked():
 
 def test_build_candidates_blended_price():
     models = [make_model(pricing={"prompt": "0.000001", "completion": "0.000005"})]
-    candidates, _ = mc.build_candidates(models, make_args(input_share=0.75), {})
+    candidates, _ = mc.build_candidates(
+        models, make_args(input_share=0.75), {}, {"acme/model-a"}
+    )
     cand = candidates[0]
     assert cand["price_in"] == pytest.approx(1.0)
     assert cand["price_out"] == pytest.approx(5.0)
@@ -165,14 +170,16 @@ def test_build_candidates_blended_price():
 
 def test_build_candidates_drops_batch_by_default():
     models = [make_model(id="acme/model-a:batch")]
-    candidates, dropped = mc.build_candidates(models, make_args(), {})
+    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"})
     assert candidates == []
     assert dropped["batch"] == 1
 
 
 def test_build_candidates_keeps_batch_with_include_batch():
     models = [make_model(id="acme/model-a:batch")]
-    candidates, dropped = mc.build_candidates(models, make_args(include_batch=True), {})
+    candidates, dropped = mc.build_candidates(
+        models, make_args(include_batch=True), {}, {"acme/model-a:batch"}
+    )
     assert [c["id"] for c in candidates] == ["acme/model-a:batch"]
     assert not dropped
 
@@ -180,7 +187,7 @@ def test_build_candidates_keeps_batch_with_include_batch():
 def test_build_candidates_discount_filter_keeps_discounted_only():
     models = [make_model(id="acme/discounted"), make_model(id="acme/normal")]
     candidates, dropped = mc.build_candidates(
-        models, make_args(discount=True), {"acme/discounted": 0.5}
+        models, make_args(discount=True), {"acme/discounted": 0.5}, {"acme/discounted"}
     )
     assert [c["id"] for c in candidates] == ["acme/discounted"]
     assert dropped["no discount"] == 1
@@ -189,7 +196,9 @@ def test_build_candidates_discount_filter_keeps_discounted_only():
 
 def test_build_candidates_discount_filter_without_data_drops_all():
     models = [make_model()]
-    candidates, dropped = mc.build_candidates(models, make_args(discount=True), {})
+    candidates, dropped = mc.build_candidates(
+        models, make_args(discount=True), {}, {"acme/model-a"}
+    )
     assert candidates == []
     assert dropped["no discount"] == 1
 
@@ -197,7 +206,7 @@ def test_build_candidates_discount_filter_without_data_drops_all():
 def test_build_candidates_discount_filter_ignores_negligible_discount():
     models = [make_model(id="acme/sliver")]
     candidates, dropped = mc.build_candidates(
-        models, make_args(discount=True), {"acme/sliver": 0.004}
+        models, make_args(discount=True), {"acme/sliver": 0.004}, {"acme/sliver"}
     )
     assert candidates == []
     assert dropped["no discount"] == 1
@@ -205,7 +214,9 @@ def test_build_candidates_discount_filter_ignores_negligible_discount():
 
 def test_build_candidates_stores_discount():
     models = [make_model(id="acme/model-a")]
-    candidates, _ = mc.build_candidates(models, make_args(), {"acme/model-a": 0.75})
+    candidates, _ = mc.build_candidates(
+        models, make_args(), {"acme/model-a": 0.75}, {"acme/model-a"}
+    )
     assert candidates[0]["discount"] == 0.75
 
 
@@ -349,6 +360,167 @@ def test_fetch_discount_map_treats_empty_cached_map_as_miss(monkeypatch, tmp_pat
     assert result == {"acme/a": 0.25}
 
 
+# ---------------------------------------------------------------------------
+# ZDR (zero data retention) filter
+# ---------------------------------------------------------------------------
+
+
+def test_build_candidates_drops_non_zdr_by_default():
+    models = [make_model(id="acme/zdr"), make_model(id="acme/plain")]
+    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/zdr"})
+    assert [c["id"] for c in candidates] == ["acme/zdr"]
+    assert dropped["not ZDR"] == 1
+
+
+def test_build_candidates_no_zdr_considers_all():
+    models = [make_model(id="acme/zdr"), make_model(id="acme/plain")]
+    candidates, dropped = mc.build_candidates(models, make_args(no_zdr=True), {}, set())
+    assert len(candidates) == 2
+    assert not dropped
+
+
+def test_build_candidates_zdr_variant_keys():
+    # a :batch variant counts as ZDR only if that variant itself is listed
+    models = [make_model(id="acme/m:batch"), make_model(id="acme/n:batch")]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(include_batch=True), {}, {"acme/m:batch"}
+    )
+    assert [c["id"] for c in candidates] == ["acme/m:batch"]
+    assert dropped["not ZDR"] == 1
+
+
+def test_fetch_zdr_set_builds_variant_keys(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    payload = {
+        "data": {
+            "models": [
+                {
+                    "slug": "acme/a",
+                    "endpoint": {
+                        "variant": "standard",
+                        "pricing": {"prompt": "0.1"},
+                    },
+                },
+                {"slug": "acme/b", "endpoint": {"variant": "batch", "pricing": {}}},
+                {"slug": "~acme/private", "endpoint": {"variant": "standard"}},
+                {"slug": "acme/no-endpoint", "endpoint": None},
+            ]
+        }
+    }
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    ids, cached = mc.fetch_zdr_set(make_args(no_cache=True))
+    assert cached is False
+    # membership comes from the zdr=true filter itself: entries are kept even
+    # without endpoint details, keyed by bare slug as the best available id
+    assert ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+
+
+def test_fetch_zdr_set_skips_fetch_when_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+
+    def fake_fetch(*a, **k):
+        calls.append(1)
+        return {"data": {"models": []}}
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    ids, cached = mc.fetch_zdr_set(make_args(no_cache=True, no_zdr=True))
+    assert ids == set()
+    assert cached is False
+    assert calls == []
+
+
+def test_fetch_zdr_set_caches_result(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+
+    def fake_fetch(*a, **k):
+        calls.append(1)
+        return {
+            "data": {
+                "models": [
+                    {
+                        "slug": "acme/a",
+                        "endpoint": {
+                            "variant": "standard",
+                            "pricing": {"prompt": "0.1"},
+                        },
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    args = make_args(no_cache=False, cache_ttl=3600)
+    first, cached1 = mc.fetch_zdr_set(args)
+    second, cached2 = mc.fetch_zdr_set(args)
+    assert len(calls) == 1
+    assert (cached1, cached2) == (False, True)
+    assert first == second == {"acme/a"}
+
+
+def test_fetch_zdr_set_does_not_cache_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+
+    def fake_fetch(*a, **k):
+        calls.append(1)
+        return {"data": {"models": []}}
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    args = make_args(no_cache=False, cache_ttl=3600)
+    first, cached1 = mc.fetch_zdr_set(args)
+    second, cached2 = mc.fetch_zdr_set(args)
+    assert first == second == set()
+    assert (cached1, cached2) == (False, False)
+    assert len(calls) == 2
+    assert not (tmp_path / "model-compare" / "openrouter-zdr.json").exists()
+
+
+def test_fetch_zdr_set_treats_empty_cached_set_as_miss(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+
+    def fake_fetch(*a, **k):
+        calls.append(1)
+        return {
+            "data": {
+                "models": [
+                    {
+                        "slug": "acme/a",
+                        "endpoint": {
+                            "variant": "standard",
+                            "pricing": {"prompt": "0.1"},
+                        },
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    cache_dir = tmp_path / "model-compare"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "openrouter-zdr.json").write_text(
+        json.dumps({"fetched_at": time.time(), "payload": []})
+    )
+    result, cached = mc.fetch_zdr_set(make_args(no_cache=False, cache_ttl=3600))
+    assert len(calls) == 1
+    assert cached is False
+    assert result == {"acme/a"}
+
+
+def test_fetch_zdr_set_fetch_failure_returns_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(mc, "fetch_json", boom)
+    result, cached = mc.fetch_zdr_set(make_args(no_cache=True))
+    assert result == set()
+    assert cached is False
+
+
 @pytest.mark.parametrize(
     "value,expected",
     [
@@ -410,6 +582,37 @@ def test_print_json_discount_null_for_negligible(capsys):
     mc.print_json(rows)
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["discount"] is None
+
+
+# ---------------------------------------------------------------------------
+# opencode model namespace
+# ---------------------------------------------------------------------------
+
+
+def test_opencode_model_id():
+    assert mc.opencode_model_id("z-ai/glm-5.3-flash") == "openrouter/z-ai/glm-5.3-flash"
+    assert mc.opencode_model_id("nvidia/x:free") == "openrouter/nvidia/x:free"
+
+
+def test_print_json_includes_opencode_model(capsys):
+    rows = [_cand("a/x", 1.0)]
+    rows[0].update({"score": 0.9})
+    mc.print_json(rows)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["model"] == "a/x"
+    assert payload[0]["opencode_model"] == "openrouter/a/x"
+
+
+def test_best_prints_provider_qualified_id(monkeypatch, capsys):
+    monkeypatch.setattr(
+        mc, "fetch_openrouter_models", lambda a: ([make_model()], False)
+    )
+    monkeypatch.setattr(mc, "fetch_discount_map", lambda a: ({}, False))
+    monkeypatch.setattr(mc, "fetch_zdr_set", lambda a: ({"acme/model-a"}, False))
+    monkeypatch.setattr(mc, "fetch_aa_entries", lambda a: ([], None, False))
+    argv = ["--best", "--no-cache", "--min-context", "0", "--no-require-tools"]
+    assert mc.main(argv) == 0
+    assert capsys.readouterr().out.strip() == "openrouter/acme/model-a"
 
 
 # ---------------------------------------------------------------------------

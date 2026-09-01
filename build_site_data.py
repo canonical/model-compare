@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 PRIORITIES = ("balanced", "price", "quality")
 ROW_KEYS = (
     "model",
+    "opencode_model",
     "name",
     "score",
     "quality_index",
@@ -28,7 +29,12 @@ ROW_KEYS = (
     "context_tokens",
     "age_days",
 )
-MODEL_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+(?::[a-zA-Z0-9_.-]+)?$")
+# provider-qualified opencode id (openrouter/<provider/model>), the plain
+# catalog id (<provider/model>), each with an optional :variant suffix.
+MODEL_ID_RE = re.compile(
+    r"^(?:[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+"
+    r"(?::[a-zA-Z0-9_.-]+)?$"
+)
 
 
 def build_data(best, priorities, now=None) -> dict:

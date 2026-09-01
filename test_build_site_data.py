@@ -10,6 +10,7 @@ import build_site_data as bsd
 def make_row(**overrides):
     row = {
         "model": "acme/model-a",
+        "opencode_model": "openrouter/acme/model-a",
         "name": "Acme: Model A",
         "score": 0.7,
         "quality_index": 55.0,
@@ -45,8 +46,22 @@ def test_build_data_accepts_variant_suffix():
     assert data["best"].endswith(":free")
 
 
+def test_build_data_accepts_provider_qualified_best():
+    data = bsd.build_data("openrouter/z-ai/glm-5.3-flash", make_priorities())
+    assert data["best"] == "openrouter/z-ai/glm-5.3-flash"
+
+
 @pytest.mark.parametrize(
-    "bad", ["", "no-slash", "two/slashes/here", "acme/a b", "acme/", "/model"]
+    "bad",
+    [
+        "",
+        "no-slash",
+        "openrouter/two/slashes/here",
+        "acme/a b",
+        "acme/",
+        "/model",
+        "openrouter//model",
+    ],
 )
 def test_build_data_rejects_malformed_best(bad):
     with pytest.raises(ValueError):
@@ -76,7 +91,7 @@ def test_build_data_rejects_row_missing_keys():
 
 def test_main_end_to_end(tmp_path):
     best_file = tmp_path / "best.txt"
-    best_file.write_text("z-ai/glm-5.3-flash\n")
+    best_file.write_text("openrouter/z-ai/glm-5.3-flash\n")
     files = {}
     for name in ("balanced", "price", "quality"):
         f = tmp_path / f"{name}.json"
@@ -88,7 +103,7 @@ def test_main_end_to_end(tmp_path):
         argv += ["--priority", f"{name}={f}"]
     assert bsd.main(argv) == 0
     data = json.loads(out.read_text())
-    assert data["best"] == "z-ai/glm-5.3-flash"
+    assert data["best"] == "openrouter/z-ai/glm-5.3-flash"
     assert data["priorities"]["price"][0]["model"] == "acme/price"
 
 

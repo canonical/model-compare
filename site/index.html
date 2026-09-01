@@ -250,7 +250,9 @@
 
       function topModel() {
         var rows = data && data.priorities[current];
-        return rows && rows.length ? rows[0].model : null;
+        if (!rows || !rows.length) return null;
+        // provider-qualified id (opencode-ready); fall back for stale data
+        return rows[0].opencode_model || rows[0].model;
       }
 
       function copyText(text) {

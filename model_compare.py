@@ -32,10 +32,10 @@ priority-dependent weights:
 
 Examples:
   model_compare.py                          top 5, balanced
-  model_compare.py --best                   print only "#1 model id" (parseable)
+  model_compare.py --best                   print only "#1 opencode id" (openrouter/<model>)
   model_compare.py --priority price --top 3 three cheapest-sensible picks
   model_compare.py --discount               only currently-discounted models
-  MODEL=$(model_compare.py --best)          shell integration
+  MODEL=$(model_compare.py --best)          shell integration (opencode --model $MODEL)
 """
 
 from __future__ import annotations
@@ -56,9 +56,22 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_DISCOUNTS_URL = (
     "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text"
 )
+OPENROUTER_ZDR_URL = (
+    "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text&zdr=true"
+)
 AA_MODELS_PAGE_URL = "https://artificialanalysis.ai/models"
 AA_API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
 USER_AGENT = "model-compare/1.0 (https://github.com/rkratky/model-compare)"
+
+# opencode expects provider-qualified model ids: openrouter/<provider/model>.
+# Single source of truth -- other provider namespaces can be supported later
+# without touching consumers of --best / --json.
+OPENCODE_PROVIDER = "openrouter"
+
+
+def opencode_model_id(model_id: str) -> str:
+    return f"{OPENCODE_PROVIDER}/{model_id}"
+
 
 PRIORITY_WEIGHTS = {
     "balanced": {"quality": 0.40, "price": 0.40, "context": 0.10, "age": 0.10},
@@ -204,6 +217,44 @@ def fetch_discount_map(args):
         return {}, False
     save_cache("openrouter-discounts", discounts)
     return discounts, False
+
+
+def fetch_zdr_set(args):
+    """Set of public model ids whose endpoint is zero-data-retention.
+
+    Sourced from the same frontend models API as the website's ?zdr=true
+    filter (undocumented). An empty result means the data is unavailable:
+    the caller must then fail closed rather than silently considering
+    non-ZDR models. The fetch is skipped entirely under --no-zdr.
+    """
+    if args.no_zdr:
+        return set(), False
+    if not args.no_cache:
+        cached = load_cache("openrouter-zdr", args.cache_ttl)
+        if cached:
+            return set(cached), True
+    try:
+        payload = fetch_json(OPENROUTER_ZDR_URL, timeout=30)
+    except Exception as exc:
+        warn(f"could not fetch ZDR data: {exc}")
+        return set(), False
+    data = payload.get("data") if isinstance(payload, dict) else None
+    entries = data.get("models") if isinstance(data, dict) else None
+    ids = set()
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("slug") or ""
+        if not slug or slug.startswith("~"):
+            continue
+        endpoint = entry.get("endpoint") or {}
+        variant = endpoint.get("variant") or ""
+        ids.add(slug if variant in ("", "standard") else f"{slug}:{variant}")
+    if not ids:
+        warn("no ZDR entries found; treating ZDR data as unavailable")
+        return set(), False
+    save_cache("openrouter-zdr", sorted(ids))
+    return ids, False
 
 
 def parse_price(value) -> float | None:
@@ -435,7 +486,7 @@ def match_quality(model, exact, fuzzy):
 # ---------------------------------------------------------------------------
 
 
-def build_candidates(models, args, discounts):
+def build_candidates(models, args, discounts, zdr_ids):
     now = time.time()
     require_tools = not args.no_require_tools
     dropped = {}
@@ -468,6 +519,9 @@ def build_candidates(models, args, discounts):
         discount = (discounts or {}).get(model_id)
         if args.discount and not has_discount(discount):
             drop("no discount")
+            continue
+        if not args.no_zdr and model_id not in (zdr_ids or set()):
+            drop("not ZDR")
             continue
         modality = (model.get("architecture") or {}).get("modality") or ""
         output_modality = (
@@ -679,6 +733,7 @@ def print_json(top):
     payload = [
         {
             "model": cand["id"],
+            "opencode_model": opencode_model_id(cand["id"]),
             "name": cand["name"],
             "score": round(cand["score"], 4),
             "quality_index": cand["quality"],
@@ -728,7 +783,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--best",
         action="store_true",
-        help="print only the #1 model id, nothing else, for scripting",
+        help="print only the #1 model as an opencode id (openrouter/<model>), for scripting",
     )
     parser.add_argument(
         "--json", action="store_true", help="print the ranked candidates as JSON"
@@ -783,6 +838,11 @@ def parse_args(argv=None):
         help="only list models with an active discount",
     )
     parser.add_argument(
+        "--no-zdr",
+        action="store_true",
+        help="consider all models, not just zero-data-retention (ZDR) ones",
+    )
+    parser.add_argument(
         "--no-cache",
         action="store_true",
         help="bypass the local response cache and refetch",
@@ -819,10 +879,17 @@ def main(argv=None) -> int:
 
 def run(args, models, or_cached) -> int:
     discounts, disc_cached = fetch_discount_map(args)
+    zdr_ids, zdr_cached = fetch_zdr_set(args)
+    if not args.no_zdr and not zdr_ids:
+        warn(
+            "ZDR data unavailable; refusing to rank possibly non-ZDR models "
+            "(--no-zdr to override)"
+        )
+        return 1
     aa_entries, aa_source, aa_cached = fetch_aa_entries(args)
     exact, fuzzy = build_aa_lookup(aa_entries)
 
-    candidates, dropped = build_candidates(models, args, discounts)
+    candidates, dropped = build_candidates(models, args, discounts, zdr_ids)
     if not candidates:
         warn(
             f"no models satisfy the filters (min-context={args.min_context}, "
@@ -841,7 +908,7 @@ def run(args, models, or_cached) -> int:
     top = candidates[:limit]
 
     if args.best:
-        print(top[0]["id"])
+        print(opencode_model_id(top[0]["id"]))
     elif args.json:
         print_json(top)
     else:
@@ -867,6 +934,8 @@ def run(args, models, or_cached) -> int:
             source_note.append("catalog cached")
         if disc_cached:
             source_note.append("discounts cached")
+        if zdr_cached:
+            source_note.append("ZDR cached")
         if aa_cached and aa_source:
             source_note.append("quality cached")
         if source_note:

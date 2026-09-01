@@ -13,10 +13,17 @@ from a one-paragraph brief.
 
 ```console
 $ ./model_compare.py                          # top 5, balanced
-$ ./model_compare.py --best                   # only "#1 model id" (parseable)
+$ ./model_compare.py --best                   # only "#1 model" as an opencode id
 $ MODEL=$(./model_compare.py --best)          # shell integration
+$ opencode --model $MODEL
 $ ./model_compare.py --priority price --top 3
 ```
+
+`--best` prints the pick ready to use: provider-qualified as opencode
+expects, e.g. `openrouter/z-ai/glm-5.3-flash` (`openrouter/` comes from a
+single constant in the script, so other providers can be supported later).
+The `--json` output carries both forms: `model` (catalog id) and
+`opencode_model` (qualified id).
 
 No dependencies beyond Python 3.10+ (stdlib only). Exit codes: `0` success,
 `1` fetch failure, `2` no candidates survive the filters.
@@ -43,7 +50,8 @@ $ alias oc-best='opencode --model "$(curl -fsSL https://canonical.github.io/mode
 One-time setup: enable **Settings → Pages → Source: GitHub Actions**. The
 build (`build_site_data.py`) validates every payload and fails loudly, so a
 broken run never deploys a broken site. `best.txt` always serves the
-*balanced* #1, regardless of which tab the page shows.
+*balanced* #1, regardless of which tab the page shows. Published picks
+consider ZDR models only, matching the tool's default.
 
 ## How it works
 
@@ -103,8 +111,9 @@ with priority-dependent weights:
 Below-minimum context, non-text outputs (image/audio), listings without
 tool-calling support (`--no-require-tools` to relax), unparseable/negative
 prices, expired listings, `:batch` variants (asynchronous completion — no
-good for interactive agents; `--include-batch` to keep them), and (with
-`--exclude-free`) rate-limited `:free` variants.
+good for interactive agents; `--include-batch` to keep them), models without
+a zero-data-retention (ZDR) endpoint by default (`--no-zdr` to consider
+everything), and (with `--exclude-free`) rate-limited `:free` variants.
 
 ## Artificial Analysis data, in short
 
@@ -136,6 +145,15 @@ as information. Variants are matched individually, so a `:batch` twin of a
 discounted model only shows a discount when that variant itself is
 discounted.
 
+## Zero data retention
+
+By default, only models with zero-data-retention (ZDR) endpoints are ranked —
+providers that do not retain prompts or outputs. The ZDR set comes from the
+same OpenRouter frontend API as the discounts (the website's `?zdr=true`
+filter). If that data cannot be fetched, the tool refuses to rank rather than
+silently considering non-ZDR models; pass `--no-zdr` to explicitly consider
+everything.
+
 ## Options
 
 | flag | default | meaning |
@@ -153,6 +171,7 @@ discounted.
 | `--exclude-free` | off | drop `:free` variants |
 | `--include-batch` | off | keep `:batch` (async completion) variants |
 | `--discount` | off | only models with an active discount |
+| `--no-zdr` | off | rank all models, not just zero-data-retention ones |
 | `--no-require-tools` | off | allow models without tool calling |
 | `--no-cache` / `--cache-ttl S` | 6h | cache control |
 
