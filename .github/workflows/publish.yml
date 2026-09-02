@@ -41,9 +41,11 @@ jobs:
           for p in balanced price quality; do
             python model_compare.py --priority "$p" --json --top 10 > "$p.json"
           done
+          python model_compare.py --catalog > catalog.json
           python build_site_data.py \
             --best-file best.txt \
             --output _site/data.json \
+            --catalog-file catalog.json \
             --priority balanced=balanced.json \
             --priority price=price.json \
             --priority quality=quality.json
