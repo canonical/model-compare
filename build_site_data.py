@@ -93,6 +93,20 @@ def validate_catalog(document) -> None:
     pool = document["pool"]
     if not isinstance(pool, dict) or not isinstance(pool.get("candidates"), int):
         raise ValueError("catalog pool.candidates must be an integer")
+    dropped = pool.get("dropped")
+    if not isinstance(dropped, dict) or not all(
+        isinstance(value, int) for value in dropped.values()
+    ):
+        raise ValueError("catalog pool.dropped must map reasons to integers")
+    listed = pool.get("listed")
+    if not isinstance(listed, int):
+        raise ValueError("catalog pool.listed must be an integer")
+    if sum(dropped.values()) + pool["candidates"] != listed:
+        raise ValueError(
+            "catalog pool accounting mismatch: "
+            f"{sum(dropped.values())} dropped + {pool['candidates']} candidates"
+            f" != {listed} listed"
+        )
     models = document["models"]
     if not isinstance(models, list):
         raise ValueError("catalog models must be a list")

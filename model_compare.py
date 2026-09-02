@@ -449,9 +449,12 @@ def build_aa_lookup(entries):
         key = entry.get("key") or ""
         name = entry.get("name") or key
         raw_index = entry.get("index")
-        if not isinstance(raw_index, (int, float)):
+        if not isinstance(raw_index, (int, float)) or isinstance(raw_index, bool):
             continue
         index = float(raw_index)
+        # Non-finite indexes would serialize as NaN and poison quality.
+        if not math.isfinite(index):
+            continue
 
         def put(tier, raw):
             normalized = norm_key(raw)
@@ -551,10 +554,15 @@ def build_candidates(models, args, discounts, zdr_ids, filtered_out=None):
 
     def drop(reason, model_id, name):
         dropped[reason] = dropped.get(reason, 0) + 1
-        if filtered_out is not None:
-            filtered_out.append(
-                {"id": model_id, "name": name or model_id, "reasons": [reason]}
-            )
+        if filtered_out is None:
+            return
+        # Empty/malformed ids would fail the site validator's filtered-id
+        # rule, so they stay counted in dropped only.
+        if not model_id or "/" not in model_id:
+            return
+        filtered_out.append(
+            {"id": model_id, "name": name or model_id, "reasons": [reason]}
+        )
 
     for model in models:
         model_id = model.get("id") or ""
@@ -878,7 +886,9 @@ def build_catalog(
                 },
                 "context": cand["context"],
                 "listed_at": listed_date.isoformat() if listed_date else None,
-                "age_days": (now.date() - listed_date).days if listed_date else None,
+                "age_days": max(0, (now.date() - listed_date).days)
+                if listed_date
+                else None,
                 "tool_calling": cand["tool_calling"],
                 "zdr": cand["zdr"],
                 "discount": round(cand["discount"], 4)

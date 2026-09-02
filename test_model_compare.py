@@ -10,10 +10,11 @@ from __future__ import annotations
 import json
 import time
 from argparse import Namespace
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
+import build_site_data as bsd
 import model_compare as mc
 
 
@@ -402,10 +403,29 @@ def test_build_candidates_collects_filtered_entries():
         models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, filtered
     )
     assert len(candidates) == 1
-    assert sorted(filtered, key=lambda e: e["id"]) == [
-        {"id": "acme/model-b", "name": "B corp: Model B", "reasons": ["context"]},
-        {"id": "no-slash", "name": "No Slash", "reasons": ["malformed id"]},
+    # "no-slash" counts under malformed id but is withheld from filtered,
+    # which only ever carries valid provider/model ids.
+    assert filtered == [
+        {"id": "acme/model-b", "name": "B corp: Model B", "reasons": ["context"]}
     ]
+    assert dropped == {"context": 1, "malformed id": 1}
+
+
+def test_build_candidates_empty_id_counted_not_listed():
+    # An empty id counts under "malformed id" but is never emitted into
+    # filtered, where it would fail the site validator's no-empty-id rule.
+    args = make_args(min_context=0)
+    models = [make_model(id=""), make_model(id="acme/model-a")]
+    filtered = []
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/model-a"}, filtered
+    )
+    assert dropped == {"malformed id": 1}
+    assert filtered == []
+    mc.compute_scores(candidates, args, {})
+    doc = mc.build_catalog(args, models, candidates, dropped, filtered, {}, {}, None)
+    assert doc["filtered"] == []
+    assert [e["id"] for e in doc["models"]] == ["acme/model-a"]
 
 
 def test_build_candidates_without_collector_matches_old_signature():
@@ -828,6 +848,23 @@ def test_build_aa_lookup_skips_non_numeric_index():
     )
 
 
+def test_build_aa_lookup_skips_non_finite_index():
+    entries = [
+        {"key": "acme/model-a", "name": "Model A", "index": float("nan")},
+        {"key": "acme/model-b", "name": "Model B", "index": 55.0},
+    ]
+    exact, fuzzy = mc.build_aa_lookup(entries)
+    # a NaN index would serialize as JSON NaN and score 1.0; never match it
+    assert (
+        mc.match_quality({"id": "acme/model-a", "name": "Acme: Model A"}, exact, fuzzy)
+        is None
+    )
+    assert (
+        mc.match_quality({"id": "acme/model-b", "name": "Model B"}, exact, fuzzy)
+        == 55.0
+    )
+
+
 def test_match_quality_exact_by_id():
     entries = [{"key": "acme/model-a", "name": "Model A", "index": 60.0}]
     exact, fuzzy = mc.build_aa_lookup(entries)
@@ -1231,6 +1268,20 @@ def test_catalog_entry_shape():
     assert b["discount"] is None
 
 
+def test_catalog_future_created_age_days_clamped():
+    # created in the future must not produce a negative age_days
+    created = time.time() + 86400
+    args = make_args(min_context=0)
+    models = [make_model(id="acme/model-a", created=created)]
+    candidates, dropped = mc.build_candidates(models, args, {}, {"acme/model-a"}, [])
+    mc.compute_scores(candidates, args, {})
+    doc = mc.build_catalog(args, models, candidates, dropped, [], {}, {}, None)
+    (entry,) = doc["models"]
+    expected = datetime.fromtimestamp(created, tz=timezone.utc).date().isoformat()
+    assert entry["listed_at"] == expected
+    assert entry["age_days"] == 0
+
+
 def test_catalog_family_null_without_prefix():
     # no model in the default pool exercises the None path; check directly
     assert mc.model_family("kimi/k2") is None
@@ -1295,6 +1346,12 @@ def test_catalog_deterministic_modulo_generated_at():
     doc1.pop("generated_at")
     doc2.pop("generated_at")
     assert doc1 == doc2
+
+
+def test_catalog_document_passes_site_validator():
+    # drift between the producer and the site validator must fail the
+    # suite here, not the publish
+    bsd.validate_catalog(build_doc())  # must not raise
 
 
 def test_catalog_aa_mode_mapping():
