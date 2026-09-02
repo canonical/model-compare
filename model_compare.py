@@ -79,6 +79,25 @@ PRIORITY_WEIGHTS = {
     "quality": {"quality": 0.60, "price": 0.20, "context": 0.10, "age": 0.10},
 }
 
+CATALOG_SCHEMA_VERSION = 1
+
+# The drop-reason keys build_candidates counts, verbatim -- keep in sync with
+# its drop() call sites. pool.dropped lists all of them zero-filled so the
+# contract is self-describing.
+CATALOG_DROP_REASONS = (
+    "malformed id",
+    "context",
+    "pricing",
+    "free",
+    "batch",
+    "no discount",
+    "not ZDR",
+    "modality",
+    "tool calling",
+    "expired",
+    "age",
+)
+
 PAREN_RE = re.compile(r"\([^)]*\)")
 PROVIDER_PREFIX_RE = re.compile(r"^[^:\s]{1,30}:\s*")
 
@@ -800,6 +819,116 @@ def print_json(top):
     print(json.dumps(payload, indent=2))
 
 
+def build_catalog(
+    args, models, candidates, dropped, filtered, discounts, quality_by_id, aa_source
+):
+    """Assemble the full-catalog document (see README "Catalog output").
+
+    Pure: reads candidates post-compute_scores (which already carry the
+    component scores) and never mutates them. Deterministic apart from
+    generated_at: models sort by (-overall.balanced, id), filtered by id,
+    and age uses date precision so two runs in the same UTC day match.
+    """
+    now = datetime.now(timezone.utc)
+    weights = catalog_weights(candidates, quality_by_id)
+    aa_modes = {"AA API v2": "api", "AA page scrape": "scrape"}
+    aa_mode = aa_modes.get(aa_source, "none")
+    quality_match = aa_modes.get(aa_source)
+
+    entries = []
+    for cand in candidates:
+        provider, _, _base = cand["id"].partition("/")
+        created = cand["created"] or 0.0
+        listed_date = (
+            datetime.fromtimestamp(created, tz=timezone.utc).date()
+            if created > 0
+            else None
+        )
+        # Round the component scores first, then derive overall from the
+        # rounded values so scores.overall is exactly reproducible from the
+        # document's own numbers.
+        scores = {
+            "price": round(cand["price_score"], 4),
+            "quality": round(cand["quality_score"], 4),
+            "context": round(cand["context_score"], 4),
+            "age": round(cand["age_score"], 4),
+        }
+        overall = {}
+        for priority in PRIORITY_WEIGHTS:
+            w = weights[priority]
+            overall[priority] = round(
+                w.get("quality", 0.0) * scores["quality"]
+                + w.get("price", 0.0) * scores["price"]
+                + w.get("context", 0.0) * scores["context"]
+                + w.get("age", 0.0) * scores["age"],
+                4,
+            )
+        entries.append(
+            {
+                "id": cand["id"],
+                "name": PROVIDER_PREFIX_RE.sub("", cand["name"]).strip()
+                or cand["name"],
+                "provider": provider,
+                "family": model_family(cand["id"]),
+                "pricing": {
+                    "input_per_1m": round(cand["price_in"], 6),
+                    "output_per_1m": round(cand["price_out"], 6),
+                    "blended_per_1m": round(cand["blended"], 6),
+                },
+                "context": cand["context"],
+                "listed_at": listed_date.isoformat() if listed_date else None,
+                "age_days": (now.date() - listed_date).days if listed_date else None,
+                "tool_calling": cand["tool_calling"],
+                "zdr": cand["zdr"],
+                "discount": round(cand["discount"], 4)
+                if has_discount(cand["discount"])
+                else None,
+                "expired": cand["expired"],
+                "quality": cand["quality"] if aa_source else None,
+                "quality_match": quality_match if cand["id"] in quality_by_id else None,
+                "scores": {**scores, "overall": overall},
+            }
+        )
+    entries.sort(key=lambda e: (-e["scores"]["overall"]["balanced"], e["id"]))
+
+    return {
+        "schema_version": CATALOG_SCHEMA_VERSION,
+        "tool": "model-compare",
+        "generated_at": now.isoformat(timespec="seconds"),
+        "parameters": {
+            "input_share": args.input_share,
+            "quality_ref": args.quality_ref,
+            "min_context": args.min_context,
+            "recency_half_life": args.recency_half_life,
+            "max_age_days": args.max_age_days,
+            "zdr_required": not args.no_zdr,
+            "require_tools": not args.no_require_tools,
+            "exclude_free": args.exclude_free,
+            "include_batch": args.include_batch,
+            "weights": weights,
+        },
+        "sources": {
+            "openrouter": "ok",
+            "aa": {"mode": aa_mode, "matched": len(quality_by_id)},
+            "zdr": "skipped" if args.no_zdr else "ok",
+            "discounts": "ok" if discounts else "unavailable",
+        },
+        "pool": {
+            "listed": len(models),
+            "candidates": len(candidates),
+            "dropped": {
+                reason: dropped.get(reason, 0) for reason in CATALOG_DROP_REASONS
+            },
+        },
+        "models": entries,
+        "filtered": sorted(filtered, key=lambda e: e["id"]),
+    }
+
+
+def print_catalog(document):
+    print(json.dumps(document, indent=2))
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -834,6 +963,11 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--json", action="store_true", help="print the ranked candidates as JSON"
+    )
+    parser.add_argument(
+        "--catalog",
+        action="store_true",
+        help="print the full model catalog (ranked candidates and filtered-out models with reasons) as one JSON document",
     )
     parser.add_argument(
         "--input-share",
@@ -907,6 +1041,8 @@ def parse_args(argv=None):
         parser.error("--top must be at least 1")
     if args.recency_half_life <= 0 or args.quality_ref <= 0:
         parser.error("--recency-half-life and --quality-ref must be positive")
+    if args.catalog and (args.best or args.json):
+        parser.error("--catalog cannot be combined with --best or --json")
     return args
 
 
@@ -936,7 +1072,8 @@ def run(args, models, or_cached) -> int:
     aa_entries, aa_source, aa_cached = fetch_aa_entries(args)
     exact, fuzzy = build_aa_lookup(aa_entries)
 
-    candidates, dropped = build_candidates(models, args, discounts, zdr_ids)
+    filtered = []
+    candidates, dropped = build_candidates(models, args, discounts, zdr_ids, filtered)
     if not candidates:
         warn(
             f"no models satisfy the filters (min-context={args.min_context}, "
@@ -950,6 +1087,21 @@ def run(args, models, or_cached) -> int:
         if index is not None:
             quality_by_id[cand["id"]] = index
     weights = compute_scores(candidates, args, quality_by_id)
+
+    if args.catalog:
+        print_catalog(
+            build_catalog(
+                args,
+                models,
+                candidates,
+                dropped,
+                filtered,
+                discounts,
+                quality_by_id,
+                aa_source,
+            )
+        )
+        return 0
 
     limit = 1 if args.best else args.top
     top = candidates[:limit]
