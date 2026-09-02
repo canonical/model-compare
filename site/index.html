@@ -37,6 +37,8 @@
       }
       .tabs {
         display: flex;
+        align-items: center;
+        flex-wrap: wrap;
         gap: 0.5rem;
         margin: 1.25rem 0 0.75rem;
       }
@@ -53,6 +55,11 @@
         background: #333;
         color: #fff;
         border-color: #333;
+      }
+      .tabs .stamp {
+        margin-left: auto;
+        font-size: 0.85rem;
+        color: gray;
       }
       .actions button {
         border: 1px solid #333;
@@ -145,6 +152,7 @@
       </button>
       <button type="button" data-priority="price">price</button>
       <button type="button" data-priority="quality">quality</button>
+      <span id="generated-top" class="stamp"></span>
     </div>
 
     <p class="status" id="status" hidden></p>
@@ -212,6 +220,7 @@
         tbody: document.getElementById("tbody"),
         status: document.getElementById("status"),
         generated: document.getElementById("generated"),
+        generatedTop: document.getElementById("generated-top"),
         copyModel: document.getElementById("copy-model"),
         copyCommand: document.getElementById("copy-command"),
         copyCurl: document.getElementById("copy-curl"),
@@ -370,9 +379,9 @@
           })
           .then(function (payload) {
             data = payload;
-            els.generated.textContent = new Date(
-              data.generated_at,
-            ).toLocaleString();
+            var stamp = new Date(data.generated_at).toLocaleString();
+            els.generated.textContent = stamp;
+            els.generatedTop.textContent = stamp;
             render();
           })
           .catch(function (err) {
