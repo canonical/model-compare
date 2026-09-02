@@ -6,8 +6,7 @@ the OpenRouter catalog, scores every candidate on quality, price, context
 window and freshness, and prints the winners — either as a ranked table or as a
 single parseable `provider/model` id.
 
-Built by an AI coding agent (opencode, powered by GLM) in a single session,
-from a one-paragraph brief.
+Built by an AI coding agent (opencode, powered mostly by GLM 5.3 Flash).
 
 ## Quick start
 
