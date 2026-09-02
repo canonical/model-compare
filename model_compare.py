@@ -483,6 +483,41 @@ def match_quality(model, exact, fuzzy):
     return None
 
 
+def model_family(model_id: str) -> str | None:
+    """Best-effort model family from the base slug (documented heuristic).
+
+    The leading token delimited by dash, underscore or digit of the
+    lowercased base slug: glm-5.3 -> glm, gpt-5.2-mini -> gpt,
+    deepseek-chat-v4 -> deepseek. Oddballs yield oddballs (o4-mini -> "o");
+    a bare letter-run followed by a trailing digit version (k2) yields None.
+    """
+    base = model_id.split(":", 1)[0].partition("/")[2].lower()
+    parts = re.split(r"[-_\d]", base, maxsplit=1)
+    token = parts[0]
+    if len(parts) > 1 and not parts[1] and base[len(token) : len(token) + 1].isdigit():
+        return None
+    return token or None
+
+
+def catalog_weights(candidates, quality_by_id):
+    """Effective per-priority weights for the catalog document.
+
+    Mirrors compute_scores' quality-blind rule: when no candidate has a
+    quality score the quality weight is dropped and the rest renormalize,
+    so scores.overall in the catalog is exactly reproducible downstream.
+    """
+    quality_blind = not any(c["id"] in quality_by_id for c in candidates)
+    weights = {}
+    for priority, base in PRIORITY_WEIGHTS.items():
+        effective = dict(base)
+        if quality_blind and "quality" in effective:
+            effective.pop("quality")
+            total = sum(effective.values())
+            effective = {name: value / total for name, value in effective.items()}
+        weights[priority] = effective
+    return weights
+
+
 # ---------------------------------------------------------------------------
 # Filtering and scoring
 # ---------------------------------------------------------------------------

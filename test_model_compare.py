@@ -450,6 +450,50 @@ def test_build_candidates_tool_calling_false_when_relaxed():
     assert candidates[0]["tool_calling"] is False
 
 
+# ---------------------------------------------------------------------------
+# model_family / catalog_weights (catalog helpers)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model_id,expected",
+    [
+        ("z-ai/glm-5.3", "glm"),
+        ("openai/gpt-5.2-mini", "gpt"),
+        ("anthropic/claude-opus-4.6", "claude"),
+        ("alibaba/qwen3-max", "qwen"),
+        ("deepseek/deepseek-chat-v4", "deepseek"),
+        ("amazon/nova-pro-2", "nova"),
+        ("google/gemini_2_5_pro", "gemini"),
+        ("x-ai/o4-mini", "o"),  # documented oddball
+        ("kimi/k2", None),
+        ("acme/model-a", "model"),
+        ("acme/model-a:variant", "model"),
+        ("weird/model", "model"),
+    ],
+)
+def test_model_family(model_id, expected):
+    assert mc.model_family(model_id) == expected
+
+
+def test_catalog_weights_match_base_when_quality_present():
+    weights = mc.catalog_weights([{"id": "a/b"}], {"a/b": 50.0})
+    assert weights == mc.PRIORITY_WEIGHTS
+
+
+def test_catalog_weights_renormalize_when_quality_blind():
+    weights = mc.catalog_weights([{"id": "a/b"}], {})
+    for priority, base in mc.PRIORITY_WEIGHTS.items():
+        assert "quality" not in weights[priority]
+        total = sum(weights[priority].values())
+        assert total == pytest.approx(1.0)
+        for name, value in base.items():
+            if name != "quality":
+                assert weights[priority][name] == pytest.approx(
+                    value / (sum(base.values()) - base["quality"])
+                )
+
+
 def test_fetch_zdr_set_builds_variant_keys(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     payload = {
