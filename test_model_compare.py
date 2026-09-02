@@ -389,6 +389,67 @@ def test_build_candidates_zdr_variant_keys():
     assert dropped["not ZDR"] == 1
 
 
+def test_build_candidates_collects_filtered_entries():
+    models = [
+        make_model(id="acme/model-a"),
+        make_model(id="acme/model-b", name="B corp: Model B", context_length=100),
+        make_model(id="no-slash", name="No Slash"),
+    ]
+    filtered = []
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, filtered
+    )
+    assert len(candidates) == 1
+    assert sorted(filtered, key=lambda e: e["id"]) == [
+        {"id": "acme/model-b", "name": "B corp: Model B", "reasons": ["context"]},
+        {"id": "no-slash", "name": "No Slash", "reasons": ["malformed id"]},
+    ]
+
+
+def test_build_candidates_without_collector_matches_old_signature():
+    # 2-tuple unpacking stays valid; no filtered list, no behavior change.
+    candidates, dropped = mc.build_candidates(
+        [make_model(id="acme/model-b", context_length=100)],
+        make_args(min_context=1_000_000),
+        {},
+        {"acme/model-a"},
+    )
+    assert candidates == []
+    assert dropped == {"context": 1}
+
+
+def test_build_candidates_additive_fields():
+    created = 1_750_000_000
+    candidates, _ = mc.build_candidates(
+        [make_model(id="acme/model-a", created=created)],
+        make_args(),
+        {},
+        {"acme/model-a"},
+    )
+    cand = candidates[0]
+    assert cand["created"] == float(created)
+    assert cand["tool_calling"] is True
+    assert cand["zdr"] is True
+    assert cand["expired"] is False
+
+
+def test_build_candidates_zdr_null_under_no_zdr():
+    candidates, _ = mc.build_candidates(
+        [make_model(id="acme/model-a")], make_args(no_zdr=True), {}, set()
+    )
+    assert candidates[0]["zdr"] is None
+
+
+def test_build_candidates_tool_calling_false_when_relaxed():
+    candidates, _ = mc.build_candidates(
+        [make_model(supported_parameters=[])],
+        make_args(no_require_tools=True),
+        {},
+        {"acme/model-a"},
+    )
+    assert candidates[0]["tool_calling"] is False
+
+
 def test_fetch_zdr_set_builds_variant_keys(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     payload = {

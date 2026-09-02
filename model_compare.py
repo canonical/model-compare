@@ -488,57 +488,63 @@ def match_quality(model, exact, fuzzy):
 # ---------------------------------------------------------------------------
 
 
-def build_candidates(models, args, discounts, zdr_ids):
+def build_candidates(models, args, discounts, zdr_ids, filtered_out=None):
     now = time.time()
     require_tools = not args.no_require_tools
     dropped = {}
     candidates = []
 
-    def drop(reason):
+    def drop(reason, model_id, name):
         dropped[reason] = dropped.get(reason, 0) + 1
+        if filtered_out is not None:
+            filtered_out.append(
+                {"id": model_id, "name": name or model_id, "reasons": [reason]}
+            )
 
     for model in models:
         model_id = model.get("id") or ""
         if "/" not in model_id:
-            drop("malformed id")
+            drop("malformed id", model_id, model.get("name"))
             continue
         context = coerce_int(model.get("context_length"), 0)
         if context < args.min_context:
-            drop("context")
+            drop("context", model_id, model.get("name"))
             continue
         pricing = model.get("pricing") or {}
         price_in = parse_price(pricing.get("prompt"))
         price_out = parse_price(pricing.get("completion"))
         if price_in is None or price_out is None or price_in < 0 or price_out < 0:
-            drop("pricing")
+            drop("pricing", model_id, model.get("name"))
             continue
         if args.exclude_free and price_in == 0 and price_out == 0:
-            drop("free")
+            drop("free", model_id, model.get("name"))
             continue
         if not args.include_batch and model_id.endswith(":batch"):
-            drop("batch")
+            drop("batch", model_id, model.get("name"))
             continue
         discount = (discounts or {}).get(model_id)
         if args.discount and not has_discount(discount):
-            drop("no discount")
+            drop("no discount", model_id, model.get("name"))
             continue
         if not args.no_zdr and model_id not in (zdr_ids or set()):
-            drop("not ZDR")
+            drop("not ZDR", model_id, model.get("name"))
             continue
         modality = (model.get("architecture") or {}).get("modality") or ""
         output_modality = (
             modality.split("->")[-1].strip() if "->" in modality else "text"
         )
         if output_modality != "text":
-            drop("modality")
+            drop("modality", model_id, model.get("name"))
             continue
         params = model.get("supported_parameters") or []
-        if require_tools and not ("tools" in params and "tool_choice" in params):
-            drop("tool calling")
+        tool_calling = "tools" in params and "tool_choice" in params
+        if require_tools and not tool_calling:
+            drop("tool calling", model_id, model.get("name"))
             continue
         expiry = parse_iso_datetime(model.get("expiration_date"))
-        if expiry and expiry < datetime.now(timezone.utc):
-            drop("expired")
+        expired = bool(expiry and expiry < datetime.now(timezone.utc))
+        if expired:
+            drop("expired", model_id, model.get("name"))
             continue
         created = model.get("created") or 0
         try:
@@ -547,7 +553,7 @@ def build_candidates(models, args, discounts, zdr_ids):
             created = 0.0
         age_days = max(0.0, (now - created) / 86400.0) if created > 0 else None
         if args.max_age_days and age_days is not None and age_days > args.max_age_days:
-            drop("age")
+            drop("age", model_id, model.get("name"))
             continue
         price_in_m = price_in * 1_000_000.0
         price_out_m = price_out * 1_000_000.0
@@ -564,6 +570,10 @@ def build_candidates(models, args, discounts, zdr_ids):
                 "blended": blended_m,
                 "age_days": age_days,
                 "discount": discount,
+                "created": created,
+                "tool_calling": tool_calling,
+                "zdr": None if args.no_zdr else model_id in (zdr_ids or set()),
+                "expired": expired,
             }
         )
 
