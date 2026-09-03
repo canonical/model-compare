@@ -35,6 +35,7 @@ Examples:
   model_compare.py --best                   print only "#1 opencode id" (openrouter/<model>)
   model_compare.py --priority price --top 3 three cheapest-sensible picks
   model_compare.py --discount               only currently-discounted models
+  model_compare.py --catalog                full catalog (ranked + filtered) as one JSON document
   MODEL=$(model_compare.py --best)          shell integration (opencode --model $MODEL)
 """
 
@@ -78,6 +79,25 @@ PRIORITY_WEIGHTS = {
     "price": {"quality": 0.20, "price": 0.60, "context": 0.10, "age": 0.10},
     "quality": {"quality": 0.60, "price": 0.20, "context": 0.10, "age": 0.10},
 }
+
+CATALOG_SCHEMA_VERSION = 1
+
+# The drop-reason keys build_candidates counts, verbatim -- keep in sync with
+# its drop() call sites. pool.dropped lists all of them zero-filled so the
+# contract is self-describing.
+CATALOG_DROP_REASONS = (
+    "malformed id",
+    "context",
+    "pricing",
+    "free",
+    "batch",
+    "no discount",
+    "not ZDR",
+    "modality",
+    "tool calling",
+    "expired",
+    "age",
+)
 
 PAREN_RE = re.compile(r"\([^)]*\)")
 PROVIDER_PREFIX_RE = re.compile(r"^[^:\s]{1,30}:\s*")
@@ -429,9 +449,12 @@ def build_aa_lookup(entries):
         key = entry.get("key") or ""
         name = entry.get("name") or key
         raw_index = entry.get("index")
-        if not isinstance(raw_index, (int, float)):
+        if not isinstance(raw_index, (int, float)) or isinstance(raw_index, bool):
             continue
         index = float(raw_index)
+        # Non-finite indexes would serialize as NaN and poison quality.
+        if not math.isfinite(index):
+            continue
 
         def put(tier, raw):
             normalized = norm_key(raw)
@@ -483,62 +506,108 @@ def match_quality(model, exact, fuzzy):
     return None
 
 
+def model_family(model_id: str) -> str | None:
+    """Best-effort model family from the base slug (documented heuristic).
+
+    The leading token delimited by dash, underscore or digit of the
+    lowercased base slug: glm-5.3 -> glm, gpt-5.2-mini -> gpt,
+    deepseek-chat-v4 -> deepseek. Oddballs yield oddballs (o4-mini -> "o");
+    a bare letter-run followed by a trailing digit version (k2) yields None.
+    """
+    base = model_id.split(":", 1)[0].partition("/")[2].lower()
+    parts = re.split(r"[-_\d]", base, maxsplit=1)
+    token = parts[0]
+    if len(parts) > 1 and not parts[1] and base[len(token) : len(token) + 1].isdigit():
+        return None
+    return token or None
+
+
+def catalog_weights(candidates, quality_by_id):
+    """Effective per-priority weights for the catalog document.
+
+    Mirrors compute_scores' quality-blind rule: when no candidate has a
+    quality score the quality weight is dropped and the rest renormalize,
+    so scores.overall in the catalog is exactly reproducible downstream.
+    """
+    quality_blind = not any(c["id"] in quality_by_id for c in candidates)
+    weights = {}
+    for priority, base in PRIORITY_WEIGHTS.items():
+        effective = dict(base)
+        if quality_blind and "quality" in effective:
+            effective.pop("quality")
+            total = sum(effective.values())
+            effective = {name: value / total for name, value in effective.items()}
+        weights[priority] = effective
+    return weights
+
+
 # ---------------------------------------------------------------------------
 # Filtering and scoring
 # ---------------------------------------------------------------------------
 
 
-def build_candidates(models, args, discounts, zdr_ids):
+def build_candidates(models, args, discounts, zdr_ids, filtered_out=None):
     now = time.time()
     require_tools = not args.no_require_tools
     dropped = {}
     candidates = []
 
-    def drop(reason):
+    def drop(reason, model_id, name):
         dropped[reason] = dropped.get(reason, 0) + 1
+        if filtered_out is None:
+            return
+        # Empty/malformed ids would fail the site validator's filtered-id
+        # rule, so they stay counted in dropped only.
+        if not model_id or "/" not in model_id:
+            return
+        filtered_out.append(
+            {"id": model_id, "name": name or model_id, "reasons": [reason]}
+        )
 
     for model in models:
         model_id = model.get("id") or ""
         if "/" not in model_id:
-            drop("malformed id")
+            drop("malformed id", model_id, model.get("name"))
             continue
         context = coerce_int(model.get("context_length"), 0)
         if context < args.min_context:
-            drop("context")
+            drop("context", model_id, model.get("name"))
             continue
         pricing = model.get("pricing") or {}
         price_in = parse_price(pricing.get("prompt"))
         price_out = parse_price(pricing.get("completion"))
         if price_in is None or price_out is None or price_in < 0 or price_out < 0:
-            drop("pricing")
+            drop("pricing", model_id, model.get("name"))
             continue
         if args.exclude_free and price_in == 0 and price_out == 0:
-            drop("free")
+            drop("free", model_id, model.get("name"))
             continue
         if not args.include_batch and model_id.endswith(":batch"):
-            drop("batch")
+            drop("batch", model_id, model.get("name"))
             continue
         discount = (discounts or {}).get(model_id)
         if args.discount and not has_discount(discount):
-            drop("no discount")
+            drop("no discount", model_id, model.get("name"))
             continue
         if not args.no_zdr and model_id not in (zdr_ids or set()):
-            drop("not ZDR")
+            drop("not ZDR", model_id, model.get("name"))
             continue
         modality = (model.get("architecture") or {}).get("modality") or ""
         output_modality = (
             modality.split("->")[-1].strip() if "->" in modality else "text"
         )
         if output_modality != "text":
-            drop("modality")
+            drop("modality", model_id, model.get("name"))
             continue
         params = model.get("supported_parameters") or []
-        if require_tools and not ("tools" in params and "tool_choice" in params):
-            drop("tool calling")
+        tool_calling = "tools" in params and "tool_choice" in params
+        if require_tools and not tool_calling:
+            drop("tool calling", model_id, model.get("name"))
             continue
         expiry = parse_iso_datetime(model.get("expiration_date"))
-        if expiry and expiry < datetime.now(timezone.utc):
-            drop("expired")
+        expired = bool(expiry and expiry < datetime.now(timezone.utc))
+        if expired:
+            drop("expired", model_id, model.get("name"))
             continue
         created = model.get("created") or 0
         try:
@@ -547,7 +616,7 @@ def build_candidates(models, args, discounts, zdr_ids):
             created = 0.0
         age_days = max(0.0, (now - created) / 86400.0) if created > 0 else None
         if args.max_age_days and age_days is not None and age_days > args.max_age_days:
-            drop("age")
+            drop("age", model_id, model.get("name"))
             continue
         price_in_m = price_in * 1_000_000.0
         price_out_m = price_out * 1_000_000.0
@@ -564,6 +633,10 @@ def build_candidates(models, args, discounts, zdr_ids):
                 "blended": blended_m,
                 "age_days": age_days,
                 "discount": discount,
+                "created": created,
+                "tool_calling": tool_calling,
+                "zdr": None if args.no_zdr else model_id in (zdr_ids or set()),
+                "expired": expired,
             }
         )
 
@@ -755,6 +828,122 @@ def print_json(top):
     print(json.dumps(payload, indent=2))
 
 
+def build_catalog(
+    args, models, candidates, dropped, filtered, discounts, quality_by_id, aa_source
+):
+    """Assemble the full-catalog document (see README "Catalog output").
+
+    Pure: reads candidates post-compute_scores (which already carry the
+    component scores) and never mutates them. Deterministic apart from
+    generated_at: models sort by (-overall.balanced, id), filtered by id,
+    and age uses date precision so two runs in the same UTC day match.
+    """
+    now = datetime.now(timezone.utc)
+    weights = catalog_weights(candidates, quality_by_id)
+    aa_modes = {"AA API v2": "api", "AA page scrape": "scrape"}
+    if aa_source is not None and aa_source not in aa_modes:
+        # Never claim mode "none" for a source we do not know: the document
+        # would contradict itself (mode none with matched quality scores).
+        raise ValueError(f"unknown AA source: {aa_source!r}")
+    aa_mode = aa_modes.get(aa_source, "none")
+    quality_match = aa_modes.get(aa_source)
+
+    entries = []
+    for cand in candidates:
+        provider, _, _base = cand["id"].partition("/")
+        created = cand["created"] or 0.0
+        listed_date = (
+            datetime.fromtimestamp(created, tz=timezone.utc).date()
+            if created > 0
+            else None
+        )
+        # Round the component scores first, then derive overall from the
+        # rounded values so scores.overall is exactly reproducible from the
+        # document's own numbers.
+        scores = {
+            "price": round(cand["price_score"], 4),
+            "quality": round(cand["quality_score"], 4),
+            "context": round(cand["context_score"], 4),
+            "age": round(cand["age_score"], 4),
+        }
+        overall = {}
+        for priority in PRIORITY_WEIGHTS:
+            w = weights[priority]
+            overall[priority] = round(
+                w.get("quality", 0.0) * scores["quality"]
+                + w.get("price", 0.0) * scores["price"]
+                + w.get("context", 0.0) * scores["context"]
+                + w.get("age", 0.0) * scores["age"],
+                4,
+            )
+        entries.append(
+            {
+                "id": cand["id"],
+                "name": PROVIDER_PREFIX_RE.sub("", cand["name"]).strip()
+                or cand["name"],
+                "provider": provider,
+                "family": model_family(cand["id"]),
+                "pricing": {
+                    "input_per_1m": round(cand["price_in"], 6),
+                    "output_per_1m": round(cand["price_out"], 6),
+                    "blended_per_1m": round(cand["blended"], 6),
+                },
+                "context": cand["context"],
+                "listed_at": listed_date.isoformat() if listed_date else None,
+                "age_days": max(0, (now.date() - listed_date).days)
+                if listed_date
+                else None,
+                "tool_calling": cand["tool_calling"],
+                "zdr": cand["zdr"],
+                "discount": round(cand["discount"], 4)
+                if has_discount(cand["discount"])
+                else None,
+                "expired": cand["expired"],
+                "quality": cand["quality"] if aa_source else None,
+                "quality_match": quality_match if cand["id"] in quality_by_id else None,
+                "scores": {**scores, "overall": overall},
+            }
+        )
+    entries.sort(key=lambda e: (-e["scores"]["overall"]["balanced"], e["id"]))
+
+    return {
+        "schema_version": CATALOG_SCHEMA_VERSION,
+        "tool": "model-compare",
+        "generated_at": now.isoformat(timespec="seconds"),
+        "parameters": {
+            "input_share": args.input_share,
+            "quality_ref": args.quality_ref,
+            "min_context": args.min_context,
+            "recency_half_life": args.recency_half_life,
+            "max_age_days": args.max_age_days,
+            "zdr_required": not args.no_zdr,
+            "require_tools": not args.no_require_tools,
+            "exclude_free": args.exclude_free,
+            "include_batch": args.include_batch,
+            "weights": weights,
+        },
+        "sources": {
+            "openrouter": "ok",
+            "aa": {"mode": aa_mode, "matched": len(quality_by_id)},
+            "zdr": "skipped" if args.no_zdr else "ok",
+            "discounts": "ok" if discounts else "unavailable",
+        },
+        "pool": {
+            "listed": len(models),
+            "candidates": len(candidates),
+            "dropped": {
+                reason: dropped.get(reason, 0) for reason in CATALOG_DROP_REASONS
+            },
+        },
+        "models": entries,
+        "filtered": sorted(filtered, key=lambda e: e["id"]),
+    }
+
+
+def print_catalog(document):
+    print(json.dumps(document, indent=2))
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -789,6 +978,11 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--json", action="store_true", help="print the ranked candidates as JSON"
+    )
+    parser.add_argument(
+        "--catalog",
+        action="store_true",
+        help="print the full model catalog (ranked candidates and filtered-out models with reasons) as one JSON document; ignores --top and --priority, cannot be combined with --best or --json",
     )
     parser.add_argument(
         "--input-share",
@@ -862,6 +1056,8 @@ def parse_args(argv=None):
         parser.error("--top must be at least 1")
     if args.recency_half_life <= 0 or args.quality_ref <= 0:
         parser.error("--recency-half-life and --quality-ref must be positive")
+    if args.catalog and (args.best or args.json):
+        parser.error("--catalog cannot be combined with --best or --json")
     return args
 
 
@@ -891,7 +1087,8 @@ def run(args, models, or_cached) -> int:
     aa_entries, aa_source, aa_cached = fetch_aa_entries(args)
     exact, fuzzy = build_aa_lookup(aa_entries)
 
-    candidates, dropped = build_candidates(models, args, discounts, zdr_ids)
+    filtered = []
+    candidates, dropped = build_candidates(models, args, discounts, zdr_ids, filtered)
     if not candidates:
         warn(
             f"no models satisfy the filters (min-context={args.min_context}, "
@@ -905,6 +1102,21 @@ def run(args, models, or_cached) -> int:
         if index is not None:
             quality_by_id[cand["id"]] = index
     weights = compute_scores(candidates, args, quality_by_id)
+
+    if args.catalog:
+        print_catalog(
+            build_catalog(
+                args,
+                models,
+                candidates,
+                dropped,
+                filtered,
+                discounts,
+                quality_by_id,
+                aa_source,
+            )
+        )
+        return 0
 
     limit = 1 if args.best else args.top
     top = candidates[:limit]

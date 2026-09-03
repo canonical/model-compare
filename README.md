@@ -40,6 +40,8 @@ script:
 $ opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"
 ```
 
+The same workflow publishes a [`catalog.json`](https://canonical.github.io/model-compare/catalog.json) artifact — see [Catalog output](#catalog-output).
+
 Tip: save it as an alias so every launch picks up the fresh value:
 
 ```console
@@ -153,6 +155,56 @@ filter). If that data cannot be fetched, the tool refuses to rank rather than
 silently considering non-ZDR models; pass `--no-zdr` to explicitly consider
 everything.
 
+## Catalog output
+
+`--catalog` prints the full evaluation as one machine-readable JSON document:
+every surviving candidate, ranked, plus every filtered-out model with its drop
+reasons. The published site serves it as
+[`catalog.json`](https://canonical.github.io/model-compare/catalog.json),
+refreshed on the same 6-hour schedule as the picks.
+
+```console
+$ ./model_compare.py --catalog | python3 -m json.tool
+```
+
+The document is a **stable contract** consumed by internal Canonical tooling
+(`tokens.canonical.com`), which deduplicates on content — same inputs produce
+byte-identical output apart from `generated_at` (`age_days`/`listed_at` use
+UTC date precision, so runs within a day match exactly). `schema_version`
+starts at `1`: fields may be added without notice, but renaming or removing
+one bumps the version.
+
+Top level: `schema_version`, `tool`, `generated_at`, `parameters` (all knobs
+plus the **effective** per-priority `weights` — reproducing `scores.overall`
+needs nothing else), `sources` (`openrouter`, `aa` with `mode` `api`/`scrape`/`none`
+and the match count, `zdr` `ok`/`skipped`, `discounts` `ok`/`unavailable` —
+where `unavailable` covers both a failed discount fetch and a live pool with
+zero discounts), `pool` (`listed`, `candidates`, `dropped`), `models`,
+`filtered`.
+
+Each `models` entry carries: `id` (bare `provider/model`), `name`,
+`provider`, `family` (heuristic: leading token of the slug, e.g. `glm-5.3`
+→ `glm`; `null` when there is none), `pricing` (`input_per_1m`,
+`output_per_1m`, `blended_per_1m` in USD per 1M tokens), `context`,
+`listed_at`, `age_days`, `tool_calling`, `zdr`, `discount`, `expired`,
+`quality` (AA intelligence index or `null`), `quality_match`
+(`api`/`scrape`/`null`) and `scores` — the four component scores plus
+`overall` for all three priorities, so downstream consumers never re-run
+the scorer.
+
+`filtered` entries are `{"id", "name", "reasons"}`; the reason keys are the
+same strings the tool counts internally:
+
+```
+malformed id, context, pricing, free, batch, no discount, not ZDR,
+modality, tool calling, expired, age
+```
+
+`pool.dropped` lists all of them zero-filled. `--top` and `--priority` are
+ignored with `--catalog` (the document always covers the full pool, sorted by
+the balanced overall score); `--catalog` cannot be combined with `--best` or
+`--json`.
+
 ## Options
 
 | flag | default | meaning |
@@ -161,6 +213,7 @@ everything.
 | `--top N` | 5 | how many models to list |
 | `--best` | off | print only the #1 model id (for scripting) |
 | `--json` | off | machine-readable output |
+| `--catalog` | off | print the full model catalog (ranked candidates + filtered, with reasons) as one JSON document |
 | `--min-context N` | 1000000 | hard context-window floor (tokens) |
 | `--input-share F` | 0.75 | input share of the blended price (0–1) |
 | `--recency-half-life D` | 120 | age decay half-life (days) |

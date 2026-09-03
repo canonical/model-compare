@@ -10,9 +10,11 @@ from __future__ import annotations
 import json
 import time
 from argparse import Namespace
+from datetime import datetime, timezone
 
 import pytest
 
+import build_site_data as bsd
 import model_compare as mc
 
 
@@ -24,6 +26,7 @@ def make_args(**overrides):
         top=5,
         best=False,
         json=False,
+        catalog=False,
         input_share=0.75,
         recency_half_life=120.0,
         max_age_days=0.0,
@@ -389,6 +392,130 @@ def test_build_candidates_zdr_variant_keys():
     assert dropped["not ZDR"] == 1
 
 
+def test_build_candidates_collects_filtered_entries():
+    models = [
+        make_model(id="acme/model-a"),
+        make_model(id="acme/model-b", name="B corp: Model B", context_length=100),
+        make_model(id="no-slash", name="No Slash"),
+    ]
+    filtered = []
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, filtered
+    )
+    assert len(candidates) == 1
+    # "no-slash" counts under malformed id but is withheld from filtered,
+    # which only ever carries valid provider/model ids.
+    assert filtered == [
+        {"id": "acme/model-b", "name": "B corp: Model B", "reasons": ["context"]}
+    ]
+    assert dropped == {"context": 1, "malformed id": 1}
+
+
+def test_build_candidates_empty_id_counted_not_listed():
+    # An empty id counts under "malformed id" but is never emitted into
+    # filtered, where it would fail the site validator's no-empty-id rule.
+    args = make_args(min_context=0)
+    models = [make_model(id=""), make_model(id="acme/model-a")]
+    filtered = []
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/model-a"}, filtered
+    )
+    assert dropped == {"malformed id": 1}
+    assert filtered == []
+    mc.compute_scores(candidates, args, {})
+    doc = mc.build_catalog(args, models, candidates, dropped, filtered, {}, {}, None)
+    assert doc["filtered"] == []
+    assert [e["id"] for e in doc["models"]] == ["acme/model-a"]
+
+
+def test_build_candidates_without_collector_matches_old_signature():
+    # 2-tuple unpacking stays valid; no filtered list, no behavior change.
+    candidates, dropped = mc.build_candidates(
+        [make_model(id="acme/model-b", context_length=100)],
+        make_args(min_context=1_000_000),
+        {},
+        {"acme/model-a"},
+    )
+    assert candidates == []
+    assert dropped == {"context": 1}
+
+
+def test_build_candidates_additive_fields():
+    created = 1_750_000_000
+    candidates, _ = mc.build_candidates(
+        [make_model(id="acme/model-a", created=created)],
+        make_args(),
+        {},
+        {"acme/model-a"},
+    )
+    cand = candidates[0]
+    assert cand["created"] == float(created)
+    assert cand["tool_calling"] is True
+    assert cand["zdr"] is True
+    assert cand["expired"] is False
+
+
+def test_build_candidates_zdr_null_under_no_zdr():
+    candidates, _ = mc.build_candidates(
+        [make_model(id="acme/model-a")], make_args(no_zdr=True), {}, set()
+    )
+    assert candidates[0]["zdr"] is None
+
+
+def test_build_candidates_tool_calling_false_when_relaxed():
+    candidates, _ = mc.build_candidates(
+        [make_model(supported_parameters=[])],
+        make_args(no_require_tools=True),
+        {},
+        {"acme/model-a"},
+    )
+    assert candidates[0]["tool_calling"] is False
+
+
+# ---------------------------------------------------------------------------
+# model_family / catalog_weights (catalog helpers)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model_id,expected",
+    [
+        ("z-ai/glm-5.3", "glm"),
+        ("openai/gpt-5.2-mini", "gpt"),
+        ("anthropic/claude-opus-4.6", "claude"),
+        ("alibaba/qwen3-max", "qwen"),
+        ("deepseek/deepseek-chat-v4", "deepseek"),
+        ("amazon/nova-pro-2", "nova"),
+        ("google/gemini_2_5_pro", "gemini"),
+        ("x-ai/o4-mini", "o"),  # documented oddball
+        ("kimi/k2", None),
+        ("acme/model-a", "model"),
+        ("acme/model-a:variant", "model"),
+        ("weird/model", "model"),
+    ],
+)
+def test_model_family(model_id, expected):
+    assert mc.model_family(model_id) == expected
+
+
+def test_catalog_weights_match_base_when_quality_present():
+    weights = mc.catalog_weights([{"id": "a/b"}], {"a/b": 50.0})
+    assert weights == mc.PRIORITY_WEIGHTS
+
+
+def test_catalog_weights_renormalize_when_quality_blind():
+    weights = mc.catalog_weights([{"id": "a/b"}], {})
+    for priority, base in mc.PRIORITY_WEIGHTS.items():
+        assert "quality" not in weights[priority]
+        total = sum(weights[priority].values())
+        assert total == pytest.approx(1.0)
+        for name, value in base.items():
+            if name != "quality":
+                assert weights[priority][name] == pytest.approx(
+                    value / (sum(base.values()) - base["quality"])
+                )
+
+
 def test_fetch_zdr_set_builds_variant_keys(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     payload = {
@@ -721,6 +848,23 @@ def test_build_aa_lookup_skips_non_numeric_index():
     )
 
 
+def test_build_aa_lookup_skips_non_finite_index():
+    entries = [
+        {"key": "acme/model-a", "name": "Model A", "index": float("nan")},
+        {"key": "acme/model-b", "name": "Model B", "index": 55.0},
+    ]
+    exact, fuzzy = mc.build_aa_lookup(entries)
+    # a NaN index would serialize as JSON NaN and score 1.0; never match it
+    assert (
+        mc.match_quality({"id": "acme/model-a", "name": "Acme: Model A"}, exact, fuzzy)
+        is None
+    )
+    assert (
+        mc.match_quality({"id": "acme/model-b", "name": "Model B"}, exact, fuzzy)
+        == 55.0
+    )
+
+
 def test_match_quality_exact_by_id():
     entries = [{"key": "acme/model-a", "name": "Model A", "index": 60.0}]
     exact, fuzzy = mc.build_aa_lookup(entries)
@@ -979,3 +1123,293 @@ def test_parse_iso_datetime_naive_gets_utc():
 def test_parse_iso_datetime_bad():
     assert mc.parse_iso_datetime("not-a-date") is None
     assert mc.parse_iso_datetime(None) is None
+
+
+# ---------------------------------------------------------------------------
+# catalog document
+# ---------------------------------------------------------------------------
+
+
+# Derived from the site validator's contract so the key set lives in exactly
+# two places: the producer (build_catalog) and the validator it feeds.
+CATALOG_ENTRY_KEYS = set(bsd.CATALOG_ENTRY_KEYS)
+
+
+def catalog_pool(**overrides):
+    """Run the real pipeline over a small fixed pool and hand back everything
+    build_catalog needs."""
+    args = make_args(min_context=0, **overrides)
+    models = [
+        make_model(
+            id="acme/model-a",
+            name="Acme: Model A",
+            created=1_700_000_000,
+        ),
+        make_model(
+            id="acme/model-b",
+            name="B corp: Model B",
+            pricing={"prompt": "0.000002", "completion": "0.000004"},
+            context_length=4_000_000,
+            created=1_750_000_000,
+        ),
+        # context_length is negative on purpose: the envelope test pins
+        # min_context to 0 (the make_args default), so the "context" drop
+        # reason -- which fires only for context < min_context -- needs a
+        # negative context to land on acme/small instead of "not ZDR".
+        make_model(
+            id="acme/small",
+            name="Small",
+            context_length=-5,
+        ),
+    ]
+    filtered = []
+    candidates, dropped = mc.build_candidates(
+        models, args, {"acme/model-a": 0.5}, {"acme/model-a", "acme/model-b"}, filtered
+    )
+    quality_by_id = {"acme/model-b": 68.4}
+    mc.compute_scores(candidates, args, quality_by_id)
+    return (
+        args,
+        models,
+        candidates,
+        dropped,
+        filtered,
+        {"acme/model-a": 0.5},
+        quality_by_id,
+    )
+
+
+def build_doc(**overrides):
+    aa_source = overrides.pop("aa_source", "AA API v2")
+    args, models, candidates, dropped, filtered, discounts, quality_by_id = (
+        catalog_pool(**overrides)
+    )
+    return mc.build_catalog(
+        args, models, candidates, dropped, filtered, discounts, quality_by_id, aa_source
+    )
+
+
+def test_catalog_envelope():
+    doc = build_doc()
+    assert doc["schema_version"] == 1
+    assert doc["tool"] == "model-compare"
+    datetime.fromisoformat(doc["generated_at"])  # ISO with offset, raises if not
+    p = doc["parameters"]
+    assert p["input_share"] == 0.75
+    assert p["quality_ref"] == 70.0
+    assert p["min_context"] == 0
+    assert p["recency_half_life"] == 120.0
+    assert p["max_age_days"] == 0.0
+    assert p["zdr_required"] is True
+    assert p["require_tools"] is False  # make_args default
+    assert p["exclude_free"] is False
+    assert p["include_batch"] is False
+    assert set(p["weights"]) == {"balanced", "price", "quality"}
+    assert p["weights"]["balanced"] == mc.PRIORITY_WEIGHTS["balanced"]
+    assert doc["sources"] == {
+        "openrouter": "ok",
+        "aa": {"mode": "api", "matched": 1},
+        "zdr": "ok",
+        "discounts": "ok",
+    }
+    assert doc["pool"]["listed"] == 3
+    assert doc["pool"]["candidates"] == 2
+    assert doc["pool"]["dropped"]["context"] == 1
+    assert set(doc["pool"]["dropped"]) == set(mc.CATALOG_DROP_REASONS)
+    assert sum(doc["pool"]["dropped"].values()) == 3 - doc["pool"]["candidates"]
+
+
+def test_catalog_entry_shape():
+    doc = build_doc()
+    assert {e["id"] for e in doc["models"]} == {"acme/model-a", "acme/model-b"}
+    for entry in doc["models"]:
+        assert set(entry) == CATALOG_ENTRY_KEYS
+        assert set(entry["pricing"]) == {
+            "input_per_1m",
+            "output_per_1m",
+            "blended_per_1m",
+        }
+        assert set(entry["scores"]) == {"price", "quality", "context", "age", "overall"}
+        assert set(entry["scores"]["overall"]) == {"balanced", "price", "quality"}
+    a = next(e for e in doc["models"] if e["id"] == "acme/model-a")
+    assert a["name"] == "Model A"  # vendor prefix stripped
+    assert a["provider"] == "acme"
+    assert a["family"] == "model"
+    assert a["pricing"] == {
+        "input_per_1m": 1.0,
+        "output_per_1m": 2.0,
+        "blended_per_1m": 1.25,
+    }
+    assert a["listed_at"] == "2023-11-14"  # utc date of 1_700_000_000
+    assert isinstance(a["age_days"], int) and a["age_days"] >= 0
+    assert a["tool_calling"] is True
+    assert a["zdr"] is True
+    assert a["discount"] == 0.5
+    assert a["expired"] is False
+    assert a["quality"] is None
+    assert a["quality_match"] is None  # matched nothing
+    b = next(e for e in doc["models"] if e["id"] == "acme/model-b")
+    assert b["quality"] == 68.4
+    assert b["quality_match"] == "api"
+    assert b["discount"] is None
+
+
+def test_catalog_future_created_age_days_clamped():
+    # created in the future must not produce a negative age_days
+    created = time.time() + 86400
+    args = make_args(min_context=0)
+    models = [make_model(id="acme/model-a", created=created)]
+    candidates, dropped = mc.build_candidates(models, args, {}, {"acme/model-a"}, [])
+    mc.compute_scores(candidates, args, {})
+    doc = mc.build_catalog(args, models, candidates, dropped, [], {}, {}, None)
+    (entry,) = doc["models"]
+    expected = datetime.fromtimestamp(created, tz=timezone.utc).date().isoformat()
+    assert entry["listed_at"] == expected
+    assert entry["age_days"] == 0
+
+
+def test_catalog_family_null_without_prefix():
+    # no model in the default pool exercises the None path; check directly
+    assert mc.model_family("kimi/k2") is None
+
+
+def test_catalog_overall_covers_all_priorities():
+    args, _, candidates, _, _, _, quality_by_id = catalog_pool()
+    doc = mc.build_catalog(args, [], candidates, {}, [], {}, quality_by_id, "AA API v2")
+    weights = mc.catalog_weights(candidates, quality_by_id)
+    for entry in doc["models"]:
+        s = entry["scores"]
+        for priority, w in weights.items():
+            expected = round(
+                w.get("quality", 0.0) * s["quality"]
+                + w.get("price", 0.0) * s["price"]
+                + w.get("context", 0.0) * s["context"]
+                + w.get("age", 0.0) * s["age"],
+                4,
+            )
+            assert s["overall"][priority] == expected
+
+
+def test_catalog_overall_matches_compute_scores_for_current_priority():
+    args, _, candidates, _, _, _, quality_by_id = catalog_pool(priority="price")
+    doc = mc.build_catalog(args, [], candidates, {}, [], {}, quality_by_id, "AA API v2")
+    by_id = {c["id"]: c for c in candidates}
+    for entry in doc["models"]:
+        assert entry["scores"]["overall"]["price"] == pytest.approx(
+            round(by_id[entry["id"]]["score"], 4), abs=2e-4
+        )
+
+
+def test_catalog_scores_in_unit_range_and_no_nan():
+    doc = build_doc()
+    for entry in doc["models"]:
+        for key in ("price", "quality", "context", "age"):
+            value = entry["scores"][key]
+            assert isinstance(value, (int, float)) and 0.0 <= value <= 1.0
+        for value in entry["scores"]["overall"].values():
+            assert 0.0 <= value <= 1.0
+
+
+def test_catalog_filtered_entries_and_sorting():
+    doc = build_doc()
+    assert doc["filtered"] == [
+        {"id": "acme/small", "name": "Small", "reasons": ["context"]}
+    ]
+    overalls = [e["scores"]["overall"]["balanced"] for e in doc["models"]]
+    assert overalls == sorted(overalls, reverse=True)
+    ids = [e["id"] for e in doc["models"]]
+    assert ids == [
+        e["id"]
+        for e in sorted(
+            doc["models"], key=lambda e: (-e["scores"]["overall"]["balanced"], e["id"])
+        )
+    ]
+
+
+def test_catalog_deterministic_modulo_generated_at():
+    doc1 = build_doc()
+    doc2 = build_doc()
+    doc1.pop("generated_at")
+    doc2.pop("generated_at")
+    assert doc1 == doc2
+
+
+def test_catalog_document_passes_site_validator():
+    # drift between the producer and the site validator must fail the
+    # suite here, not the publish
+    bsd.validate_catalog(build_doc())  # must not raise
+
+
+def test_catalog_aa_mode_mapping():
+    assert build_doc(aa_source="AA page scrape")["sources"]["aa"]["mode"] == "scrape"
+    assert build_doc(aa_source=None)["sources"]["aa"]["mode"] == "none"
+    doc = build_doc(aa_source=None)
+    assert all(
+        e["quality_match"] is None and e["quality"] is None for e in doc["models"]
+    )
+
+
+def test_catalog_unknown_aa_source_fails_loudly():
+    # a new AA source must update the mode map -- never publish a document
+    # claiming mode "none" while entries carry matched quality
+    with pytest.raises(ValueError, match="unknown AA source"):
+        build_doc(aa_source="AA carrier pigeon")
+
+
+def test_catalog_no_zdr_marks_skipped(monkeypatch, capsys):
+    monkeypatch.setattr(mc, "fetch_discount_map", lambda args: ({}, False))
+    monkeypatch.setattr(mc, "fetch_zdr_set", lambda args: (set(), False))
+    monkeypatch.setattr(mc, "fetch_aa_entries", lambda args: ([], None, False))
+    models = [
+        make_model(id="acme/model-a", created=1_700_000_000),
+        make_model(
+            id="acme/model-b", pricing={"prompt": "0.000002", "completion": "0.000004"}
+        ),
+    ]
+    args = make_args(min_context=0, no_zdr=True, catalog=True)
+    assert mc.run(args, models, False) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["sources"]["zdr"] == "skipped"
+    assert doc["parameters"]["zdr_required"] is False
+    assert all(e["zdr"] is None for e in doc["models"])
+
+
+def test_catalog_fails_closed_without_zdr(monkeypatch, capsys):
+    monkeypatch.setattr(mc, "fetch_discount_map", lambda args: ({}, False))
+    monkeypatch.setattr(mc, "fetch_zdr_set", lambda args: (set(), False))
+    monkeypatch.setattr(mc, "fetch_aa_entries", lambda args: ([], None, False))
+    models = [make_model(id="acme/model-a")]
+    args = make_args(min_context=0, catalog=True)
+    assert mc.run(args, models, False) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""  # no document
+    assert "ZDR" in captured.err
+
+
+def test_catalog_discounts_unavailable_source():
+    args, models, candidates, dropped, filtered, _discounts, quality_by_id = (
+        catalog_pool()
+    )
+    doc = mc.build_catalog(
+        args, models, candidates, dropped, filtered, {}, quality_by_id, None
+    )
+    assert doc["sources"]["discounts"] == "unavailable"
+
+
+def test_parse_args_rejects_catalog_with_best(capsys):
+    with pytest.raises(SystemExit) as exc:
+        mc.parse_args(["--catalog", "--best"])
+    assert exc.value.code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_parse_args_rejects_catalog_with_json(capsys):
+    with pytest.raises(SystemExit) as exc:
+        mc.parse_args(["--catalog", "--json"])
+    assert exc.value.code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_parse_args_accepts_catalog_alone():
+    args = mc.parse_args(["--catalog"])
+    assert args.catalog is True
