@@ -90,6 +90,28 @@ def validate_catalog(document) -> None:
     parameters = document["parameters"]
     if not isinstance(parameters, dict) or "zdr_required" not in parameters:
         raise ValueError("catalog parameters must set zdr_required")
+    # scores.overall is documented as reproducible from parameters.weights
+    # alone, so the weights must cover every priority and sum to 1.
+    weights = parameters.get("weights")
+    if not isinstance(weights, dict) or any(
+        key not in weights for key in CATALOG_OVERALL_KEYS
+    ):
+        raise ValueError(
+            "catalog parameters.weights must cover: " + ", ".join(CATALOG_OVERALL_KEYS)
+        )
+    for priority in CATALOG_OVERALL_KEYS:
+        w = weights[priority]
+        if not isinstance(w, dict) or not w:
+            raise ValueError(
+                f"catalog parameters.weights.{priority} must map score names to weights"
+            )
+        bad_weights = [
+            name for name, value in w.items() if not _is_score(value) or value == 0
+        ]
+        if bad_weights or abs(sum(w.values()) - 1.0) > 1e-6:
+            raise ValueError(
+                f"catalog parameters.weights.{priority} must be positive weights summing to 1"
+            )
     pool = document["pool"]
     if not isinstance(pool, dict) or not isinstance(pool.get("candidates"), int):
         raise ValueError("catalog pool.candidates must be an integer")
@@ -145,6 +167,14 @@ def validate_catalog(document) -> None:
             )
         if parameters["zdr_required"] and entry["zdr"] is not True:
             raise ValueError(f"models[{i}] is not zdr=true under zdr_required")
+    # ids double as the document's primary key for downstream consumers:
+    # unique within models, and never also present in filtered.
+    model_ids = [entry["id"] for entry in models]
+    if not all(isinstance(model_id, str) for model_id in model_ids):
+        raise ValueError("catalog models id must be a string")
+    if len(set(model_ids)) != len(model_ids):
+        raise ValueError("catalog models contain duplicate ids")
+    filtered_ids = []
     for i, entry in enumerate(document["filtered"]):
         if not isinstance(entry, dict):
             raise ValueError(f"filtered[{i}] is not an object")
@@ -152,6 +182,12 @@ def validate_catalog(document) -> None:
             raise ValueError(f"filtered[{i}] has no id")
         if not isinstance(entry.get("reasons"), list) or not entry["reasons"]:
             raise ValueError(f"filtered[{i}] has no reasons")
+        filtered_ids.append(entry["id"])
+    in_both = set(model_ids) & set(filtered_ids)
+    if in_both:
+        raise ValueError(
+            f"catalog id in both models and filtered: {sorted(in_both)[0]}"
+        )
 
 
 def build_data(best, priorities, now=None) -> dict:

@@ -841,6 +841,10 @@ def build_catalog(
     now = datetime.now(timezone.utc)
     weights = catalog_weights(candidates, quality_by_id)
     aa_modes = {"AA API v2": "api", "AA page scrape": "scrape"}
+    if aa_source is not None and aa_source not in aa_modes:
+        # Never claim mode "none" for a source we do not know: the document
+        # would contradict itself (mode none with matched quality scores).
+        raise ValueError(f"unknown AA source: {aa_source!r}")
     aa_mode = aa_modes.get(aa_source, "none")
     quality_match = aa_modes.get(aa_source)
 
@@ -978,7 +982,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--catalog",
         action="store_true",
-        help="print the full model catalog (ranked candidates and filtered-out models with reasons) as one JSON document",
+        help="print the full model catalog (ranked candidates and filtered-out models with reasons) as one JSON document; ignores --top and --priority, cannot be combined with --best or --json",
     )
     parser.add_argument(
         "--input-share",

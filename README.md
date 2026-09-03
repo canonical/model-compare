@@ -177,8 +177,10 @@ one bumps the version.
 Top level: `schema_version`, `tool`, `generated_at`, `parameters` (all knobs
 plus the **effective** per-priority `weights` — reproducing `scores.overall`
 needs nothing else), `sources` (`openrouter`, `aa` with `mode` `api`/`scrape`/`none`
-and the match count, `zdr` `ok`/`skipped`, `discounts`), `pool` (`listed`,
-`candidates`, `dropped`), `models`, `filtered`.
+and the match count, `zdr` `ok`/`skipped`, `discounts` `ok`/`unavailable` —
+where `unavailable` covers both a failed discount fetch and a live pool with
+zero discounts), `pool` (`listed`, `candidates`, `dropped`), `models`,
+`filtered`.
 
 Each `models` entry carries: `id` (bare `provider/model`), `name`,
 `provider`, `family` (heuristic: leading token of the slug, e.g. `glm-5.3`
@@ -198,9 +200,10 @@ malformed id, context, pricing, free, batch, no discount, not ZDR,
 modality, tool calling, expired, age
 ```
 
-`pool.dropped` lists all of them zero-filled. `--top` is ignored with
-`--catalog` (the document always covers the full pool); `--catalog`
-cannot be combined with `--best` or `--json`.
+`pool.dropped` lists all of them zero-filled. `--top` and `--priority` are
+ignored with `--catalog` (the document always covers the full pool, sorted by
+the balanced overall score); `--catalog` cannot be combined with `--best` or
+`--json`.
 
 ## Options
 

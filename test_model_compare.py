@@ -1130,23 +1130,9 @@ def test_parse_iso_datetime_bad():
 # ---------------------------------------------------------------------------
 
 
-CATALOG_ENTRY_KEYS = {
-    "id",
-    "name",
-    "provider",
-    "family",
-    "pricing",
-    "context",
-    "listed_at",
-    "age_days",
-    "tool_calling",
-    "zdr",
-    "discount",
-    "expired",
-    "quality",
-    "quality_match",
-    "scores",
-}
+# Derived from the site validator's contract so the key set lives in exactly
+# two places: the producer (build_catalog) and the validator it feeds.
+CATALOG_ENTRY_KEYS = set(bsd.CATALOG_ENTRY_KEYS)
 
 
 def catalog_pool(**overrides):
@@ -1361,6 +1347,13 @@ def test_catalog_aa_mode_mapping():
     assert all(
         e["quality_match"] is None and e["quality"] is None for e in doc["models"]
     )
+
+
+def test_catalog_unknown_aa_source_fails_loudly():
+    # a new AA source must update the mode map -- never publish a document
+    # claiming mode "none" while entries carry matched quality
+    with pytest.raises(ValueError, match="unknown AA source"):
+        build_doc(aa_source="AA carrier pigeon")
 
 
 def test_catalog_no_zdr_marks_skipped(monkeypatch, capsys):

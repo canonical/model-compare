@@ -247,6 +247,17 @@ def test_validate_catalog_happy_path():
         lambda doc: doc["models"][0].update(zdr=False),
         lambda doc: doc["filtered"].append({"id": "x/y", "name": "X", "reasons": []}),
         lambda doc: doc["models"].append("not-a-dict"),
+        # a consumer deduping on content must never see the same id twice
+        lambda doc: doc["models"].append(dict(doc["models"][0])),
+        # a model cannot be both a ranked candidate and filtered out
+        lambda doc: doc["filtered"].append(
+            {"id": "acme/model-a", "name": "A", "reasons": ["context"]}
+        ),
+        # scores.overall is documented as reproducible from parameters.weights
+        lambda doc: doc["parameters"].pop("weights"),
+        lambda doc: doc["parameters"]["weights"].pop("price"),
+        lambda doc: doc["parameters"]["weights"]["balanced"].update(price=0.9),
+        lambda doc: doc["parameters"]["weights"]["balanced"].update(age=0),
     ],
 )
 def test_validate_catalog_rejects(mutate):
