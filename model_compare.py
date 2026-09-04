@@ -474,7 +474,7 @@ def build_aa_lookup(entries):
     return exact, fuzzy
 
 
-def match_quality(model, exact, fuzzy):
+def match_quality(model, exact, fuzzy, allow_fuzzy=False):
     model_id = model["id"]
     name = model.get("name") or ""
     display = PROVIDER_PREFIX_RE.sub("", name).strip()
@@ -492,6 +492,8 @@ def match_quality(model, exact, fuzzy):
         if normalized and (tier, normalized) in exact:
             return exact[(tier, normalized)]
 
+    if not allow_fuzzy:
+        return None
     own = set(norm_key(base).split()) | set(norm_key(display).split())
     if own:
         best = 0.0

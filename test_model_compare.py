@@ -875,12 +875,15 @@ def test_match_quality_exact_by_id():
 
 
 def test_match_quality_fuzzy_overlap():
-    entries = [{"key": "gpt-4o-mini", "name": "GPT 4o mini", "index": 50.0}]
+    entries = [{"key": "model-a", "name": "Model A", "index": 55.0}]
     exact, fuzzy = mc.build_aa_lookup(entries)
     result = mc.match_quality(
-        {"id": "openai/gpt-4o-mini", "name": "OpenAI: GPT-4o mini"}, exact, fuzzy
+        {"id": "acme/model-a-extra", "name": "Model A Extra"},
+        exact,
+        fuzzy,
+        allow_fuzzy=True,
     )
-    assert result == 50.0
+    assert result == 55.0
 
 
 def test_match_quality_no_match_returns_none():
@@ -890,6 +893,16 @@ def test_match_quality_no_match_returns_none():
         mc.match_quality({"id": "other/unrelated-xyz", "name": "Zzz"}, exact, fuzzy)
         is None
     )
+
+
+def test_match_quality_fuzzy_disabled_by_default():
+    # Regression: the scrape+fuzzy path paired z-ai/glm-5.3-flash with the
+    # single AA entry glm-5-3 (Jaccard 0.6 >= 0.5). Exact-only must refuse.
+    entries = [{"key": "glm-5-3", "name": "GLM-5.3 (max)", "index": 59.5}]
+    exact, fuzzy = mc.build_aa_lookup(entries)
+    model = {"id": "z-ai/glm-5.3-flash", "name": "Z.AI: GLM 5.3 Flash"}
+    assert mc.match_quality(model, exact, fuzzy) is None
+    assert mc.match_quality(model, exact, fuzzy, allow_fuzzy=True) == 59.5
 
 
 # ---------------------------------------------------------------------------
