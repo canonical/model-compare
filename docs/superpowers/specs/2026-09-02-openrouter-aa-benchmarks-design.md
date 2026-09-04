@@ -133,7 +133,10 @@ unused when `allow_fuzzy=False`).
   "matched": N, "matched_openrouter": N}`: `matched` = candidates with any
   quality; `matched_openrouter` = candidates whose quality came from OR;
   `mode` = `"openrouter"` when `matched_openrouter > 0`, else the AA fallback
-  source (`api`/`scrape`), else `"none"`.- Rounding/determinism: `aa` values emitted raw (OR publishes 1-decimal
+  source (`api`/`scrape`), else `"none"`.
+- Rounding/determinism: `aa` values emitted raw (OR publishes 1-decimal
+  values); ordering of map iteration irrelevant (per-entry fields); the
+  byte-identical-apart-from-`generated_at` promise is unaffected.- Rounding/determinism: `aa` values emitted raw (OR publishes 1-decimal
   values); ordering of map iteration irrelevant (per-entry fields); the
   byte-identical-apart-from-`generated_at` promise is unaffected.
 
