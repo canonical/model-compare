@@ -1085,6 +1085,62 @@ def test_fetch_openrouter_frontend_realistic_slugs(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# resolve_quality (OR benchmarks first, exact AA fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_quality_prefers_openrouter_benchmarks():
+    candidates = [{"id": "acme/model-a", "name": "Acme: Model A"}]
+    aa_by_id = {"acme/model-a": {"intelligence_index": 57.5}}
+    exact, fuzzy = mc.build_aa_lookup(
+        [{"key": "model-a", "name": "Model A", "index": 55.0}]
+    )
+    quality, source = mc.resolve_quality(
+        candidates, aa_by_id, exact, fuzzy, "AA API v2"
+    )
+    assert quality == {"acme/model-a": 57.5}
+    assert source == {"acme/model-a": "openrouter"}
+
+
+def test_resolve_quality_falls_back_to_exact_aa_and_records_provenance():
+    candidates = [{"id": "acme/model-b", "name": "Acme: Model B"}]
+    exact, fuzzy = mc.build_aa_lookup(
+        [{"key": "openai/model-b", "name": "Model B", "index": 51.2}]
+    )
+    quality, source = mc.resolve_quality(candidates, {}, exact, fuzzy, "AA API v2")
+    assert quality == {"acme/model-b": 51.2}
+    assert source == {"acme/model-b": "api"}
+
+
+def test_resolve_quality_variant_inherits_base_trio():
+    candidates = [{"id": "acme/model-a:free", "name": "Acme: Model A (free)"}]
+    aa_by_id = {"acme/model-a": {"intelligence_index": 57.5}}
+    quality, source = mc.resolve_quality(candidates, aa_by_id, {}, {}, None)
+    assert quality == {"acme/model-a:free": 57.5}
+    assert source == {"acme/model-a:free": "openrouter"}
+
+
+def test_resolve_quality_trio_without_intelligence_falls_through():
+    candidates = [{"id": "acme/model-a", "name": "Acme: Model A"}]
+    aa_by_id = {"acme/model-a": {"coding_index": 70.0}}
+    exact, fuzzy = mc.build_aa_lookup(
+        [{"key": "acme/model-a", "name": "Model A", "index": 44.0}]
+    )
+    quality, source = mc.resolve_quality(
+        candidates, aa_by_id, exact, fuzzy, "AA page scrape"
+    )
+    assert quality == {"acme/model-a": 44.0}
+    assert source == {"acme/model-a": "scrape"}
+
+
+def test_resolve_quality_unmatched_is_none():
+    candidates = [{"id": "acme/model-a", "name": "Acme: Model A"}]
+    quality, source = mc.resolve_quality(candidates, {}, {}, {}, None)
+    assert quality == {}
+    assert source == {}
+
+
+# ---------------------------------------------------------------------------
 # formatting helpers
 # ---------------------------------------------------------------------------
 

@@ -588,6 +588,31 @@ def build_aa_benchmarks(benchmarks) -> dict:
     return aa_by_id
 
 
+def resolve_quality(candidates, aa_by_id, exact, fuzzy, aa_source):
+    """Per-candidate quality: OR benchmarks first, AA exact fallback, else None.
+
+    OR's per-slug values cannot mispair; the AA fallback is exact-tier only
+    (match_quality's fuzzy tier is the proven variant-conflation bug and
+    stays off in production). Source values match the catalog contract:
+    "openrouter", "api", "scrape".
+    """
+    fallback_source = {"AA API v2": "api", "AA page scrape": "scrape"}.get(aa_source)
+    quality_by_id = {}
+    source_by_id = {}
+    for cand in candidates:
+        bench = aa_by_id.get(base_model_id(cand["id"]))
+        intelligence = bench.get("intelligence_index") if bench else None
+        if intelligence is not None:
+            quality_by_id[cand["id"]] = intelligence
+            source_by_id[cand["id"]] = "openrouter"
+            continue
+        index = match_quality({"id": cand["id"], "name": cand["name"]}, exact, fuzzy)
+        if index is not None:
+            quality_by_id[cand["id"]] = index
+            source_by_id[cand["id"]] = fallback_source
+    return quality_by_id, source_by_id
+
+
 def model_family(model_id: str) -> str | None:
     """Best-effort model family from the base slug (documented heuristic).
 
@@ -1177,11 +1202,9 @@ def run(args, models, or_cached) -> int:
         )
         return 2
 
-    quality_by_id = {}
-    for cand in candidates:
-        index = match_quality({"id": cand["id"], "name": cand["name"]}, exact, fuzzy)
-        if index is not None:
-            quality_by_id[cand["id"]] = index
+    quality_by_id, quality_source_by_id = resolve_quality(
+        candidates, aa_by_id, exact, fuzzy, aa_source
+    )
     weights = compute_scores(candidates, args, quality_by_id)
 
     if args.catalog:
@@ -1213,12 +1236,18 @@ def run(args, models, or_cached) -> int:
                 f"{v} {k}" for k, v in sorted(dropped.items(), key=lambda kv: -kv[1])
             )
             drop_note = f" (dropped: {bits})"
-        unmatched = sum(1 for c in candidates if c["id"] not in quality_by_id)
-        if aa_source:
-            matched = len(candidates) - unmatched
+        matched_or = sum(1 for s in quality_source_by_id.values() if s == "openrouter")
+        matched_aa = len(quality_by_id) - matched_or
+        unmatched = len(candidates) - len(quality_by_id)
+        bits = []
+        if matched_or:
+            bits.append(f"OpenRouter benchmarks ({matched_or})")
+        if matched_aa:
+            bits.append(f"{aa_source} exact ({matched_aa})")
+        if bits:
             quality_note = (
-                f"quality via {aa_source}{' (cached)' if aa_cached else ''}: "
-                f"{len(aa_entries)} scores, matched {matched}/{len(candidates)} candidates"
+                f"quality via {' + '.join(bits)}: matched "
+                f"{len(quality_by_id)}/{len(candidates)} candidates"
             )
             if unmatched:
                 quality_note += "; unmatched candidates score 0 on quality"
