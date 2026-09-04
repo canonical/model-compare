@@ -224,13 +224,13 @@ def test_build_candidates_stores_discount():
 
 
 # ---------------------------------------------------------------------------
-# discount data source (OpenRouter frontend models API)
+# OpenRouter frontend fetch (discounts + AA benchmarks + ZDR)
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_discount_map_builds_variant_aware_keys(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    payload = {
+def frontend_payload():
+    """Base-URL payload with discounts and benchmarks in one response."""
+    return {
         "data": {
             "models": [
                 {
@@ -246,121 +246,155 @@ def test_fetch_discount_map_builds_variant_aware_keys(monkeypatch, tmp_path):
                 },
                 {
                     "slug": "acme/c",
-                    "endpoint": {
-                        "variant": "batch",
-                        "pricing": {"discount": 0.75},
-                    },
+                    "endpoint": {"variant": "batch", "pricing": {"discount": 0.75}},
                 },
                 {
                     "slug": "~acme/private",
-                    "endpoint": {
-                        "variant": "standard",
-                        "pricing": {"discount": 0.9},
-                    },
+                    "endpoint": {"variant": "standard", "pricing": {"discount": 0.9}},
                 },
                 {"slug": "acme/no-endpoint", "endpoint": None},
                 {
                     "slug": "acme/no-discount-field",
                     "endpoint": {"variant": "standard", "pricing": {}},
                 },
+            ],
+            "benchmarks": {
+                "acme/a-20260826": {
+                    "aa": {
+                        "intelligence_index": 57.5,
+                        "coding_index": 71.5,
+                        "agentic_index": 58.2,
+                    }
+                },
+            },
+        }
+    }
+
+
+def zdr_payload():
+    return {
+        "data": {
+            "models": [
+                {
+                    "slug": "acme/a",
+                    "endpoint": {"variant": "standard", "pricing": {"prompt": "0.1"}},
+                },
+                {"slug": "acme/b", "endpoint": {"variant": "batch", "pricing": {}}},
+                {"slug": "~acme/private", "endpoint": {"variant": "standard"}},
+                {"slug": "acme/no-endpoint", "endpoint": None},
             ]
         }
     }
-    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
-    result, cached = mc.fetch_discount_map(make_args(no_cache=True))
-    assert cached is False
-    assert result == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
 
 
-def test_fetch_discount_map_caches_result(monkeypatch, tmp_path):
+def stub_frontend(monkeypatch, calls, base_payload, zdr_payload=None):
+    """URL-dispatching fetch_json stub; zdr_payload None means the ZDR URL raises."""
+
+    def fake_fetch(url, *a, **k):
+        calls.append(url)
+        if url == mc.OPENROUTER_ZDR_URL:
+            if zdr_payload is None:
+                raise RuntimeError("zdr down")
+            return zdr_payload
+        if isinstance(base_payload, Exception):
+            raise base_payload
+        return base_payload
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+
+
+def test_fetch_openrouter_frontend_derives_all_payloads(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
-
-    def fake_fetch(*a, **k):
-        calls.append(1)
-        return {
-            "data": {
-                "models": [
-                    {
-                        "slug": "acme/a",
-                        "endpoint": {
-                            "variant": "standard",
-                            "pricing": {"discount": 0.25},
-                        },
-                    }
-                ]
-            }
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=True)
+    )
+    assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
+    assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert aa_by_id == {
+        "acme/a": {
+            "intelligence_index": 57.5,
+            "coding_index": 71.5,
+            "agentic_index": 58.2,
         }
-
-    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
-    args = make_args(no_cache=False, cache_ttl=3600)
-    first, cached1 = mc.fetch_discount_map(args)
-    second, cached2 = mc.fetch_discount_map(args)
-    assert len(calls) == 1
-    assert (cached1, cached2) == (False, True)
-    assert first == second == {"acme/a": 0.25}
+    }
+    assert cache_hits == set()
+    assert mc.OPENROUTER_DISCOUNTS_URL in calls
+    assert mc.OPENROUTER_ZDR_URL in calls
 
 
-def test_fetch_discount_map_fetch_failure_returns_empty(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-
-    def boom(*a, **k):
-        raise RuntimeError("network down")
-
-    monkeypatch.setattr(mc, "fetch_json", boom)
-    result, cached = mc.fetch_discount_map(make_args(no_cache=True))
-    assert result == {}
-    assert cached is False
-
-
-def test_fetch_discount_map_does_not_cache_empty(monkeypatch, tmp_path):
+def test_fetch_openrouter_frontend_caches_per_payload(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
-
-    def fake_fetch(*a, **k):
-        calls.append(1)
-        return {"data": {"models": []}}
-
-    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
     args = make_args(no_cache=False, cache_ttl=3600)
-    first, cached1 = mc.fetch_discount_map(args)
-    second, cached2 = mc.fetch_discount_map(args)
-    assert first == second == {}
-    assert (cached1, cached2) == (False, False)
-    assert len(calls) == 2
-    assert not (tmp_path / "model-compare" / "openrouter-discounts.json").exists()
+    first = mc.fetch_openrouter_frontend(args)
+    second = mc.fetch_openrouter_frontend(args)
+    assert len(calls) == 2  # base + zdr once each; second run fully cached
+    assert first[3] == set()
+    assert second[3] == {"discounts", "aa", "zdr"}
+    assert first[:3] == second[:3]
 
 
-def test_fetch_discount_map_treats_empty_cached_map_as_miss(monkeypatch, tmp_path):
+def test_fetch_openrouter_frontend_base_failure_keeps_zdr_decoupled(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
+    stub_frontend(monkeypatch, calls, RuntimeError("network down"), zdr_payload())
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=True)
+    )
+    assert discounts == {}
+    assert aa_by_id == {}
+    assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert cache_hits == set()
 
-    def fake_fetch(*a, **k):
-        calls.append(1)
-        return {
-            "data": {
-                "models": [
-                    {
-                        "slug": "acme/a",
-                        "endpoint": {
-                            "variant": "standard",
-                            "pricing": {"discount": 0.25},
-                        },
-                    }
-                ]
-            }
-        }
 
-    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+def test_fetch_openrouter_frontend_does_not_cache_empty(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+    stub_frontend(
+        monkeypatch, calls, {"data": {"models": []}}, {"data": {"models": []}}
+    )
+    args = make_args(no_cache=False, cache_ttl=3600)
+    first = mc.fetch_openrouter_frontend(args)
+    second = mc.fetch_openrouter_frontend(args)
+    assert first[:3] == ({}, set(), {})
+    assert second[:3] == ({}, set(), {})
+    assert len(calls) == 4  # 2 per run (base + zdr); nothing cacheable
+    cache_dir = tmp_path / "model-compare"
+    assert not (cache_dir / "openrouter-frontend-discounts.json").exists()
+    assert not (cache_dir / "openrouter-frontend-aa.json").exists()
+    assert not (cache_dir / "openrouter-zdr.json").exists()
+
+
+def test_fetch_openrouter_frontend_treats_empty_cached_payloads_as_miss(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
     cache_dir = tmp_path / "model-compare"
     cache_dir.mkdir(parents=True)
-    (cache_dir / "openrouter-discounts.json").write_text(
-        json.dumps({"fetched_at": time.time(), "payload": {}})
+    now = time.time()
+    (cache_dir / "openrouter-frontend-discounts.json").write_text(
+        json.dumps({"fetched_at": now, "payload": {}})
     )
-    result, cached = mc.fetch_discount_map(make_args(no_cache=False, cache_ttl=3600))
-    assert len(calls) == 1
-    assert cached is False
-    assert result == {"acme/a": 0.25}
+    (cache_dir / "openrouter-frontend-aa.json").write_text(
+        json.dumps({"fetched_at": now, "payload": {}})
+    )
+    (cache_dir / "openrouter-zdr.json").write_text(
+        json.dumps({"fetched_at": now, "payload": []})
+    )
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=False, cache_ttl=3600)
+    )
+    assert len(calls) == 2  # all three payloads empty in cache -> both fetches
+    assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
+    assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert cache_hits == set()
 
 
 # ---------------------------------------------------------------------------
@@ -516,136 +550,45 @@ def test_catalog_weights_renormalize_when_quality_blind():
                 )
 
 
-def test_fetch_zdr_set_builds_variant_keys(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    payload = {
-        "data": {
-            "models": [
-                {
-                    "slug": "acme/a",
-                    "endpoint": {
-                        "variant": "standard",
-                        "pricing": {"prompt": "0.1"},
-                    },
-                },
-                {"slug": "acme/b", "endpoint": {"variant": "batch", "pricing": {}}},
-                {"slug": "~acme/private", "endpoint": {"variant": "standard"}},
-                {"slug": "acme/no-endpoint", "endpoint": None},
-            ]
-        }
-    }
-    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
-    ids, cached = mc.fetch_zdr_set(make_args(no_cache=True))
-    assert cached is False
-    # membership comes from the zdr=true filter itself: entries are kept even
-    # without endpoint details, keyed by bare slug as the best available id
-    assert ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
-
-
-def test_fetch_zdr_set_skips_fetch_when_disabled(monkeypatch, tmp_path):
+def test_fetch_openrouter_frontend_no_zdr_skips_zdr_fetch_but_still_loads_base(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
-
-    def fake_fetch(*a, **k):
-        calls.append(1)
-        return {"data": {"models": []}}
-
-    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
-    ids, cached = mc.fetch_zdr_set(make_args(no_cache=True, no_zdr=True))
-    assert ids == set()
-    assert cached is False
-    assert calls == []
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=True, no_zdr=True)
+    )
+    assert zdr_ids == set()
+    assert discounts != {}
+    assert aa_by_id != {}
+    assert calls == [mc.OPENROUTER_DISCOUNTS_URL]
 
 
-def test_fetch_zdr_set_caches_result(monkeypatch, tmp_path):
+def test_fetch_openrouter_frontend_aa_cache_hit_skips_base_fetch(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
-
-    def fake_fetch(*a, **k):
-        calls.append(1)
-        return {
-            "data": {
-                "models": [
-                    {
-                        "slug": "acme/a",
-                        "endpoint": {
-                            "variant": "standard",
-                            "pricing": {"prompt": "0.1"},
-                        },
-                    }
-                ]
-            }
-        }
-
-    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
-    args = make_args(no_cache=False, cache_ttl=3600)
-    first, cached1 = mc.fetch_zdr_set(args)
-    second, cached2 = mc.fetch_zdr_set(args)
-    assert len(calls) == 1
-    assert (cached1, cached2) == (False, True)
-    assert first == second == {"acme/a"}
-
-
-def test_fetch_zdr_set_does_not_cache_empty(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    calls = []
-
-    def fake_fetch(*a, **k):
-        calls.append(1)
-        return {"data": {"models": []}}
-
-    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
-    args = make_args(no_cache=False, cache_ttl=3600)
-    first, cached1 = mc.fetch_zdr_set(args)
-    second, cached2 = mc.fetch_zdr_set(args)
-    assert first == second == set()
-    assert (cached1, cached2) == (False, False)
-    assert len(calls) == 2
-    assert not (tmp_path / "model-compare" / "openrouter-zdr.json").exists()
-
-
-def test_fetch_zdr_set_treats_empty_cached_set_as_miss(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    calls = []
-
-    def fake_fetch(*a, **k):
-        calls.append(1)
-        return {
-            "data": {
-                "models": [
-                    {
-                        "slug": "acme/a",
-                        "endpoint": {
-                            "variant": "standard",
-                            "pricing": {"prompt": "0.1"},
-                        },
-                    }
-                ]
-            }
-        }
-
-    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
     cache_dir = tmp_path / "model-compare"
     cache_dir.mkdir(parents=True)
-    (cache_dir / "openrouter-zdr.json").write_text(
-        json.dumps({"fetched_at": time.time(), "payload": []})
+    (cache_dir / "openrouter-frontend-discounts.json").write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"acme/a": 0.5}})
     )
-    result, cached = mc.fetch_zdr_set(make_args(no_cache=False, cache_ttl=3600))
-    assert len(calls) == 1
-    assert cached is False
-    assert result == {"acme/a"}
-
-
-def test_fetch_zdr_set_fetch_failure_returns_empty(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-
-    def boom(*a, **k):
-        raise RuntimeError("network down")
-
-    monkeypatch.setattr(mc, "fetch_json", boom)
-    result, cached = mc.fetch_zdr_set(make_args(no_cache=True))
-    assert result == set()
-    assert cached is False
+    (cache_dir / "openrouter-frontend-aa.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {"acme/a": {"intelligence_index": 57.5}},
+            }
+        )
+    )
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=False, cache_ttl=3600)
+    )
+    assert len(calls) == 1  # only the ZDR URL
+    assert discounts == {"acme/a": 0.5}
+    assert aa_by_id == {"acme/a": {"intelligence_index": 57.5}}
+    assert cache_hits == {"discounts", "aa"}
 
 
 @pytest.mark.parametrize(
@@ -734,8 +677,9 @@ def test_best_prints_provider_qualified_id(monkeypatch, capsys):
     monkeypatch.setattr(
         mc, "fetch_openrouter_models", lambda a: ([make_model()], False)
     )
-    monkeypatch.setattr(mc, "fetch_discount_map", lambda a: ({}, False))
-    monkeypatch.setattr(mc, "fetch_zdr_set", lambda a: ({"acme/model-a"}, False))
+    monkeypatch.setattr(
+        mc, "fetch_openrouter_frontend", lambda a: ({}, {"acme/model-a"}, {}, set())
+    )
     monkeypatch.setattr(mc, "fetch_aa_entries", lambda a: ([], None, False))
     argv = ["--best", "--no-cache", "--min-context", "0", "--no-require-tools"]
     assert mc.main(argv) == 0
@@ -1119,33 +1063,25 @@ def _realistic_openrouter_payload():
     }
 
 
-def test_fetch_discount_map_realistic_slugs(monkeypatch, tmp_path):
+def test_fetch_openrouter_frontend_realistic_slugs(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     monkeypatch.setattr(
         mc, "fetch_json", lambda *a, **k: _realistic_openrouter_payload()
     )
-    result, cached = mc.fetch_discount_map(make_args(no_cache=True))
-    assert cached is False
-    # Real catalog ids use "provider/model" and ":variant" suffixes.
-    assert result == {
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=True)
+    )
+    assert discounts == {
         "openai/gpt-4o": 0.5,
         "openai/gpt-4o:free": 0.0,
         "anthropic/claude-sonnet-4-20250514:batch": 0.25,
     }
-
-
-def test_fetch_zdr_set_realistic_slugs(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    monkeypatch.setattr(
-        mc, "fetch_json", lambda *a, **k: _realistic_openrouter_payload()
-    )
-    ids, cached = mc.fetch_zdr_set(make_args(no_cache=True))
-    assert cached is False
-    assert ids == {
+    assert zdr_ids == {
         "openai/gpt-4o",
         "openai/gpt-4o:free",
         "anthropic/claude-sonnet-4-20250514:batch",
     }
+    assert aa_by_id == {}
 
 
 # ---------------------------------------------------------------------------
@@ -1430,8 +1366,9 @@ def test_catalog_unknown_aa_source_fails_loudly():
 
 
 def test_catalog_no_zdr_marks_skipped(monkeypatch, capsys):
-    monkeypatch.setattr(mc, "fetch_discount_map", lambda args: ({}, False))
-    monkeypatch.setattr(mc, "fetch_zdr_set", lambda args: (set(), False))
+    monkeypatch.setattr(
+        mc, "fetch_openrouter_frontend", lambda args: ({}, set(), {}, set())
+    )
     monkeypatch.setattr(mc, "fetch_aa_entries", lambda args: ([], None, False))
     models = [
         make_model(id="acme/model-a", created=1_700_000_000),
@@ -1448,8 +1385,9 @@ def test_catalog_no_zdr_marks_skipped(monkeypatch, capsys):
 
 
 def test_catalog_fails_closed_without_zdr(monkeypatch, capsys):
-    monkeypatch.setattr(mc, "fetch_discount_map", lambda args: ({}, False))
-    monkeypatch.setattr(mc, "fetch_zdr_set", lambda args: (set(), False))
+    monkeypatch.setattr(
+        mc, "fetch_openrouter_frontend", lambda args: ({}, set(), {}, set())
+    )
     monkeypatch.setattr(mc, "fetch_aa_entries", lambda args: ([], None, False))
     models = [make_model(id="acme/model-a")]
     args = make_args(min_context=0, catalog=True)

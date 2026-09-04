@@ -199,67 +199,98 @@ def fetch_openrouter_models(args):
     return models, False
 
 
-def fetch_discount_map(args):
-    """Map of public model id -> current discount fraction (e.g. 0.5).
+FRONTEND_DISCOUNTS_CACHE = "openrouter-frontend-discounts"
+FRONTEND_AA_CACHE = "openrouter-frontend-aa"
 
-    Comes from the OpenRouter frontend models API -- the same data the
-    website's ?discount=true filter uses. It is undocumented and may change;
-    on any failure the map is empty and discounts simply show as "--".
+
+def fetch_openrouter_frontend(args):
+    """Derive discounts, ZDR ids and OR-published AA benchmarks.
+
+    Two loads: the base frontend URL serves discounts and benchmarks in one
+    response; the ?zdr=true URL serves ZDR and is skipped entirely under
+    --no-zdr. Each payload caches independently under its own key and is
+    cached only when non-empty, so a degraded payload self-heals on the
+    next run. A base-URL outage never blocks the ZDR fetch, and vice
+    versa. Returns (discounts, zdr_ids, aa_by_id, cache_hits) where
+    cache_hits names the payloads served from cache ("discounts", "zdr",
+    "aa").
     """
-    if not args.no_cache:
-        cached = load_cache("openrouter-discounts", args.cache_ttl)
-        if cached:
-            return cached, True
-    try:
-        payload = fetch_json(OPENROUTER_DISCOUNTS_URL, timeout=30)
-    except Exception as exc:
-        warn(f"could not fetch discount data: {exc}")
-        return {}, False
-    data = payload.get("data") if isinstance(payload, dict) else None
-    entries = data.get("models") if isinstance(data, dict) else None
     discounts = {}
-    for entry in entries or []:
-        if not isinstance(entry, dict):
-            continue
-        slug = entry.get("slug") or ""
-        if not slug or slug.startswith("~"):
-            continue
-        endpoint = entry.get("endpoint") or {}
-        raw = (endpoint.get("pricing") or {}).get("discount")
-        if not isinstance(raw, (int, float)):
-            continue
-        variant = endpoint.get("variant") or ""
-        key = slug if variant in ("", "standard") else f"{slug}:{variant}"
-        discounts.setdefault(key, float(raw))
-    if not discounts:
-        # An intact endpoint always yields hundreds of entries (discount: 0 is
-        # still an entry); an empty map means the response shape changed --
-        # never cache that, so the next run recovers on its own.
-        warn("no discount entries found; treating discounts as unavailable")
-        return {}, False
-    save_cache("openrouter-discounts", discounts)
-    return discounts, False
+    aa_by_id = {}
+    zdr_ids = set()
+    cache_hits = set()
 
+    aa_from_cache = False
+    if not args.no_cache:
+        cached = load_cache(FRONTEND_DISCOUNTS_CACHE, args.cache_ttl)
+        if cached:
+            discounts = cached
+            cache_hits.add("discounts")
+        cached = load_cache(FRONTEND_AA_CACHE, args.cache_ttl)
+        if cached:
+            aa_by_id = cached
+            aa_from_cache = True
+            cache_hits.add("aa")
 
-def fetch_zdr_set(args):
-    """Set of public model ids whose endpoint is zero-data-retention.
+    if not discounts or not aa_from_cache:
+        try:
+            payload = fetch_json(OPENROUTER_DISCOUNTS_URL, timeout=30)
+        except Exception as exc:
+            if not discounts:
+                warn(f"could not fetch discount data: {exc}")
+            if not aa_from_cache:
+                warn(f"could not fetch AA benchmark data: {exc}")
+        else:
+            data = payload.get("data") if isinstance(payload, dict) else None
+            entries = data.get("models") if isinstance(data, dict) else None
+            fresh_discounts = {}
+            for entry in entries or []:
+                if not isinstance(entry, dict):
+                    continue
+                slug = entry.get("slug") or ""
+                if not slug or slug.startswith("~"):
+                    continue
+                endpoint = entry.get("endpoint") or {}
+                raw = (endpoint.get("pricing") or {}).get("discount")
+                if not isinstance(raw, (int, float)):
+                    continue
+                variant = endpoint.get("variant") or ""
+                key = slug if variant in ("", "standard") else f"{slug}:{variant}"
+                fresh_discounts.setdefault(key, float(raw))
+            fresh_aa = build_aa_benchmarks(
+                data.get("benchmarks") if isinstance(data, dict) else None
+            )
+            if fresh_discounts:
+                discounts = fresh_discounts
+                save_cache(FRONTEND_DISCOUNTS_CACHE, discounts)
+                cache_hits.discard("discounts")
+            elif not discounts:
+                # An intact endpoint always yields hundreds of entries
+                # (discount: 0 is still an entry); an empty map means the
+                # response shape changed -- never cache that, so the next
+                # run recovers on its own.
+                warn("no discount entries found; treating discounts as unavailable")
+            if not aa_from_cache:
+                if fresh_aa:
+                    aa_by_id = fresh_aa
+                    save_cache(FRONTEND_AA_CACHE, aa_by_id)
+                else:
+                    warn(
+                        "no AA benchmark entries found; treating OpenRouter "
+                        "benchmarks as unavailable"
+                    )
 
-    Sourced from the same frontend models API as the website's ?zdr=true
-    filter (undocumented). An empty result means the data is unavailable:
-    the caller must then fail closed rather than silently considering
-    non-ZDR models. The fetch is skipped entirely under --no-zdr.
-    """
     if args.no_zdr:
-        return set(), False
+        return discounts, zdr_ids, aa_by_id, cache_hits
     if not args.no_cache:
         cached = load_cache("openrouter-zdr", args.cache_ttl)
         if cached:
-            return set(cached), True
+            return discounts, set(cached), aa_by_id, cache_hits | {"zdr"}
     try:
         payload = fetch_json(OPENROUTER_ZDR_URL, timeout=30)
     except Exception as exc:
         warn(f"could not fetch ZDR data: {exc}")
-        return set(), False
+        return discounts, zdr_ids, aa_by_id, cache_hits
     data = payload.get("data") if isinstance(payload, dict) else None
     entries = data.get("models") if isinstance(data, dict) else None
     ids = set()
@@ -274,9 +305,9 @@ def fetch_zdr_set(args):
         ids.add(slug if variant in ("", "standard") else f"{slug}:{variant}")
     if not ids:
         warn("no ZDR entries found; treating ZDR data as unavailable")
-        return set(), False
+        return discounts, zdr_ids, aa_by_id, cache_hits
     save_cache("openrouter-zdr", sorted(ids))
-    return ids, False
+    return discounts, ids, aa_by_id, cache_hits
 
 
 def parse_price(value) -> float | None:
@@ -1127,8 +1158,7 @@ def main(argv=None) -> int:
 
 
 def run(args, models, or_cached) -> int:
-    discounts, disc_cached = fetch_discount_map(args)
-    zdr_ids, zdr_cached = fetch_zdr_set(args)
+    discounts, zdr_ids, aa_by_id, frontend_cache_hits = fetch_openrouter_frontend(args)
     if not args.no_zdr and not zdr_ids:
         warn(
             "ZDR data unavailable; refusing to rank possibly non-ZDR models "
@@ -1197,10 +1227,12 @@ def run(args, models, or_cached) -> int:
         source_note = []
         if or_cached:
             source_note.append("catalog cached")
-        if disc_cached:
+        if "discounts" in frontend_cache_hits:
             source_note.append("discounts cached")
-        if zdr_cached:
+        if "zdr" in frontend_cache_hits:
             source_note.append("ZDR cached")
+        if "aa" in frontend_cache_hits:
+            source_note.append("AA benchmarks cached")
         if aa_cached and aa_source:
             source_note.append("quality cached")
         if source_note:
