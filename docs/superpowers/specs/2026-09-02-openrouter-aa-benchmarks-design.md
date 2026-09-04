@@ -136,8 +136,6 @@ unused when `allow_fuzzy=False`).
   source (`api`/`scrape`), else `"none"`.
 - Rounding/determinism: `aa` values emitted raw (OR publishes 1-decimal
   values); ordering of map iteration irrelevant (per-entry fields); the
-  byte-identical-apart-from-`generated_at` promise is unaffected.- Rounding/determinism: `aa` values emitted raw (OR publishes 1-decimal
-  values); ordering of map iteration irrelevant (per-entry fields); the
   byte-identical-apart-from-`generated_at` promise is unaffected.
 
 ## 6. Validator (build_site_data.py)
