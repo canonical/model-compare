@@ -338,7 +338,7 @@ def test_fetch_openrouter_frontend_caches_per_payload(monkeypatch, tmp_path):
 
 
 def test_fetch_openrouter_frontend_base_failure_keeps_zdr_decoupled(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, capsys
 ):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
@@ -350,6 +350,10 @@ def test_fetch_openrouter_frontend_base_failure_keeps_zdr_decoupled(
     assert aa_by_id == {}
     assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
     assert cache_hits == set()
+    err = capsys.readouterr().err
+    assert "could not fetch discount data" in err
+    assert "could not fetch AA benchmark data" in err
+    assert "could not fetch ZDR data" not in err  # zdr succeeded
 
 
 def test_fetch_openrouter_frontend_does_not_cache_empty(monkeypatch, tmp_path):
@@ -395,6 +399,37 @@ def test_fetch_openrouter_frontend_treats_empty_cached_payloads_as_miss(
     assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
     assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
     assert cache_hits == set()
+
+
+def test_fetch_openrouter_frontend_fresh_fetch_replaces_cached_discounts(
+    monkeypatch, tmp_path
+):
+    # the discounts cache hit is provisional: the base URL is still fetched
+    # for the AA benchmarks, and the fresh discounts win and overwrite it
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
+    cache_dir = tmp_path / "model-compare"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "openrouter-frontend-discounts.json").write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"acme/cached": 0.1}})
+    )
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=False, cache_ttl=3600)
+    )
+    assert len(calls) == 2  # aa not cached, so the base URL is hit anyway
+    assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
+    assert aa_by_id == {
+        "acme/a": {
+            "intelligence_index": 57.5,
+            "coding_index": 71.5,
+            "agentic_index": 58.2,
+        }
+    }
+    assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert cache_hits == set()  # fresh discounts discard the cache hit
+    saved = json.loads((cache_dir / "openrouter-frontend-discounts.json").read_text())
+    assert saved["payload"] == discounts
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +602,22 @@ def test_fetch_openrouter_frontend_no_zdr_skips_zdr_fetch_but_still_loads_base(
     assert calls == [mc.OPENROUTER_DISCOUNTS_URL]
 
 
+def test_fetch_openrouter_frontend_normal_run_after_no_zdr_run(monkeypatch, tmp_path):
+    # a --no-zdr run writes no ZDR cache; a later normal run on the warm
+    # cache must still derive ZDR ids instead of failing closed
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
+    first = mc.fetch_openrouter_frontend(
+        make_args(no_cache=False, cache_ttl=3600, no_zdr=True)
+    )
+    assert first[1] == set()
+    assert not (tmp_path / "model-compare" / "openrouter-zdr.json").exists()
+    second = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
+    assert second[1] == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert calls == [mc.OPENROUTER_DISCOUNTS_URL, mc.OPENROUTER_ZDR_URL]
+
+
 def test_fetch_openrouter_frontend_aa_cache_hit_skips_base_fetch(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
@@ -686,6 +737,37 @@ def test_best_prints_provider_qualified_id(monkeypatch, capsys):
     argv = ["--best", "--no-cache", "--min-context", "0", "--no-require-tools"]
     assert mc.main(argv) == 0
     assert capsys.readouterr().out.strip() == "openrouter/acme/model-a"
+
+
+def test_table_mode_prints_composed_quality_note(monkeypatch, capsys):
+    models = [
+        make_model(),
+        make_model(
+            id="acme/model-b",
+            pricing={"prompt": "0.000002", "completion": "0.000004"},
+            context_length=4_000_000,
+        ),
+    ]
+    monkeypatch.setattr(mc, "fetch_openrouter_models", lambda a: (models, False))
+    monkeypatch.setattr(
+        mc,
+        "fetch_openrouter_frontend",
+        lambda a: (
+            {},
+            {"acme/model-a", "acme/model-b"},
+            {"acme/model-a": {"intelligence_index": 57.5}},
+            set(),
+        ),
+    )
+    monkeypatch.setattr(mc, "fetch_aa_entries", lambda a: ([], None, False))
+    argv = ["--top", "1", "--no-cache", "--min-context", "0", "--no-require-tools"]
+    assert mc.main(argv) == 0
+    captured = capsys.readouterr()
+    assert (
+        "quality via OpenRouter benchmarks (1): matched 1/2 candidates; "
+        "unmatched candidates score 0 on quality" in captured.out
+    )
+    assert "note:" not in captured.err  # --no-cache: nothing served from cache
 
 
 # ---------------------------------------------------------------------------
@@ -856,7 +938,7 @@ def test_match_quality_fuzzy_disabled_by_default():
 # ---------------------------------------------------------------------------
 
 
-def test_build_aa_benchmaps_strips_dated_permaslugs():
+def test_build_aa_benchmarks_strips_dated_permaslugs():
     benchmarks = {
         "z-ai/glm-5.3-flash-20260826": {
             "aa": {
@@ -1197,10 +1279,10 @@ def test_parse_iso_datetime_bad():
 # ---------------------------------------------------------------------------
 
 
-# Derived from the site validator's contract so the key set lives in exactly
-# two places: the producer (build_catalog) and the validator it feeds. The
-# producer already publishes the "aa" trio; build_site_data learns it next.
-CATALOG_ENTRY_KEYS = set(bsd.CATALOG_ENTRY_KEYS) | {"aa"}
+# Test-file mirror of the producer/validator contract so the key set lives
+# in exactly two places: the producer (build_catalog) and the validator it
+# feeds. bsd.CATALOG_ENTRY_KEYS already carries the "aa" trio.
+CATALOG_ENTRY_KEYS = set(bsd.CATALOG_ENTRY_KEYS)
 
 
 def catalog_pool(**overrides):
@@ -1441,6 +1523,36 @@ def test_catalog_document_passes_site_validator():
     # drift between the producer and the site validator must fail the
     # suite here, not the publish
     bsd.validate_catalog(build_doc())  # must not raise
+
+    # mixed provenance (OR benchmarks + AA api fallback) must survive too
+    args, models, candidates, dropped, filtered, discounts, _, _, aa_by_id = (
+        catalog_pool()
+    )
+    exact, fuzzy = mc.build_aa_lookup(
+        [{"key": "openai/model-a", "name": "Model A", "index": 44.0}]
+    )
+    quality_by_id, quality_source_by_id = mc.resolve_quality(
+        candidates, aa_by_id, exact, fuzzy, "AA API v2"
+    )
+    doc = mc.build_catalog(
+        args,
+        models,
+        candidates,
+        dropped,
+        filtered,
+        discounts,
+        quality_by_id,
+        "AA API v2",
+        aa_by_id,
+        quality_source_by_id,
+    )
+    assert {e["quality_match"] for e in doc["models"]} == {"openrouter", "api"}
+    assert doc["sources"]["aa"] == {
+        "mode": "openrouter",
+        "matched": 2,
+        "matched_openrouter": 1,
+    }
+    bsd.validate_catalog(doc)  # must not raise
 
 
 def test_catalog_aa_block_carries_or_trio():

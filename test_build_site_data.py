@@ -171,7 +171,7 @@ def make_catalog_entry(**overrides):
             "coding_index": 61.0,
             "agentic_index": 48.5,
         },
-        "quality_match": "api",
+        "quality_match": "openrouter",
         "scores": {
             "price": 0.9,
             "quality": 0.78,
@@ -247,7 +247,7 @@ def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
     bsd.validate_catalog(doc)  # must not raise
     for provenance, mode in (("api", "api"), ("scrape", "scrape")):
         doc["models"][0]["quality_match"] = provenance
-        doc["sources"]["aa"]["mode"] = mode
+        doc["sources"]["aa"].update(mode=mode, matched=1, matched_openrouter=0)
         bsd.validate_catalog(doc)  # must not raise
 
 
