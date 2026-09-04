@@ -6,11 +6,13 @@ the most capability per dollar today. Data sources:
 
   * OpenRouter public API (/api/v1/models) - catalog, pricing (input and
     output), context window, release date and capabilities.
-  * Artificial Analysis intelligence index - model quality, obtained via
-    the AA API v2 when an API key is available (--aa-api-key or the
-    AA_API_KEY environment variable; free key at artificialanalysis.ai),
-    falling back to a best-effort scrape of artificialanalysis.ai/models.
-    If neither works, ranking continues on price/context/age alone.
+  * Artificial Analysis intelligence index - model quality. Primary
+    source: OpenRouter's republished AA benchmarks (data.benchmarks in
+    the frontend models API, exact per-model keys). When a model is not
+    covered there: the AA API v2 (--aa-api-key or the AA_API_KEY
+    environment variable; free key at artificialanalysis.ai), then a
+    best-effort scrape of artificialanalysis.ai/models -- both matched
+    by exact slug/name only. Unmatched models rank on price/context/age.
 
 Ranking: every criterion is normalized to [0, 1] and combined with
 priority-dependent weights:
@@ -199,67 +201,98 @@ def fetch_openrouter_models(args):
     return models, False
 
 
-def fetch_discount_map(args):
-    """Map of public model id -> current discount fraction (e.g. 0.5).
+FRONTEND_DISCOUNTS_CACHE = "openrouter-frontend-discounts"
+FRONTEND_AA_CACHE = "openrouter-frontend-aa"
 
-    Comes from the OpenRouter frontend models API -- the same data the
-    website's ?discount=true filter uses. It is undocumented and may change;
-    on any failure the map is empty and discounts simply show as "--".
+
+def fetch_openrouter_frontend(args):
+    """Derive discounts, ZDR ids and OR-published AA benchmarks.
+
+    Two loads: the base frontend URL serves discounts and benchmarks in one
+    response; the ?zdr=true URL serves ZDR and is skipped entirely under
+    --no-zdr. Each payload caches independently under its own key and is
+    cached only when non-empty, so a degraded payload self-heals on the
+    next run. A base-URL outage never blocks the ZDR fetch, and vice
+    versa. Returns (discounts, zdr_ids, aa_by_id, cache_hits) where
+    cache_hits names the payloads served from cache ("discounts", "zdr",
+    "aa").
     """
-    if not args.no_cache:
-        cached = load_cache("openrouter-discounts", args.cache_ttl)
-        if cached:
-            return cached, True
-    try:
-        payload = fetch_json(OPENROUTER_DISCOUNTS_URL, timeout=30)
-    except Exception as exc:
-        warn(f"could not fetch discount data: {exc}")
-        return {}, False
-    data = payload.get("data") if isinstance(payload, dict) else None
-    entries = data.get("models") if isinstance(data, dict) else None
     discounts = {}
-    for entry in entries or []:
-        if not isinstance(entry, dict):
-            continue
-        slug = entry.get("slug") or ""
-        if not slug or slug.startswith("~"):
-            continue
-        endpoint = entry.get("endpoint") or {}
-        raw = (endpoint.get("pricing") or {}).get("discount")
-        if not isinstance(raw, (int, float)):
-            continue
-        variant = endpoint.get("variant") or ""
-        key = slug if variant in ("", "standard") else f"{slug}:{variant}"
-        discounts.setdefault(key, float(raw))
-    if not discounts:
-        # An intact endpoint always yields hundreds of entries (discount: 0 is
-        # still an entry); an empty map means the response shape changed --
-        # never cache that, so the next run recovers on its own.
-        warn("no discount entries found; treating discounts as unavailable")
-        return {}, False
-    save_cache("openrouter-discounts", discounts)
-    return discounts, False
+    aa_by_id = {}
+    zdr_ids = set()
+    cache_hits = set()
 
+    aa_from_cache = False
+    if not args.no_cache:
+        cached = load_cache(FRONTEND_DISCOUNTS_CACHE, args.cache_ttl)
+        if cached:
+            discounts = cached
+            cache_hits.add("discounts")
+        cached = load_cache(FRONTEND_AA_CACHE, args.cache_ttl)
+        if cached:
+            aa_by_id = cached
+            aa_from_cache = True
+            cache_hits.add("aa")
 
-def fetch_zdr_set(args):
-    """Set of public model ids whose endpoint is zero-data-retention.
+    if not discounts or not aa_from_cache:
+        try:
+            payload = fetch_json(OPENROUTER_DISCOUNTS_URL, timeout=30)
+        except Exception as exc:
+            if not discounts:
+                warn(f"could not fetch discount data: {exc}")
+            if not aa_from_cache:
+                warn(f"could not fetch AA benchmark data: {exc}")
+        else:
+            data = payload.get("data") if isinstance(payload, dict) else None
+            entries = data.get("models") if isinstance(data, dict) else None
+            fresh_discounts = {}
+            for entry in entries or []:
+                if not isinstance(entry, dict):
+                    continue
+                slug = entry.get("slug") or ""
+                if not slug or slug.startswith("~"):
+                    continue
+                endpoint = entry.get("endpoint") or {}
+                raw = (endpoint.get("pricing") or {}).get("discount")
+                if not isinstance(raw, (int, float)):
+                    continue
+                variant = endpoint.get("variant") or ""
+                key = slug if variant in ("", "standard") else f"{slug}:{variant}"
+                fresh_discounts.setdefault(key, float(raw))
+            fresh_aa = build_aa_benchmarks(
+                data.get("benchmarks") if isinstance(data, dict) else None
+            )
+            if fresh_discounts:
+                discounts = fresh_discounts
+                save_cache(FRONTEND_DISCOUNTS_CACHE, discounts)
+                cache_hits.discard("discounts")
+            elif not discounts:
+                # An intact endpoint always yields hundreds of entries
+                # (discount: 0 is still an entry); an empty map means the
+                # response shape changed -- never cache that, so the next
+                # run recovers on its own.
+                warn("no discount entries found; treating discounts as unavailable")
+            if not aa_from_cache:
+                if fresh_aa:
+                    aa_by_id = fresh_aa
+                    save_cache(FRONTEND_AA_CACHE, aa_by_id)
+                else:
+                    warn(
+                        "no AA benchmark entries found; treating OpenRouter "
+                        "benchmarks as unavailable"
+                    )
 
-    Sourced from the same frontend models API as the website's ?zdr=true
-    filter (undocumented). An empty result means the data is unavailable:
-    the caller must then fail closed rather than silently considering
-    non-ZDR models. The fetch is skipped entirely under --no-zdr.
-    """
     if args.no_zdr:
-        return set(), False
+        return discounts, zdr_ids, aa_by_id, cache_hits
     if not args.no_cache:
         cached = load_cache("openrouter-zdr", args.cache_ttl)
         if cached:
-            return set(cached), True
+            return discounts, set(cached), aa_by_id, cache_hits | {"zdr"}
     try:
         payload = fetch_json(OPENROUTER_ZDR_URL, timeout=30)
     except Exception as exc:
         warn(f"could not fetch ZDR data: {exc}")
-        return set(), False
+        return discounts, zdr_ids, aa_by_id, cache_hits
     data = payload.get("data") if isinstance(payload, dict) else None
     entries = data.get("models") if isinstance(data, dict) else None
     ids = set()
@@ -274,9 +307,9 @@ def fetch_zdr_set(args):
         ids.add(slug if variant in ("", "standard") else f"{slug}:{variant}")
     if not ids:
         warn("no ZDR entries found; treating ZDR data as unavailable")
-        return set(), False
+        return discounts, zdr_ids, aa_by_id, cache_hits
     save_cache("openrouter-zdr", sorted(ids))
-    return ids, False
+    return discounts, ids, aa_by_id, cache_hits
 
 
 def parse_price(value) -> float | None:
@@ -474,7 +507,7 @@ def build_aa_lookup(entries):
     return exact, fuzzy
 
 
-def match_quality(model, exact, fuzzy):
+def match_quality(model, exact, fuzzy, allow_fuzzy=False):
     model_id = model["id"]
     name = model.get("name") or ""
     display = PROVIDER_PREFIX_RE.sub("", name).strip()
@@ -492,6 +525,8 @@ def match_quality(model, exact, fuzzy):
         if normalized and (tier, normalized) in exact:
             return exact[(tier, normalized)]
 
+    if not allow_fuzzy:
+        return None
     own = set(norm_key(base).split()) | set(norm_key(display).split())
     if own:
         best = 0.0
@@ -504,6 +539,80 @@ def match_quality(model, exact, fuzzy):
         if best >= 0.5 and best_index is not None:
             return best_index
     return None
+
+
+def base_model_id(model_id: str) -> str:
+    """Candidate id without its :variant suffix (OR benchmarks are per base model)."""
+    return model_id.split(":", 1)[0]
+
+
+AA_BENCHMARK_FIELDS = ("intelligence_index", "coding_index", "agentic_index")
+
+
+def build_aa_benchmarks(benchmarks) -> dict:
+    """Map bare OpenRouter id -> OR-published AA trio from data.benchmarks.
+
+    Keys are dated permaslugs (z-ai/glm-5.3-flash-20260826): the trailing
+    -YYYYMMDD is stripped and undated keys map to themselves; when two keys
+    strip to the same id the latest date wins. Values failing the
+    finite-number guard are treated as absent; entries with at least one
+    valid field are kept.
+    """
+    aa_by_id = {}
+    seen_date = {}
+
+    def accept(bare, date, trio):
+        if bare in seen_date and seen_date[bare] >= date:
+            return
+        seen_date[bare] = date
+        aa_by_id[bare] = trio
+
+    for key, node in (benchmarks or {}).items():
+        aa = node.get("aa") if isinstance(node, dict) else None
+        if not isinstance(aa, dict):
+            continue
+        trio = {}
+        for field in AA_BENCHMARK_FIELDS:
+            value = aa.get(field)
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
+                trio[field] = float(value)
+        if not trio:
+            continue
+        match = re.match(r"^(.*)-(\d{8})$", key)
+        if match:
+            accept(match.group(1), match.group(2), trio)
+        else:
+            accept(key, "", trio)
+    return aa_by_id
+
+
+def resolve_quality(candidates, aa_by_id, exact, fuzzy, aa_source):
+    """Per-candidate quality: OR benchmarks first, AA exact fallback, else None.
+
+    OR's per-slug values cannot mispair; the AA fallback is exact-tier only
+    (match_quality's fuzzy tier is the proven variant-conflation bug and
+    stays off in production). Source values match the catalog contract:
+    "openrouter", "api", "scrape".
+    """
+    fallback_source = {"AA API v2": "api", "AA page scrape": "scrape"}.get(aa_source)
+    quality_by_id = {}
+    source_by_id = {}
+    for cand in candidates:
+        bench = aa_by_id.get(base_model_id(cand["id"]))
+        intelligence = bench.get("intelligence_index") if bench else None
+        if intelligence is not None:
+            quality_by_id[cand["id"]] = intelligence
+            source_by_id[cand["id"]] = "openrouter"
+            continue
+        index = match_quality({"id": cand["id"], "name": cand["name"]}, exact, fuzzy)
+        if index is not None:
+            quality_by_id[cand["id"]] = index
+            source_by_id[cand["id"]] = fallback_source
+    return quality_by_id, source_by_id
 
 
 def model_family(model_id: str) -> str | None:
@@ -829,7 +938,16 @@ def print_json(top):
 
 
 def build_catalog(
-    args, models, candidates, dropped, filtered, discounts, quality_by_id, aa_source
+    args,
+    models,
+    candidates,
+    dropped,
+    filtered,
+    discounts,
+    quality_by_id,
+    aa_source,
+    aa_by_id,
+    quality_source_by_id,
 ):
     """Assemble the full-catalog document (see README "Catalog output").
 
@@ -845,8 +963,10 @@ def build_catalog(
         # Never claim mode "none" for a source we do not know: the document
         # would contradict itself (mode none with matched quality scores).
         raise ValueError(f"unknown AA source: {aa_source!r}")
-    aa_mode = aa_modes.get(aa_source, "none")
-    quality_match = aa_modes.get(aa_source)
+    matched_openrouter = sum(
+        1 for s in quality_source_by_id.values() if s == "openrouter"
+    )
+    aa_mode = "openrouter" if matched_openrouter else aa_modes.get(aa_source, "none")
 
     entries = []
     for cand in candidates:
@@ -876,6 +996,7 @@ def build_catalog(
                 + w.get("age", 0.0) * scores["age"],
                 4,
             )
+        bench = aa_by_id.get(base_model_id(cand["id"])) or {}
         entries.append(
             {
                 "id": cand["id"],
@@ -899,8 +1020,13 @@ def build_catalog(
                 if has_discount(cand["discount"])
                 else None,
                 "expired": cand["expired"],
-                "quality": cand["quality"] if aa_source else None,
-                "quality_match": quality_match if cand["id"] in quality_by_id else None,
+                "aa": {
+                    "intelligence_index": bench.get("intelligence_index"),
+                    "coding_index": bench.get("coding_index"),
+                    "agentic_index": bench.get("agentic_index"),
+                },
+                "quality": cand["quality"],
+                "quality_match": quality_source_by_id.get(cand["id"]),
                 "scores": {**scores, "overall": overall},
             }
         )
@@ -924,7 +1050,11 @@ def build_catalog(
         },
         "sources": {
             "openrouter": "ok",
-            "aa": {"mode": aa_mode, "matched": len(quality_by_id)},
+            "aa": {
+                "mode": aa_mode,
+                "matched": len(quality_by_id),
+                "matched_openrouter": matched_openrouter,
+            },
             "zdr": "skipped" if args.no_zdr else "ok",
             "discounts": "ok" if discounts else "unavailable",
         },
@@ -1076,8 +1206,7 @@ def main(argv=None) -> int:
 
 
 def run(args, models, or_cached) -> int:
-    discounts, disc_cached = fetch_discount_map(args)
-    zdr_ids, zdr_cached = fetch_zdr_set(args)
+    discounts, zdr_ids, aa_by_id, frontend_cache_hits = fetch_openrouter_frontend(args)
     if not args.no_zdr and not zdr_ids:
         warn(
             "ZDR data unavailable; refusing to rank possibly non-ZDR models "
@@ -1096,11 +1225,9 @@ def run(args, models, or_cached) -> int:
         )
         return 2
 
-    quality_by_id = {}
-    for cand in candidates:
-        index = match_quality({"id": cand["id"], "name": cand["name"]}, exact, fuzzy)
-        if index is not None:
-            quality_by_id[cand["id"]] = index
+    quality_by_id, quality_source_by_id = resolve_quality(
+        candidates, aa_by_id, exact, fuzzy, aa_source
+    )
     weights = compute_scores(candidates, args, quality_by_id)
 
     if args.catalog:
@@ -1114,6 +1241,8 @@ def run(args, models, or_cached) -> int:
                 discounts,
                 quality_by_id,
                 aa_source,
+                aa_by_id,
+                quality_source_by_id,
             )
         )
         return 0
@@ -1132,12 +1261,18 @@ def run(args, models, or_cached) -> int:
                 f"{v} {k}" for k, v in sorted(dropped.items(), key=lambda kv: -kv[1])
             )
             drop_note = f" (dropped: {bits})"
-        unmatched = sum(1 for c in candidates if c["id"] not in quality_by_id)
-        if aa_source:
-            matched = len(candidates) - unmatched
+        matched_or = sum(1 for s in quality_source_by_id.values() if s == "openrouter")
+        matched_aa = len(quality_by_id) - matched_or
+        unmatched = len(candidates) - len(quality_by_id)
+        bits = []
+        if matched_or:
+            bits.append(f"OpenRouter benchmarks ({matched_or})")
+        if matched_aa:
+            bits.append(f"{aa_source} exact ({matched_aa})")
+        if bits:
             quality_note = (
-                f"quality via {aa_source}{' (cached)' if aa_cached else ''}: "
-                f"{len(aa_entries)} scores, matched {matched}/{len(candidates)} candidates"
+                f"quality via {' + '.join(bits)}: matched "
+                f"{len(quality_by_id)}/{len(candidates)} candidates"
             )
             if unmatched:
                 quality_note += "; unmatched candidates score 0 on quality"
@@ -1146,10 +1281,12 @@ def run(args, models, or_cached) -> int:
         source_note = []
         if or_cached:
             source_note.append("catalog cached")
-        if disc_cached:
+        if "discounts" in frontend_cache_hits:
             source_note.append("discounts cached")
-        if zdr_cached:
+        if "zdr" in frontend_cache_hits:
             source_note.append("ZDR cached")
+        if "aa" in frontend_cache_hits:
+            source_note.append("AA benchmarks cached")
         if aa_cached and aa_source:
             source_note.append("quality cached")
         if source_note:

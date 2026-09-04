@@ -166,7 +166,12 @@ def make_catalog_entry(**overrides):
         "discount": None,
         "expired": False,
         "quality": 55.0,
-        "quality_match": "api",
+        "aa": {
+            "intelligence_index": 55.0,
+            "coding_index": 61.0,
+            "agentic_index": 48.5,
+        },
+        "quality_match": "openrouter",
         "scores": {
             "price": 0.9,
             "quality": 0.78,
@@ -202,7 +207,7 @@ def make_catalog():
         },
         "sources": {
             "openrouter": "ok",
-            "aa": {"mode": "api", "matched": 1},
+            "aa": {"mode": "openrouter", "matched": 1, "matched_openrouter": 1},
             "zdr": "ok",
             "discounts": "ok",
         },
@@ -228,6 +233,22 @@ def catalog_argv(tmp_path, catalog_file=None):
 
 def test_validate_catalog_happy_path():
     bsd.validate_catalog(make_catalog())  # must not raise
+
+
+def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
+    doc = make_catalog()
+    doc["models"][0]["aa"] = {
+        "intelligence_index": None,
+        "coding_index": None,
+        "agentic_index": None,
+    }
+    doc["models"][0]["quality_match"] = None
+    doc["sources"]["aa"] = {"mode": "none", "matched": 0, "matched_openrouter": 0}
+    bsd.validate_catalog(doc)  # must not raise
+    for provenance, mode in (("api", "api"), ("scrape", "scrape")):
+        doc["models"][0]["quality_match"] = provenance
+        doc["sources"]["aa"].update(mode=mode, matched=1, matched_openrouter=0)
+        bsd.validate_catalog(doc)  # must not raise
 
 
 @pytest.mark.parametrize(
@@ -258,6 +279,16 @@ def test_validate_catalog_happy_path():
         lambda doc: doc["parameters"]["weights"].pop("price"),
         lambda doc: doc["parameters"]["weights"]["balanced"].update(price=0.9),
         lambda doc: doc["parameters"]["weights"]["balanced"].update(age=0),
+        lambda doc: doc["models"][0].pop("aa"),
+        lambda doc: doc["models"][0]["aa"].pop("coding_index"),
+        lambda doc: doc["models"][0]["aa"].update(intelligence_index=101),
+        lambda doc: doc["models"][0]["aa"].update(intelligence_index=float("nan")),
+        lambda doc: doc["models"][0]["aa"].update(intelligence_index=True),
+        lambda doc: doc["models"][0].update(quality_match="psychic"),
+        lambda doc: doc["sources"]["aa"].update(mode="psychic"),
+        lambda doc: doc["sources"]["aa"].update(matched_openrouter=5),
+        lambda doc: doc["sources"]["aa"].update(matched=-1),
+        lambda doc: doc["sources"]["aa"].update(matched_openrouter=True),
     ],
 )
 def test_validate_catalog_rejects(mutate):

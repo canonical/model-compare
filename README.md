@@ -65,15 +65,24 @@ consider ZDR models only, matching the tool's default.
    supported parameters (used for the tool-calling check) and modality info.
 2. **Artificial Analysis** — the [AA intelligence index](https://artificialanalysis.ai/models),
    a 0–100 composite of reasoning/coding/knowledge benchmarks. Obtained via:
-   - **AA API v2** (`artificialanalysis.ai/api/v2/data/llms/models`) when an
-     API key is supplied through `--aa-api-key` or the `AA_API_KEY` env var
+   - **OpenRouter benchmarks (primary)**: the same undocumented frontend API
+     behind the [`?discount=true`](https://openrouter.ai/models?discount=true)
+     and ZDR filters also republishes the AA intelligence/coding/agentic
+     indices per model (`benchmarks.aa`), keyed by exact OpenRouter id.
+     Consumed first — no separate fetch, and exact keys make conflation
+     impossible.
+   - **AA API v2** (`artificialanalysis.ai/api/v2/data/llms/models`) for
+     models OpenRouter does not cover, when an API key is supplied through
+     `--aa-api-key` or the `AA_API_KEY` env var
      ([free key](https://artificialanalysis.ai)); full model coverage.
    - **Page scrape fallback**: the leaderboard embeds a JSON-LD benchmark
      dataset; the scraper extracts every entry carrying an
-     `artificialAnalysisIntelligenceIndex` (a few dozen top models). Matching
-     to OpenRouter ids is done by tiered slug/name normalization, then a
-     token-overlap (Jaccard ≥ 0.5) fuzzy pass. Unmatched models simply score
-     0 on quality — the tool degrades gracefully rather than failing.
+     `artificialAnalysisIntelligenceIndex` (a few dozen top models). Both
+     fallbacks match to OpenRouter ids by exact slug/name only. The previous
+     token-overlap fuzzy pass is gone: it paired `z-ai/glm-5.3-flash` with
+     AA's `glm-5-3` entry and published the wrong model's index. Unmatched
+     models simply score 0 on quality — the tool degrades gracefully rather
+     than failing.
 
 If no quality data is obtainable at all, the quality weight is dropped and the
 remaining weights renormalize.
@@ -118,12 +127,15 @@ everything), and (with `--exclude-free`) rate-limited `:free` variants.
 
 ## Artificial Analysis data, in short
 
-The intelligence index is the only signal OpenRouter does not expose. The
-script tries the AA API first (key required; free tier is enough), then falls
-back to scraping the JSON-LD embedded in `artificialanalysis.ai/models`. Both
-paths are cached identically; if both fail you get a warning on stderr and a
-price/context/age-only ranking. `--quality-ref` controls how generous the
-quality normalization is.
+The intelligence index no longer needs a separate source: OpenRouter
+republishes the AA indices alongside its own benchmark data, keyed by exact
+OpenRouter id, and the script reads them from the frontend API it already
+fetches. Only models missing there fall back to the AA API (key required;
+free tier is enough) and then the JSON-LD scrape embedded in
+`artificialanalysis.ai/models` — both matched by exact slug/name only. All
+paths are cached identically; if none yields a value you get a warning on
+stderr and a price/context/age-only ranking. `--quality-ref` controls how
+generous the quality normalization is.
 
 ## Caching
 
@@ -176,19 +188,22 @@ one bumps the version.
 
 Top level: `schema_version`, `tool`, `generated_at`, `parameters` (all knobs
 plus the **effective** per-priority `weights` — reproducing `scores.overall`
-needs nothing else), `sources` (`openrouter`, `aa` with `mode` `api`/`scrape`/`none`
-and the match count, `zdr` `ok`/`skipped`, `discounts` `ok`/`unavailable` —
-where `unavailable` covers both a failed discount fetch and a live pool with
-zero discounts), `pool` (`listed`, `candidates`, `dropped`), `models`,
-`filtered`.
+needs nothing else), `sources` (`openrouter`, `aa` with `mode`
+`openrouter`/`api`/`scrape`/`none` plus the `matched` and
+`matched_openrouter` counts, `zdr` `ok`/`skipped`, `discounts`
+`ok`/`unavailable` — where `unavailable` covers both a failed discount fetch
+and a live pool with zero discounts), `pool` (`listed`, `candidates`,
+`dropped`), `models`, `filtered`.
 
 Each `models` entry carries: `id` (bare `provider/model`), `name`,
 `provider`, `family` (heuristic: leading token of the slug, e.g. `glm-5.3`
 → `glm`; `null` when there is none), `pricing` (`input_per_1m`,
 `output_per_1m`, `blended_per_1m` in USD per 1M tokens), `context`,
 `listed_at`, `age_days`, `tool_calling`, `zdr`, `discount`, `expired`,
-`quality` (AA intelligence index or `null`), `quality_match`
-(`api`/`scrape`/`null`) and `scores` — the four component scores plus
+`quality` (AA intelligence index or `null`), `aa` (the OpenRouter-published
+trio `intelligence_index`/`coding_index`/`agentic_index`, each possibly
+`null`), `quality_match` (`openrouter`/`api`/`scrape`/`null`) and `scores` —
+the four component scores plus
 `overall` for all three priorities, so downstream consumers never re-run
 the scorer.
 

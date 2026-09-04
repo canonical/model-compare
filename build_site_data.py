@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -53,12 +54,16 @@ CATALOG_ENTRY_KEYS = (
     "discount",
     "expired",
     "quality",
+    "aa",
     "quality_match",
     "scores",
 )
 CATALOG_PRICING_KEYS = ("input_per_1m", "output_per_1m", "blended_per_1m")
 CATALOG_SCORE_KEYS = ("price", "quality", "context", "age")
 CATALOG_OVERALL_KEYS = ("balanced", "price", "quality")
+CATALOG_AA_KEYS = ("intelligence_index", "coding_index", "agentic_index")
+CATALOG_QUALITY_MATCH_VALUES = ("openrouter", "api", "scrape")
+CATALOG_AA_MODES = ("openrouter", "api", "scrape", "none")
 
 
 def _is_score(value) -> bool:
@@ -66,6 +71,17 @@ def _is_score(value) -> bool:
         isinstance(value, (int, float))
         and not isinstance(value, bool)
         and 0.0 <= value <= 1.0
+    )
+
+
+def _is_aa_value(value) -> bool:
+    if value is None:
+        return True
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and 0.0 <= value <= 100.0
     )
 
 
@@ -129,6 +145,19 @@ def validate_catalog(document) -> None:
             f"{sum(dropped.values())} dropped + {pool['candidates']} candidates"
             f" != {listed} listed"
         )
+    sources = document["sources"]
+    aa_sources = sources.get("aa") if isinstance(sources, dict) else None
+    if (
+        not isinstance(aa_sources, dict)
+        or aa_sources.get("mode") not in CATALOG_AA_MODES
+    ):
+        raise ValueError("catalog sources.aa.mode is unknown")
+    for key in ("matched", "matched_openrouter"):
+        value = aa_sources.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"catalog sources.aa.{key} must be a non-negative integer")
+    if aa_sources["matched_openrouter"] > aa_sources["matched"]:
+        raise ValueError("catalog sources.aa.matched_openrouter exceeds matched")
     models = document["models"]
     if not isinstance(models, list):
         raise ValueError("catalog models must be a list")
@@ -165,6 +194,17 @@ def validate_catalog(document) -> None:
             raise ValueError(
                 f"models[{i}] scores.overall out of range: {', '.join(bad_overall)}"
             )
+        aa = entry["aa"]
+        if not isinstance(aa, dict) or any(key not in aa for key in CATALOG_AA_KEYS):
+            raise ValueError(f"models[{i}] aa is incomplete")
+        bad_aa = [key for key in CATALOG_AA_KEYS if not _is_aa_value(aa[key])]
+        if bad_aa:
+            raise ValueError(f"models[{i}] aa out of range: {', '.join(bad_aa)}")
+        if (
+            entry["quality_match"] is not None
+            and entry["quality_match"] not in CATALOG_QUALITY_MATCH_VALUES
+        ):
+            raise ValueError(f"models[{i}] has unknown quality_match")
         if parameters["zdr_required"] and entry["zdr"] is not True:
             raise ValueError(f"models[{i}] is not zdr=true under zdr_required")
     # ids double as the document's primary key for downstream consumers:
