@@ -6,11 +6,13 @@ the most capability per dollar today. Data sources:
 
   * OpenRouter public API (/api/v1/models) - catalog, pricing (input and
     output), context window, release date and capabilities.
-  * Artificial Analysis intelligence index - model quality, obtained via
-    the AA API v2 when an API key is available (--aa-api-key or the
-    AA_API_KEY environment variable; free key at artificialanalysis.ai),
-    falling back to a best-effort scrape of artificialanalysis.ai/models.
-    If neither works, ranking continues on price/context/age alone.
+  * Artificial Analysis intelligence index - model quality. Primary
+    source: OpenRouter's republished AA benchmarks (data.benchmarks in
+    the frontend models API, exact per-model keys). When a model is not
+    covered there: the AA API v2 (--aa-api-key or the AA_API_KEY
+    environment variable; free key at artificialanalysis.ai), then a
+    best-effort scrape of artificialanalysis.ai/models -- both matched
+    by exact slug/name only. Unmatched models rank on price/context/age.
 
 Ranking: every criterion is normalized to [0, 1] and combined with
 priority-dependent weights:
