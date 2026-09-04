@@ -936,7 +936,16 @@ def print_json(top):
 
 
 def build_catalog(
-    args, models, candidates, dropped, filtered, discounts, quality_by_id, aa_source
+    args,
+    models,
+    candidates,
+    dropped,
+    filtered,
+    discounts,
+    quality_by_id,
+    aa_source,
+    aa_by_id,
+    quality_source_by_id,
 ):
     """Assemble the full-catalog document (see README "Catalog output").
 
@@ -952,8 +961,10 @@ def build_catalog(
         # Never claim mode "none" for a source we do not know: the document
         # would contradict itself (mode none with matched quality scores).
         raise ValueError(f"unknown AA source: {aa_source!r}")
-    aa_mode = aa_modes.get(aa_source, "none")
-    quality_match = aa_modes.get(aa_source)
+    matched_openrouter = sum(
+        1 for s in quality_source_by_id.values() if s == "openrouter"
+    )
+    aa_mode = "openrouter" if matched_openrouter else aa_modes.get(aa_source, "none")
 
     entries = []
     for cand in candidates:
@@ -983,6 +994,7 @@ def build_catalog(
                 + w.get("age", 0.0) * scores["age"],
                 4,
             )
+        bench = aa_by_id.get(base_model_id(cand["id"])) or {}
         entries.append(
             {
                 "id": cand["id"],
@@ -1006,8 +1018,13 @@ def build_catalog(
                 if has_discount(cand["discount"])
                 else None,
                 "expired": cand["expired"],
-                "quality": cand["quality"] if aa_source else None,
-                "quality_match": quality_match if cand["id"] in quality_by_id else None,
+                "aa": {
+                    "intelligence_index": bench.get("intelligence_index"),
+                    "coding_index": bench.get("coding_index"),
+                    "agentic_index": bench.get("agentic_index"),
+                },
+                "quality": cand["quality"],
+                "quality_match": quality_source_by_id.get(cand["id"]),
                 "scores": {**scores, "overall": overall},
             }
         )
@@ -1031,7 +1048,11 @@ def build_catalog(
         },
         "sources": {
             "openrouter": "ok",
-            "aa": {"mode": aa_mode, "matched": len(quality_by_id)},
+            "aa": {
+                "mode": aa_mode,
+                "matched": len(quality_by_id),
+                "matched_openrouter": matched_openrouter,
+            },
             "zdr": "skipped" if args.no_zdr else "ok",
             "discounts": "ok" if discounts else "unavailable",
         },
@@ -1218,6 +1239,8 @@ def run(args, models, or_cached) -> int:
                 discounts,
                 quality_by_id,
                 aa_source,
+                aa_by_id,
+                quality_source_by_id,
             )
         )
         return 0

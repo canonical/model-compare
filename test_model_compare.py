@@ -457,7 +457,9 @@ def test_build_candidates_empty_id_counted_not_listed():
     assert dropped == {"malformed id": 1}
     assert filtered == []
     mc.compute_scores(candidates, args, {})
-    doc = mc.build_catalog(args, models, candidates, dropped, filtered, {}, {}, None)
+    doc = mc.build_catalog(
+        args, models, candidates, dropped, filtered, {}, {}, None, {}, {}
+    )
     assert doc["filtered"] == []
     assert [e["id"] for e in doc["models"]] == ["acme/model-a"]
 
@@ -1196,13 +1198,24 @@ def test_parse_iso_datetime_bad():
 
 
 # Derived from the site validator's contract so the key set lives in exactly
-# two places: the producer (build_catalog) and the validator it feeds.
-CATALOG_ENTRY_KEYS = set(bsd.CATALOG_ENTRY_KEYS)
+# two places: the producer (build_catalog) and the validator it feeds. The
+# producer already publishes the "aa" trio; build_site_data learns it next.
+CATALOG_ENTRY_KEYS = set(bsd.CATALOG_ENTRY_KEYS) | {"aa"}
 
 
 def catalog_pool(**overrides):
     """Run the real pipeline over a small fixed pool and hand back everything
     build_catalog needs."""
+    aa_by_id = overrides.pop(
+        "aa_by_id",
+        {
+            "acme/model-b": {
+                "intelligence_index": 68.4,
+                "coding_index": 74.8,
+                "agentic_index": 59.1,
+            }
+        },
+    )
     args = make_args(min_context=0, **overrides)
     models = [
         make_model(
@@ -1231,7 +1244,9 @@ def catalog_pool(**overrides):
     candidates, dropped = mc.build_candidates(
         models, args, {"acme/model-a": 0.5}, {"acme/model-a", "acme/model-b"}, filtered
     )
-    quality_by_id = {"acme/model-b": 68.4}
+    quality_by_id, quality_source_by_id = mc.resolve_quality(
+        candidates, aa_by_id, {}, {}, overrides.get("aa_source", "AA API v2")
+    )
     mc.compute_scores(candidates, args, quality_by_id)
     return (
         args,
@@ -1241,16 +1256,35 @@ def catalog_pool(**overrides):
         filtered,
         {"acme/model-a": 0.5},
         quality_by_id,
+        quality_source_by_id,
+        aa_by_id,
     )
 
 
 def build_doc(**overrides):
     aa_source = overrides.pop("aa_source", "AA API v2")
-    args, models, candidates, dropped, filtered, discounts, quality_by_id = (
-        catalog_pool(**overrides)
-    )
+    (
+        args,
+        models,
+        candidates,
+        dropped,
+        filtered,
+        discounts,
+        quality_by_id,
+        quality_source_by_id,
+        aa_by_id,
+    ) = catalog_pool(**overrides)
     return mc.build_catalog(
-        args, models, candidates, dropped, filtered, discounts, quality_by_id, aa_source
+        args,
+        models,
+        candidates,
+        dropped,
+        filtered,
+        discounts,
+        quality_by_id,
+        aa_source,
+        aa_by_id,
+        quality_source_by_id,
     )
 
 
@@ -1273,7 +1307,7 @@ def test_catalog_envelope():
     assert p["weights"]["balanced"] == mc.PRIORITY_WEIGHTS["balanced"]
     assert doc["sources"] == {
         "openrouter": "ok",
-        "aa": {"mode": "api", "matched": 1},
+        "aa": {"mode": "openrouter", "matched": 1, "matched_openrouter": 1},
         "zdr": "ok",
         "discounts": "ok",
     }
@@ -1315,7 +1349,7 @@ def test_catalog_entry_shape():
     assert a["quality_match"] is None  # matched nothing
     b = next(e for e in doc["models"] if e["id"] == "acme/model-b")
     assert b["quality"] == 68.4
-    assert b["quality_match"] == "api"
+    assert b["quality_match"] == "openrouter"
     assert b["discount"] is None
 
 
@@ -1326,7 +1360,7 @@ def test_catalog_future_created_age_days_clamped():
     models = [make_model(id="acme/model-a", created=created)]
     candidates, dropped = mc.build_candidates(models, args, {}, {"acme/model-a"}, [])
     mc.compute_scores(candidates, args, {})
-    doc = mc.build_catalog(args, models, candidates, dropped, [], {}, {}, None)
+    doc = mc.build_catalog(args, models, candidates, dropped, [], {}, {}, None, {}, {})
     (entry,) = doc["models"]
     expected = datetime.fromtimestamp(created, tz=timezone.utc).date().isoformat()
     assert entry["listed_at"] == expected
@@ -1339,8 +1373,10 @@ def test_catalog_family_null_without_prefix():
 
 
 def test_catalog_overall_covers_all_priorities():
-    args, _, candidates, _, _, _, quality_by_id = catalog_pool()
-    doc = mc.build_catalog(args, [], candidates, {}, [], {}, quality_by_id, "AA API v2")
+    args, _, candidates, _, _, _, quality_by_id, _, _ = catalog_pool()
+    doc = mc.build_catalog(
+        args, [], candidates, {}, [], {}, quality_by_id, "AA API v2", {}, {}
+    )
     weights = mc.catalog_weights(candidates, quality_by_id)
     for entry in doc["models"]:
         s = entry["scores"]
@@ -1356,8 +1392,10 @@ def test_catalog_overall_covers_all_priorities():
 
 
 def test_catalog_overall_matches_compute_scores_for_current_priority():
-    args, _, candidates, _, _, _, quality_by_id = catalog_pool(priority="price")
-    doc = mc.build_catalog(args, [], candidates, {}, [], {}, quality_by_id, "AA API v2")
+    args, _, candidates, _, _, _, quality_by_id, _, _ = catalog_pool(priority="price")
+    doc = mc.build_catalog(
+        args, [], candidates, {}, [], {}, quality_by_id, "AA API v2", {}, {}
+    )
     by_id = {c["id"]: c for c in candidates}
     for entry in doc["models"]:
         assert entry["scores"]["overall"]["price"] == pytest.approx(
@@ -1405,13 +1443,52 @@ def test_catalog_document_passes_site_validator():
     bsd.validate_catalog(build_doc())  # must not raise
 
 
-def test_catalog_aa_mode_mapping():
-    assert build_doc(aa_source="AA page scrape")["sources"]["aa"]["mode"] == "scrape"
-    assert build_doc(aa_source=None)["sources"]["aa"]["mode"] == "none"
+def test_catalog_aa_block_carries_or_trio():
+    doc = build_doc()
+    b = next(e for e in doc["models"] if e["id"] == "acme/model-b")
+    assert b["aa"] == {
+        "intelligence_index": 68.4,
+        "coding_index": 74.8,
+        "agentic_index": 59.1,
+    }
+    a = next(e for e in doc["models"] if e["id"] == "acme/model-a")
+    assert a["aa"] == {
+        "intelligence_index": None,
+        "coding_index": None,
+        "agentic_index": None,
+    }
+
+
+def test_catalog_quality_match_and_sources_counts():
+    doc = build_doc()
+    b = next(e for e in doc["models"] if e["id"] == "acme/model-b")
+    assert b["quality"] == 68.4
+    assert b["quality_match"] == "openrouter"
+    a = next(e for e in doc["models"] if e["id"] == "acme/model-a")
+    assert a["quality"] is None
+    assert a["quality_match"] is None
+    assert doc["sources"]["aa"] == {
+        "mode": "openrouter",
+        "matched": 1,
+        "matched_openrouter": 1,
+    }
+
+
+def test_catalog_quality_published_even_without_any_aa_source():
     doc = build_doc(aa_source=None)
-    assert all(
-        e["quality_match"] is None and e["quality"] is None for e in doc["models"]
-    )
+    b = next(e for e in doc["models"] if e["id"] == "acme/model-b")
+    assert b["quality"] == 68.4
+    assert b["quality_match"] == "openrouter"
+    assert doc["sources"]["aa"]["mode"] == "openrouter"
+
+
+def test_catalog_aa_mode_reflects_fallback_when_or_empty():
+    doc = build_doc(aa_source="AA page scrape", aa_by_id={})
+    assert doc["sources"]["aa"] == {
+        "mode": "scrape",
+        "matched": 0,
+        "matched_openrouter": 0,
+    }
 
 
 def test_catalog_unknown_aa_source_fails_loudly():
@@ -1454,11 +1531,11 @@ def test_catalog_fails_closed_without_zdr(monkeypatch, capsys):
 
 
 def test_catalog_discounts_unavailable_source():
-    args, models, candidates, dropped, filtered, _discounts, quality_by_id = (
+    args, models, candidates, dropped, filtered, _discounts, quality_by_id, _, _ = (
         catalog_pool()
     )
     doc = mc.build_catalog(
-        args, models, candidates, dropped, filtered, {}, quality_by_id, None
+        args, models, candidates, dropped, filtered, {}, quality_by_id, None, {}, {}
     )
     assert doc["sources"]["discounts"] == "unavailable"
 
