@@ -906,6 +906,66 @@ def test_match_quality_fuzzy_disabled_by_default():
 
 
 # ---------------------------------------------------------------------------
+# OR-published AA benchmarks (build_aa_benchmarks)
+# ---------------------------------------------------------------------------
+
+
+def test_build_aa_benchmaps_strips_dated_permaslugs():
+    benchmarks = {
+        "z-ai/glm-5.3-flash-20260826": {
+            "aa": {
+                "intelligence_index": 57.5,
+                "coding_index": 71.5,
+                "agentic_index": 58.2,
+            }
+        },
+        "acme/plain": {"aa": {"intelligence_index": 40}},
+    }
+    aa = mc.build_aa_benchmarks(benchmarks)
+    assert aa["z-ai/glm-5.3-flash"] == {
+        "intelligence_index": 57.5,
+        "coding_index": 71.5,
+        "agentic_index": 58.2,
+    }
+    assert aa["acme/plain"] == {"intelligence_index": 40.0}
+
+
+def test_build_aa_benchmarks_latest_date_wins():
+    benchmarks = {
+        "acme/m-20260801": {"aa": {"intelligence_index": 10}},
+        "acme/m-20260820": {"aa": {"intelligence_index": 20}},
+        "acme/m": {"aa": {"intelligence_index": 30}},
+    }
+    assert mc.build_aa_benchmarks(benchmarks)["acme/m"] == {"intelligence_index": 20.0}
+
+
+def test_build_aa_benchmarks_skips_invalid_values_but_keeps_valid_ones():
+    benchmarks = {
+        "acme/partial": {
+            "aa": {
+                "intelligence_index": float("nan"),
+                "coding_index": 70,
+                "agentic_index": True,
+            }
+        },
+        "acme/no-aa": {"da": {"default_elo": 1300}},
+        "acme/not-a-node": "garbage",
+    }
+    aa = mc.build_aa_benchmarks(benchmarks)
+    assert aa == {"acme/partial": {"coding_index": 70.0}}
+
+
+def test_build_aa_benchmarks_empty_inputs():
+    assert mc.build_aa_benchmarks({}) == {}
+    assert mc.build_aa_benchmarks(None) == {}
+
+
+def test_base_model_id_strips_variant():
+    assert mc.base_model_id("z-ai/glm-5.3-flash:free") == "z-ai/glm-5.3-flash"
+    assert mc.base_model_id("z-ai/glm-5.3") == "z-ai/glm-5.3"
+
+
+# ---------------------------------------------------------------------------
 # aa_api_entries walk (Fix #3 canonical key, Fix #4 depth guard)
 # ---------------------------------------------------------------------------
 

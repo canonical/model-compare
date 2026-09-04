@@ -508,6 +508,55 @@ def match_quality(model, exact, fuzzy, allow_fuzzy=False):
     return None
 
 
+def base_model_id(model_id: str) -> str:
+    """Candidate id without its :variant suffix (OR benchmarks are per base model)."""
+    return model_id.split(":", 1)[0]
+
+
+AA_BENCHMARK_FIELDS = ("intelligence_index", "coding_index", "agentic_index")
+
+
+def build_aa_benchmarks(benchmarks) -> dict:
+    """Map bare OpenRouter id -> OR-published AA trio from data.benchmarks.
+
+    Keys are dated permaslugs (z-ai/glm-5.3-flash-20260826): the trailing
+    -YYYYMMDD is stripped and undated keys map to themselves; when two keys
+    strip to the same id the latest date wins. Values failing the
+    finite-number guard are treated as absent; entries with at least one
+    valid field are kept.
+    """
+    aa_by_id = {}
+    seen_date = {}
+
+    def accept(bare, date, trio):
+        if bare in seen_date and seen_date[bare] >= date:
+            return
+        seen_date[bare] = date
+        aa_by_id[bare] = trio
+
+    for key, node in (benchmarks or {}).items():
+        aa = node.get("aa") if isinstance(node, dict) else None
+        if not isinstance(aa, dict):
+            continue
+        trio = {}
+        for field in AA_BENCHMARK_FIELDS:
+            value = aa.get(field)
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
+                trio[field] = float(value)
+        if not trio:
+            continue
+        match = re.match(r"^(.*)-(\d{8})$", key)
+        if match:
+            accept(match.group(1), match.group(2), trio)
+        else:
+            accept(key, "", trio)
+    return aa_by_id
+
+
 def model_family(model_id: str) -> str | None:
     """Best-effort model family from the base slug (documented heuristic).
 
