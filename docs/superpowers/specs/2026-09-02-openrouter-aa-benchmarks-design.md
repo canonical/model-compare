@@ -136,7 +136,7 @@ that exercises all three provenances (openrouter / api / none).
   derivation; single base fetch + ZDR fetch only when `not no_zdr`; cache
   hit returns all three; total base failure → discounts `{}`, aa `{}`, zdr
   unavailable (fail-closed upstream); per-source warning texts preserved.
-- AA map building: `-YYYYMMDD` stripping, first-wins on duplicate stripped
+- AA map building: `-YYYYMMDD` stripping, latest-date-wins on duplicate
   keys, variant inheritance, non-finite/bool values skipped.
 - `match_quality(allow_fuzzy=False)`: exact tiers work, fuzzy tier skipped
   (regression: `glm-5.3-flash` must NOT receive `glm-5-3`'s index).
