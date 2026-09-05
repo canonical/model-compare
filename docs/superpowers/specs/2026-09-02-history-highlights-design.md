@@ -23,12 +23,15 @@ publish workflow.
 Each publish: the workflow curls the currently-deployed `history.json`
 (404-tolerant; `|| true`), passes it as `--history-prev-file` to
 `build_site_data.py`, which upserts today's UTC-date snapshot, prunes to the
-newest 8 dates, validates loudly, and writes `history.json` next to
-`data.json`. No new workflow permissions; the existing `concurrency: github-pages`
-group serializes runs; an artifact fetched one run stale self-heals next run.
-A malformed or absent previous file yields a fresh one-document history — never
-a build failure. `--no-cache` semantics do not apply here (this is deploy-side,
-not client cache).
+newest **10** dates, validates loudly, and writes `history.json` next to
+`data.json`. Retention is 10, not 8: the 7-day lookback consumes the
+8th-oldest slot, so two full-day outages of slack are needed before the
+movement column can blank out. No new workflow permissions; the configured
+concurrency group prevents overlapping runs (cancelling, not queueing — a
+cancelled run never uploads its artifact, so the deployed `history.json` is
+untouched); an artifact fetched one run stale self-heals next run. A malformed
+or absent previous file yields a fresh one-document history — never a build
+failure.
 
 ### Snapshot shape (per UTC date)
 
@@ -46,7 +49,7 @@ not client cache).
         "quality": []
       },
       "aa": {"z-ai/glm-5.3": 59.5},
-      "prices": {"z-ai/glm-5.3": [0.6, 2.2, null]}
+      "prices": {"z-ai/glm-5.3": [0.6, 2.2, 1.0, null]}
     }
   }
 }
@@ -55,12 +58,26 @@ not client cache).
 - `pool_ids`: every id in the catalog document (`models` + `filtered`) — makes
   "new on OpenRouter" derivable. Sorted, deduplicated.
 - `tabs`: the day's top 10 per priority in rank order (`rank` is 1-based).
-- `aa`: intelligence index per model id (full pool), from the catalog's
+  Because history keeps only top-10 membership, a model entering today's top
+  ten from rank 11+ can only ever render as `new`, never `↑N`; the same bound
+  applies to "largest movers" in the highlight diff (top-10 membership on
+  both ends).
+- `aa`: intelligence index per model id, from the catalog's
   `aa.intelligence_index`.
-- `prices`: `[input_per_1m, output_per_1m, discount]` arrays per model id
-  (full pool), from the catalog's pricing/discount.
+- `prices`: `[input_per_1m, output_per_1m, blended_per_1m, discount]` arrays
+  per model id, from the catalog's pricing/discount (blended retained — it is
+  the price signal the tables rank on).
+- **Scope asymmetry (deliberate):** `aa` and `prices` cover **candidates
+  (`models`) only**; filtered entries carry no AA or pricing data, so they
+  appear in `pool_ids` but never in `aa`/`prices`. A model moving
+  `filtered → models` is therefore in `pool_ids` across weeks while its
+  `aa`/`prices` history starts the day it becomes a candidate — consumers of
+  `aa`/`prices` must null-check against missing prior values.
 - Upsert rule: within a UTC day the snapshot is replaced by the latest run's
-  data (last-write-wins per date). Prune keeps the newest 8 dates.
+  data (last-write-wins per date). Prune keeps the newest 10 dates.
+- Top-level `updated_at` is defined as the `generated_at` of the most recent
+  snapshot (max over snapshots) — after a same-day last-write-wins upsert it
+  is the day's latest run time, not the file-write time.
 
 ### Comparison rule
 
@@ -76,7 +93,9 @@ present.
 - New column headed **`7-day`** placed immediately after `RANK` in all three
   priority tabs.
 - Computed client-side in `site/index.html` from `history.json` + the current
-  `data.json` (both same-origin fetches; CSP already allows `connect-src 'self'`).
+  `data.json` (all three fetched same-origin with `cache: "no-cache"`,
+  mirroring the existing `data.json` fetch, so browsers never serve a stale
+  history or highlights file).
 - Cell values (plain UTF text, no emoji):
   - `↑N` green — climbed N positions,
   - `↓N` red — fell N positions,
@@ -116,11 +135,16 @@ Inputs: current `catalog.json`, `history.json`, previous `highlights.json`
 1. Compute a deterministic **numeric diff** against the exact-7-days-ago
    snapshot: per-tab rank deltas; ids new to the pool (count + any that entered
    a top ten); biggest AA intelligence movers (up and down, top 3 each, with
-   values); biggest price moves and discount appearances/disappearances. If a
+   values); biggest price moves and discount appearances/disappearances. All
+   mover rankings are bounded by top-10 history membership (see §2). If a
    7-day baseline is missing, the diff says so explicitly (the LLM is told to
    say data collection is still building up, in one sentence).
-2. **Reuse rule:** if the previous `highlights.json` is younger than 24 hours,
-   copy it through unchanged (output = previous). Otherwise generate.
+2. **Reuse rule:** if the previous `highlights.json` has
+   `source: "openrouter"` and is younger than 24 hours, copy it through
+   unchanged (output = previous). Previous output with
+   `source: "fallback"` is **always regenerated** on the next publish
+   regardless of age, so a string of LLM failures cannot freeze fallback text
+   for days — every publish retries until an LLM attempt succeeds.
 3. **Generation:** one OpenRouter chat-completions call (env
    `OPENROUTER_API_KEY`; primary `:free` model id + ordered fallback model ids,
    first that responds wins; `temperature 0`; ~30 s timeout; `max_tokens` tight
@@ -168,20 +192,23 @@ optional secret env on the build step.
   AFTER merge+prune (a malformed previous file means "start fresh", not "fail").
 - `highlights.json`: schema_version known; `source` in
   {`openrouter`, `fallback`}; the three section keys present, each text a
-  non-empty string; `generated_at` ISO. (Text content is the LLM's — validated
-  for shape, not prose; extra section keys tolerated, matching the
-  additive-only contract philosophy.)
+  non-empty string; `generated_at` ISO. Validation is strict on identity
+  (schema_version, required keys) and tolerant on extensions (unexpected
+  section keys are not rejected — forward compatibility). Text content is the
+  LLM's — validated for shape, not prose.
 
 ## 7. Tests
 
-- Snapshot upsert/prune: same-day last-write-wins; 8-date retention; fresh
-  start on malformed previous; empty/absent prev file.
+- Snapshot upsert/prune: same-day last-write-wins; 10-date retention; fresh
+  start on malformed previous; empty/absent prev file; `updated_at` = newest
+  snapshot's `generated_at`.
 - Comparison helper: exact-7-day baseline hit and miss; `new` case; unchanged
-  case; rank arithmetic.
+  case; rank arithmetic; top-10-boundary entrants render as `new`.
 - Diff builder: deterministic ordering; numeric-only output; handles empty
   history (first-week message).
-- `generate_highlights.py` with stubbed HTTP: reuse path (<24 h); LLM success
-  (parsed JSON → texts); LLM failure → fallback templates; fallback carries
+- `generate_highlights.py` with stubbed HTTP: reuse path (<24 h, LLM-sourced
+  only); **fallback regeneration regardless of age**; LLM success (parsed
+  JSON → texts); LLM failure → fallback templates; fallback carries
   backticks; model-fallback chain (primary fails → second id used).
 - `build_site_data.py`: `--history-prev-file`/`--highlights-file` validation
   and sibling placement; malformed prev → fresh history, exit 0.
