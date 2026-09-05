@@ -19,9 +19,9 @@ HIGHLIGHTS_SCHEMA_VERSION = 1
 SECTION_KEYS = ("week", "intelligence", "prices")
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 LLM_MODELS = (
-    "z-ai/glm-5.3-flash:free",
-    "deepseek/deepseek-chat-v3.1:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
+    "minimax/minimax-m3:free",
+    "thinkingmachines/inkling:free",
+    "z-ai/glm-5.2:free",
 )
 PROMPT_RULES = (
     "You write deployment notes for a model-ranking site. The user message is"
