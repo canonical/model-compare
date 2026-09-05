@@ -187,7 +187,7 @@ optional secret env on the build step.
 
 ## 6. Validation (build_site_data.py)
 
-- `history.json`: schema_version known; dates ISO; ≤ 8 snapshots; snapshot
+- `history.json`: schema_version known; dates ISO; ≤ 10 snapshots; snapshot
   shape (tabs/pool_ids/aa/prices present, ranks consistent 1..10); validate
   AFTER merge+prune (a malformed previous file means "start fresh", not "fail").
 - `highlights.json`: schema_version known; `source` in
