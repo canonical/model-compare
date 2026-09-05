@@ -40,7 +40,7 @@ script:
 $ opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"
 ```
 
-The same workflow publishes a [`catalog.json`](https://canonical.github.io/model-compare/catalog.json) artifact — see [Catalog output](#catalog-output).
+The same workflow publishes a [`catalog.json`](https://canonical.github.io/model-compare/catalog.json) artifact — see [Catalog output](#catalog-output) — plus the weekly `history.json` and `highlights.json` — see [Weekly history and highlights](#weekly-history-and-highlights).
 
 Tip: save it as an alias so every launch picks up the fresh value:
 
@@ -219,6 +219,37 @@ modality, tool calling, expired, age
 ignored with `--catalog` (the document always covers the full pool, sorted by
 the balanced overall score); `--catalog` cannot be combined with `--best` or
 `--json`.
+
+## Weekly history and highlights
+
+Every publish run also maintains a rolling weekly history and a highlights
+panel. The workflow fetches the currently published `history.json` and
+`highlights.json` (a missing file is fine on the first run) and regenerates
+both artifacts next to `catalog.json`:
+
+- **`7-day` column** — each table row is compared against the snapshot dated
+  exactly one week back: `↑N` (green) if the model climbed N places, `↓N`
+  (red) if it slipped, `•` (blue) if it held rank, and `new` if it was not in
+  the top 10 then. The baseline is the weekly snapshot, so the column stays
+  blank during the first week of data collection.
+- **`history.json`** — up to 10 daily snapshots keyed by UTC date. Each
+  snapshot holds the full pool of model ids, the top 10 per priority (id,
+  rank, quality, blended price), the AA intelligence indices and per-model
+  prices (input, output, blended, discount).
+- **`highlights.json`** — three prose sections shown above the table under
+  the headings *News from OpenRouter*, *Quality moves* and
+  *Price movements & deals*.
+
+Regeneration cadence: highlights younger than 24 hours are reused as is;
+otherwise `generate_highlights.py` computes a numeric diff of today's catalog
+against the snapshot exactly 7 days back and makes one grounded OpenRouter
+call to write the three sections. On any failure — missing key, fetch error,
+unparseable output — deterministic templates take over, so a broken LLM never
+fails the deploy.
+
+LLM generation is optional: setting the `OPENROUTER_API_KEY` repository
+secret enables it. Without the secret, the site serves the deterministic
+templates.
 
 ## Options
 

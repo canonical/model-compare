@@ -35,6 +35,7 @@ jobs:
       - name: Build site
         env:
           AA_API_KEY: ${{ secrets.AA_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           mkdir -p _site
           python model_compare.py --best > best.txt
@@ -42,10 +43,19 @@ jobs:
             python model_compare.py --priority "$p" --json --top 10 > "$p.json"
           done
           python model_compare.py --catalog > catalog.json
+          curl -fsSL https://canonical.github.io/model-compare/history.json -o history-prev.json || true
+          curl -fsSL https://canonical.github.io/model-compare/highlights.json -o highlights-prev.json || true
+          python generate_highlights.py \
+            --catalog catalog.json \
+            --history history-prev.json \
+            --prev-highlights highlights-prev.json \
+            --output highlights-new.json
           python build_site_data.py \
             --best-file best.txt \
             --output _site/data.json \
             --catalog-file catalog.json \
+            --history-prev-file history-prev.json \
+            --highlights-file highlights-new.json \
             --priority balanced=balanced.json \
             --priority price=price.json \
             --priority quality=quality.json
