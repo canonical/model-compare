@@ -15,7 +15,7 @@ import math
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 PRIORITIES = ("balanced", "price", "quality")
 ROW_KEYS = (
@@ -230,6 +230,121 @@ def validate_catalog(document) -> None:
         )
 
 
+HISTORY_SCHEMA_VERSION = 1
+HISTORY_RETENTION = 10
+HISTORY_TOP_N = 10
+HISTORY_TAB_KEYS = ("balanced", "price", "quality")
+
+
+def _is_iso_date(value) -> bool:
+    try:
+        date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def build_snapshot(catalog) -> dict:
+    """Project a validated catalog document into one daily history snapshot.
+
+    tabs derive from the catalog itself: per priority, models sorted by
+    scores.overall descending (id tiebreak), top 10, rank 1-based. aa and
+    prices cover candidates only -- filtered entries carry neither.
+    """
+    models = catalog["models"]
+    tabs = {}
+    for priority in HISTORY_TAB_KEYS:
+        ranked = sorted(
+            models, key=lambda e: (-e["scores"]["overall"][priority], e["id"])
+        )
+        tabs[priority] = [
+            {
+                "id": entry["id"],
+                "rank": i + 1,
+                "quality": entry["quality"],
+                "blended": entry["pricing"]["blended_per_1m"],
+            }
+            for i, entry in enumerate(ranked[:HISTORY_TOP_N])
+        ]
+    return {
+        "generated_at": catalog["generated_at"],
+        "pool_ids": sorted(
+            [e["id"] for e in models] + [e["id"] for e in catalog["filtered"]]
+        ),
+        "tabs": tabs,
+        "aa": {
+            e["id"]: e["aa"]["intelligence_index"]
+            for e in models
+            if e["aa"]["intelligence_index"] is not None
+        },
+        "prices": {
+            e["id"]: [
+                e["pricing"]["input_per_1m"],
+                e["pricing"]["output_per_1m"],
+                e["pricing"]["blended_per_1m"],
+                e["discount"],
+            ]
+            for e in models
+        },
+    }
+
+
+def merge_history(prev, snapshot) -> dict:
+    """Upsert the snapshot under its UTC date and prune to the newest 10.
+
+    A malformed previous document starts fresh; garbage entries inside a
+    well-formed one are dropped per date. Same-day upserts are
+    last-write-wins.
+    """
+    snapshots = {}
+    if isinstance(prev, dict) and isinstance(prev.get("snapshots"), dict):
+        for date_key, snap in prev["snapshots"].items():
+            if _is_iso_date(date_key) and isinstance(snap, dict):
+                snapshots[date_key] = snap
+    today = snapshot["generated_at"][:10]
+    snapshots[today] = snapshot
+    kept = sorted(snapshots)[-HISTORY_RETENTION:]
+    return {
+        "schema_version": HISTORY_SCHEMA_VERSION,
+        "updated_at": snapshots[kept[-1]]["generated_at"],
+        "snapshots": {date_key: snapshots[date_key] for date_key in kept},
+    }
+
+
+def validate_history(document) -> None:
+    """Validate the merged history document (strict identity, <=10 dates)."""
+    if not isinstance(document, dict):
+        raise ValueError("history document is not an object")
+    if document.get("schema_version") != HISTORY_SCHEMA_VERSION:
+        raise ValueError(
+            f"unknown history schema_version: {document.get('schema_version')!r}"
+        )
+    snapshots = document.get("snapshots")
+    if not isinstance(snapshots, dict) or not snapshots:
+        raise ValueError("history snapshots must be a non-empty object")
+    if not all(_is_iso_date(d) for d in snapshots):
+        raise ValueError("history snapshot keys must be ISO dates")
+    if len(snapshots) > HISTORY_RETENTION:
+        raise ValueError(
+            f"history holds {len(snapshots)} snapshots (max {HISTORY_RETENTION})"
+        )
+    for date_key, snap in snapshots.items():
+        if not isinstance(snap, dict):
+            raise ValueError(f"history snapshot {date_key} is not an object")
+        for key in ("generated_at", "pool_ids", "tabs", "aa", "prices"):
+            if key not in snap:
+                raise ValueError(f"history snapshot {date_key} missing key: {key}")
+        for priority in HISTORY_TAB_KEYS:
+            rows = snap["tabs"].get(priority)
+            if not isinstance(rows, list):
+                raise ValueError(f"history snapshot {date_key} tabs.{priority} missing")
+            for i, row in enumerate(rows):
+                if not isinstance(row, dict) or row.get("rank") != i + 1:
+                    raise ValueError(
+                        f"history snapshot {date_key} tabs.{priority} rank mismatch"
+                    )
+
+
 def build_data(best, priorities, now=None) -> dict:
     if not isinstance(best, str) or not MODEL_ID_RE.fullmatch(best.strip()):
         raise ValueError(f"best model id looks wrong: {best!r}")
@@ -277,6 +392,10 @@ def main(argv=None) -> int:
         help="raw model_compare.py --catalog output; validated and written as catalog.json next to --output",
     )
     parser.add_argument(
+        "--history-prev-file",
+        help="previous history.json (fetched from the live site); merged, pruned and rewritten as history.json next to --output",
+    )
+    parser.add_argument(
         "--priority",
         action="append",
         required=True,
@@ -322,6 +441,36 @@ def main(argv=None) -> int:
         try:
             with open(catalog_path, "w") as fh:
                 json.dump(catalog, fh, indent=2)
+                fh.write("\n")
+        except OSError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    if args.history_prev_file is not None:
+        if catalog is None:
+            print(
+                "error: --history-prev-file requires --catalog-file",
+                file=sys.stderr,
+            )
+            return 1
+        prev = None
+        if args.history_prev_file:
+            try:
+                with open(args.history_prev_file) as fh:
+                    prev = json.load(fh)
+            except (OSError, ValueError):
+                prev = None  # malformed/missing previous: start fresh
+        history = merge_history(prev, build_snapshot(catalog))
+        try:
+            validate_history(history)
+        except ValueError as exc:
+            print(f"error: invalid history: {exc}", file=sys.stderr)
+            return 1
+        history_path = os.path.join(
+            os.path.dirname(os.path.abspath(args.output)), "history.json"
+        )
+        try:
+            with open(history_path, "w") as fh:
+                json.dump(history, fh, indent=2)
                 fh.write("\n")
         except OSError as exc:
             print(f"error: {exc}", file=sys.stderr)

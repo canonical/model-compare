@@ -337,3 +337,140 @@ def test_main_without_catalog_file_writes_no_catalog(tmp_path):
     assert bsd.main(argv) == 0
     assert out.exists()
     assert not (out.parent / "catalog.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# history.json publication
+# ---------------------------------------------------------------------------
+
+
+def make_history_snapshot(date, generated_at, **overrides):
+    snap = {
+        "generated_at": generated_at,
+        "pool_ids": ["acme/model-a"],
+        "tabs": {
+            "balanced": [
+                {"id": "acme/model-a", "rank": 1, "quality": 55.0, "blended": 1.25}
+            ],
+            "price": [
+                {"id": "acme/model-a", "rank": 1, "quality": 55.0, "blended": 1.25}
+            ],
+            "quality": [
+                {"id": "acme/model-a", "rank": 1, "quality": 55.0, "blended": 1.25}
+            ],
+        },
+        "aa": {"acme/model-a": 55.0},
+        "prices": {"acme/model-a": [1.0, 2.0, 1.25, None]},
+    }
+    snap.update(overrides)
+    return snap
+
+
+def make_history(**overrides):
+    doc = {
+        "schema_version": 1,
+        "updated_at": "2026-08-26T09:15:00+00:00",
+        "snapshots": {
+            "2026-08-26": make_history_snapshot(
+                "2026-08-26", "2026-08-26T09:15:00+00:00"
+            )
+        },
+    }
+    doc.update(overrides)
+    return doc
+
+
+def test_build_snapshot_projects_catalog():
+    snap = bsd.build_snapshot(
+        make_catalog(),
+    )
+    assert snap["generated_at"] == "2026-09-02T09:15:00+00:00"
+    assert snap["pool_ids"] == ["acme/model-a", "acme/small"]
+    assert snap["tabs"]["balanced"][0] == {
+        "id": "acme/model-a",
+        "rank": 1,
+        "quality": 55.0,
+        "blended": 1.25,
+    }
+    assert snap["aa"] == {"acme/model-a": 55.0}
+    assert snap["prices"]["acme/model-a"] == [1.0, 2.0, 1.25, None]
+
+
+def test_build_snapshot_ranks_per_priority_top10():
+    doc = make_catalog()
+    for i in range(12):
+        doc["models"].append(
+            make_catalog_entry(
+                id=f"acme/m{i}",
+                quality=60.0 + i,
+                scores={
+                    "price": 0.5,
+                    "quality": 0.8,
+                    "context": 0.5,
+                    "age": 0.5,
+                    "overall": {
+                        "balanced": round(0.5 - i * 0.01, 4),
+                        "price": round(0.9 - (i % 3) * 0.1, 4),
+                        "quality": round(0.3 + i * 0.01, 4),
+                    },
+                },
+            )
+        )
+    snap = bsd.build_snapshot(doc)
+    for priority in ("balanced", "price", "quality"):
+        assert len(snap["tabs"][priority]) == 10
+        assert [row["rank"] for row in snap["tabs"][priority]] == list(range(1, 11))
+
+
+def test_merge_history_upserts_and_prunes():
+    prev = make_history()
+    snaps = prev["snapshots"]
+    for d in range(1, 12):
+        snaps[f"2026-08-{d:02d}"] = make_history_snapshot(
+            f"2026-08-{d:02d}", f"2026-08-{d:02d}T09:15:00+00:00"
+        )
+    today = "2026-09-02"
+    snap = make_history_snapshot(today, "2026-09-02T09:15:00+00:00")
+    merged = bsd.merge_history(prev, snap)
+    assert list(merged["snapshots"]) == sorted(merged["snapshots"])[-10:]
+    assert len(merged["snapshots"]) == 10
+    assert merged["snapshots"][today] == snap
+    assert merged["updated_at"] == "2026-09-02T09:15:00+00:00"
+    assert merged["schema_version"] == 1
+
+
+def test_merge_history_same_day_last_write_wins():
+    prev = make_history()
+    snap_old = make_history_snapshot("2026-09-02", "2026-09-02T03:15:00+00:00")
+    merged1 = bsd.merge_history(prev, snap_old)
+    snap_new = make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    merged2 = bsd.merge_history(merged1, snap_new)
+    assert merged2["snapshots"]["2026-09-02"] == snap_new
+    assert merged2["updated_at"] == "2026-09-02T09:15:00+00:00"
+    assert len(merged2["snapshots"]) == 2
+
+
+def test_merge_history_malformed_prev_starts_fresh():
+    merged = bsd.merge_history(
+        {"snapshots": "garbage"},
+        make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00"),
+    )
+    assert list(merged["snapshots"]) == ["2026-09-02"]
+    assert bsd.merge_history(
+        None, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )["snapshots"]["2026-09-02"]["pool_ids"] == ["acme/model-a"]
+
+
+def test_validate_history_happy_and_rejections():
+    doc = make_history()
+    doc["snapshots"]["2026-09-02"] = make_history_snapshot(
+        "2026-09-02", "2026-09-02T09:15:00+00:00"
+    )
+    doc["updated_at"] = "2026-09-02T09:15:00+00:00"
+    bsd.validate_history(doc)  # must not raise
+    with pytest.raises(ValueError):
+        bsd.validate_history({"schema_version": 2})
+    bad = make_history()
+    bad["snapshots"]["2026-08-26"]["tabs"]["balanced"][0]["rank"] = 5
+    with pytest.raises(ValueError):
+        bsd.validate_history(bad)
