@@ -254,8 +254,13 @@ def _has_snapshot_shape(snap) -> bool:
     tabs = snap.get("tabs")
     if not isinstance(tabs, dict):
         return False
-    if any(not isinstance(tabs.get(key), list) for key in CATALOG_OVERALL_KEYS):
-        return False
+    for key in CATALOG_OVERALL_KEYS:
+        rows = tabs.get(key)
+        if not isinstance(rows, list):
+            return False
+        for i, row in enumerate(rows):
+            if not isinstance(row, dict) or row.get("rank") != i + 1:
+                return False
     return isinstance(snap.get("aa"), dict) and isinstance(snap.get("prices"), dict)
 
 
@@ -284,7 +289,7 @@ def build_snapshot(catalog) -> dict:
     return {
         "generated_at": catalog["generated_at"],
         "pool_ids": sorted(
-            [e["id"] for e in models] + [e["id"] for e in catalog["filtered"]]
+            set([e["id"] for e in models] + [e["id"] for e in catalog["filtered"]])
         ),
         "tabs": tabs,
         "aa": {
@@ -310,7 +315,8 @@ def merge_history(prev, snapshot) -> dict:
     A malformed previous document starts fresh; previous snapshots are
     shape-filtered per date, so a date is carried forward only when its
     snapshot is a dict with a non-empty generated_at string, a pool_ids
-    list, a tabs dict holding a list for each of balanced/price/quality,
+    list, a tabs dict holding a rank-consistent list (each row's rank
+    equals its 1-based position) for each of balanced/price/quality,
     an aa dict and a prices dict. Same-day upserts are last-write-wins.
     """
     snapshots = {}
@@ -481,24 +487,7 @@ def main(argv=None) -> int:
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    try:
-        with open(args.output, "w") as fh:
-            json.dump(data, fh, indent=2)
-            fh.write("\n")
-    except OSError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    if catalog is not None:
-        catalog_path = os.path.join(
-            os.path.dirname(os.path.abspath(args.output)), "catalog.json"
-        )
-        try:
-            with open(catalog_path, "w") as fh:
-                json.dump(catalog, fh, indent=2)
-                fh.write("\n")
-        except OSError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+    history = None
     if args.history_prev_file is not None:
         if catalog is None:
             print(
@@ -519,6 +508,25 @@ def main(argv=None) -> int:
         except ValueError as exc:
             print(f"error: invalid history: {exc}", file=sys.stderr)
             return 1
+    try:
+        with open(args.output, "w") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if catalog is not None:
+        catalog_path = os.path.join(
+            os.path.dirname(os.path.abspath(args.output)), "catalog.json"
+        )
+        try:
+            with open(catalog_path, "w") as fh:
+                json.dump(catalog, fh, indent=2)
+                fh.write("\n")
+        except OSError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    if history is not None:
         history_path = os.path.join(
             os.path.dirname(os.path.abspath(args.output)), "history.json"
         )

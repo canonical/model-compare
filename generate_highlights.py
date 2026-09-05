@@ -237,7 +237,7 @@ def generate_with_llm(diff, api_key):
     }
     for model in LLM_MODELS:
         try:
-            payload = _post_chat(model, body, api_key)
+            payload = _post_chat(model, {**body, "model": model}, api_key)
             content = payload["choices"][0]["message"]["content"]
             stripped = content.strip().removeprefix("```json").removeprefix("```")
             stripped = stripped.removesuffix("```").strip()
@@ -311,9 +311,13 @@ def main(argv=None) -> int:
             "source": source,
             "sections": texts,
         }
-    with open(args.output, "w") as fh:
-        json.dump(document, fh, indent=2)
-        fh.write("\n")
+    try:
+        with open(args.output, "w") as fh:
+            json.dump(document, fh, indent=2)
+            fh.write("\n")
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

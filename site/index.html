@@ -350,7 +350,9 @@
         els.tbody.textContent = "";
         var baseline = null;
         if (historyData && historyData.snapshots) {
-          var today = new Date().toISOString().slice(0, 10);
+          var today = data
+            ? data.generated_at.slice(0, 10)
+            : new Date().toISOString().slice(0, 10);
           var d = new Date(today + "T00:00:00Z");
           d.setUTCDate(d.getUTCDate() - 7);
           baseline = historyData.snapshots[d.toISOString().slice(0, 10)] || null;
@@ -404,8 +406,13 @@
       }
 
       function renderHighlights(sections) {
+        var keys = ["week", "intelligence", "prices"];
+        var complete = keys.every(function (key) {
+          return typeof sections[key] === "string" && sections[key].length > 0;
+        });
+        if (!complete) return;
         document.getElementById("highlights").hidden = false;
-        Object.keys(sections).forEach(function (key) {
+        keys.forEach(function (key) {
           var el = document.getElementById("hl-" + key);
           if (!el) return;
           var safe = sections[key]

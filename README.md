@@ -240,12 +240,13 @@ both artifacts next to `catalog.json`:
   the headings *News from OpenRouter*, *Quality moves* and
   *Price movements & deals*.
 
-Regeneration cadence: highlights younger than 24 hours are reused as is;
-otherwise `generate_highlights.py` computes a numeric diff of today's catalog
-against the snapshot exactly 7 days back and makes one grounded OpenRouter
-call to write the three sections. On any failure — missing key, fetch error,
-unparseable output — deterministic templates take over, so a broken LLM never
-fails the deploy.
+Regeneration cadence: only LLM-sourced highlights (`source: "openrouter"`)
+younger than 24 hours are reused as is — fallback output is regenerated on
+every publish. When regenerating, `generate_highlights.py` computes a numeric
+diff of today's catalog against the snapshot exactly 7 days back and makes one
+grounded OpenRouter call to write the three sections. On any failure — missing
+key, fetch error, unparseable output — deterministic templates take over, so a
+broken LLM never fails the deploy.
 
 LLM generation is optional: setting the `OPENROUTER_API_KEY` repository
 secret enables it. Without the secret, the site serves the deterministic

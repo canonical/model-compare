@@ -422,6 +422,15 @@ def test_build_snapshot_ranks_per_priority_top10():
         assert [row["rank"] for row in snap["tabs"][priority]] == list(range(1, 11))
 
 
+def test_build_snapshot_dedupes_pool_ids():
+    doc = make_catalog()
+    doc["filtered"].append(
+        {"id": "acme/model-a", "name": "Model A", "reasons": ["context"]}
+    )
+    snap = bsd.build_snapshot(doc)
+    assert snap["pool_ids"] == ["acme/model-a", "acme/small"]
+
+
 def test_merge_history_upserts_and_prunes():
     prev = make_history()
     snaps = prev["snapshots"]
@@ -487,6 +496,20 @@ def test_merge_history_drops_prev_snapshot_with_non_dict_tabs():
     assert merged["snapshots"]["2026-09-02"]["pool_ids"] == ["acme/model-a"]
 
 
+def test_merge_history_drops_prev_snapshot_with_corrupt_ranks():
+    prev = make_history()
+    prev["snapshots"]["2026-08-25"] = make_history_snapshot(
+        "2026-08-25", "2026-08-25T09:15:00+00:00"
+    )
+    prev["snapshots"]["2026-08-25"]["tabs"]["balanced"][0]["rank"] = 5
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )
+    assert "2026-08-25" not in merged["snapshots"]
+    assert "2026-08-26" in merged["snapshots"]
+    assert merged["snapshots"]["2026-09-02"]["pool_ids"] == ["acme/model-a"]
+
+
 def test_validate_history_happy_and_rejections():
     doc = make_history()
     doc["snapshots"]["2026-09-02"] = make_history_snapshot(
@@ -500,6 +523,55 @@ def test_validate_history_happy_and_rejections():
     bad["snapshots"]["2026-08-26"]["tabs"]["balanced"][0]["rank"] = 5
     with pytest.raises(ValueError):
         bsd.validate_history(bad)
+
+
+def test_main_writes_history_from_malformed_prev(tmp_path):
+    prev_file = tmp_path / "history-prev.json"
+    prev_file.write_text("{not json")
+    catalog_file = tmp_path / "catalog-raw.json"
+    catalog_file.write_text(json.dumps(make_catalog()))
+    argv, out = catalog_argv(tmp_path, catalog_file)
+    argv += ["--history-prev-file", str(prev_file)]
+    assert bsd.main(argv) == 0
+    history_path = out.parent / "history.json"
+    written = json.loads(history_path.read_text())
+    assert list(written["snapshots"]) == ["2026-09-02"]
+    assert written["snapshots"]["2026-09-02"]["pool_ids"] == [
+        "acme/model-a",
+        "acme/small",
+    ]
+    assert out.exists()  # data.json still written
+
+
+def test_main_history_prev_requires_catalog(tmp_path, capsys):
+    prev_file = tmp_path / "history-prev.json"
+    prev_file.write_text(json.dumps(make_history()))
+    argv, out = catalog_argv(tmp_path, None)
+    argv += ["--history-prev-file", str(prev_file)]
+    assert bsd.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "--catalog-file" in err
+    assert not out.exists()  # nothing written: the check precedes all writes
+    assert not (out.parent / "history.json").exists()
+
+
+def test_main_drops_rank_corrupted_prev_snapshot(tmp_path):
+    prev = make_history()
+    prev["snapshots"]["2026-08-25"] = make_history_snapshot(
+        "2026-08-25", "2026-08-25T09:15:00+00:00"
+    )
+    prev["snapshots"]["2026-08-25"]["tabs"]["quality"][0]["rank"] = 7
+    prev_file = tmp_path / "history-prev.json"
+    prev_file.write_text(json.dumps(prev))
+    catalog_file = tmp_path / "catalog-raw.json"
+    catalog_file.write_text(json.dumps(make_catalog()))
+    argv, out = catalog_argv(tmp_path, catalog_file)
+    argv += ["--history-prev-file", str(prev_file)]
+    assert bsd.main(argv) == 0
+    written = json.loads((out.parent / "history.json").read_text())
+    assert "2026-08-25" not in written["snapshots"]
+    assert "2026-08-26" in written["snapshots"]
+    assert "2026-09-02" in written["snapshots"]
 
 
 # ---------------------------------------------------------------------------
@@ -557,3 +629,10 @@ def test_main_rejects_malformed_highlights(tmp_path, capsys):
     assert bsd.main(argv) == 1
     assert "error:" in capsys.readouterr().err
     assert not out.exists()
+
+
+def test_main_without_highlights_file_writes_no_highlights(tmp_path):
+    argv, out = catalog_argv(tmp_path)
+    assert bsd.main(argv) == 0
+    assert out.exists()
+    assert not (out.parent / "highlights.json").exists()

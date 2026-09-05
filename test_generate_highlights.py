@@ -247,9 +247,11 @@ def test_generate_with_llm_model_fallback_chain(monkeypatch):
     # LLM_MODELS (which the assertion below requires to be fully walked).
     responses = {m: RuntimeError("boom") for m in gh.LLM_MODELS[:-1]}
     captured = []
+    captured_bodies = []
 
     def fake_post(model, body, api_key):
         captured.append(model)
+        captured_bodies.append(body.get("model"))
         if model in responses and isinstance(responses[model], Exception):
             raise responses[model]
         # _post_chat returns the parsed response body (json.load), so the
@@ -268,6 +270,9 @@ def test_generate_with_llm_model_fallback_chain(monkeypatch):
     texts = gh.generate_with_llm({"baseline_present": False}, "key")
     assert texts == {"week": "w", "intelligence": "i", "prices": "p"}
     assert captured == list(gh.LLM_MODELS)
+    # every request body must name the model it was sent to, or OpenRouter
+    # rejects the call with a 400 before the chain can succeed
+    assert captured_bodies == list(gh.LLM_MODELS)
 
 
 def test_generate_with_llm_rejects_unparseable(monkeypatch):
