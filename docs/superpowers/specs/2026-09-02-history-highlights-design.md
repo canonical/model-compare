@@ -115,9 +115,9 @@ present.
   "generated_at": "2026-09-02T09:15:00+00:00",
   "source": "openrouter",
   "sections": {
-    "week": {"text": "…"},
-    "intelligence": {"text": "…"},
-    "prices": {"text": "…"}
+    "week": "…",
+    "intelligence": "…",
+    "prices": "…"
   }
 }
 ```
@@ -162,7 +162,8 @@ Inputs: current `catalog.json`, `history.json`, previous `highlights.json`
 
 ### Site rendering
 
-Three sections between the tip hints and the tabs: static `<h2>`-style heading
+Three sections after the copy-actions block, as the last content above the
+footer: static `<h2>`-style heading
 (page uses `h1` only today; use a small heading consistent with existing type
 scale) + one paragraph per section, text rendered with escape-then-backticks.
 If `highlights.json` is missing or fails validation client-side, the sections

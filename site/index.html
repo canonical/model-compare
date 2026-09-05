@@ -169,15 +169,6 @@
       of the tab shown here.
     </p>
 
-    <div id="highlights" hidden>
-      <h2>News from OpenRouter</h2>
-      <p id="hl-week"></p>
-      <h2>Quality moves</h2>
-      <p id="hl-intelligence"></p>
-      <h2>Price movements &amp; deals</h2>
-      <p id="hl-prices"></p>
-    </div>
-
     <div class="tabs" id="tabs">
       <button type="button" data-priority="balanced" class="active">
         balanced
@@ -234,6 +225,15 @@
           </td>
         </tr>
       </table>
+    </div>
+
+    <div id="highlights" hidden>
+      <h2>News from OpenRouter</h2>
+      <p id="hl-week"></p>
+      <h2>Quality moves</h2>
+      <p id="hl-intelligence"></p>
+      <h2>Price movements &amp; deals</h2>
+      <p id="hl-prices"></p>
     </div>
 
     <footer>
@@ -362,7 +362,7 @@
           var movement = { cls: "", text: "" };
           if (baseline) {
             var prevRank = null;
-            (baseline.tabs[current] || []).forEach(function (r) {
+            ((baseline.tabs || {})[current] || []).forEach(function (r) {
               if (r.id === row.model) prevRank = r.rank;
             });
             if (prevRank === null) movement = { cls: "new", text: "new" };

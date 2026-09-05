@@ -236,9 +236,9 @@ both artifacts next to `catalog.json`:
   snapshot holds the full pool of model ids, the top 10 per priority (id,
   rank, quality, blended price), the AA intelligence indices and per-model
   prices (input, output, blended, discount).
-- **`highlights.json`** — three prose sections shown above the table under
-  the headings *News from OpenRouter*, *Quality moves* and
-  *Price movements & deals*.
+- **`highlights.json`** — three prose sections shown at the bottom of the page
+  (last above the footer) under the headings *News from OpenRouter*,
+  *Quality moves* and *Price movements & deals*.
 
 Regeneration cadence: only LLM-sourced highlights (`source: "openrouter"`)
 younger than 24 hours are reused as is — fallback output is regenerated on
