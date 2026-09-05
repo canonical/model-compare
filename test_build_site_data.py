@@ -500,3 +500,60 @@ def test_validate_history_happy_and_rejections():
     bad["snapshots"]["2026-08-26"]["tabs"]["balanced"][0]["rank"] = 5
     with pytest.raises(ValueError):
         bsd.validate_history(bad)
+
+
+# ---------------------------------------------------------------------------
+# highlights.json publication
+# ---------------------------------------------------------------------------
+
+
+def make_highlights(**overrides):
+    doc = {
+        "schema_version": 1,
+        "generated_at": "2026-09-02T09:15:00+00:00",
+        "source": "openrouter",
+        "sections": {
+            "week": "`acme/model-b` climbed 1 spot(s).",
+            "intelligence": "AA intelligence moves: `acme/model-b` +8.4.",
+            "prices": "Blended price moves: `acme/model-a` 1.25 -> 1.0.",
+        },
+    }
+    doc.update(overrides)
+    return doc
+
+
+def test_validate_highlights_happy_and_rejections():
+    bsd.validate_highlights(make_highlights())  # must not raise
+    with pytest.raises(ValueError):
+        bsd.validate_highlights({"schema_version": 2})
+    bad = make_highlights(source="psychic")
+    with pytest.raises(ValueError):
+        bsd.validate_highlights(bad)
+    bad = make_highlights(sections={"week": "only one"})
+    with pytest.raises(ValueError):
+        bsd.validate_highlights(bad)
+    bad = make_highlights(sections={"week": "", "intelligence": "i", "prices": "p"})
+    with pytest.raises(ValueError):
+        bsd.validate_highlights(bad)
+
+
+def test_main_writes_highlights_next_to_data_json(tmp_path):
+    raw = tmp_path / "highlights-new.json"
+    raw.write_text(json.dumps(make_highlights()))
+    argv, out = catalog_argv(tmp_path)
+    argv += ["--highlights-file", str(raw)]
+    assert bsd.main(argv) == 0
+    written = json.loads((out.parent / "highlights.json").read_text())
+    assert written["source"] == "openrouter"
+    assert set(written["sections"]) == {"week", "intelligence", "prices"}
+    assert out.exists()
+
+
+def test_main_rejects_malformed_highlights(tmp_path, capsys):
+    raw = tmp_path / "highlights-new.json"
+    raw.write_text(json.dumps(make_highlights(source="psychic")))
+    argv, out = catalog_argv(tmp_path, None)
+    argv += ["--highlights-file", str(raw)]
+    assert bsd.main(argv) == 1
+    assert "error:" in capsys.readouterr().err
+    assert not out.exists()

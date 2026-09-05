@@ -362,6 +362,30 @@ def validate_history(document) -> None:
                     )
 
 
+HIGHLIGHTS_SCHEMA_VERSION = 1
+HIGHLIGHTS_SECTION_KEYS = ("week", "intelligence", "prices")
+HIGHLIGHTS_SOURCES = ("openrouter", "fallback")
+
+
+def validate_highlights(document) -> None:
+    """Validate the highlights document (strict identity, tolerant extensions)."""
+    if not isinstance(document, dict):
+        raise ValueError("highlights document is not an object")
+    if document.get("schema_version") != HIGHLIGHTS_SCHEMA_VERSION:
+        raise ValueError(
+            f"unknown highlights schema_version: {document.get('schema_version')!r}"
+        )
+    if document.get("source") not in HIGHLIGHTS_SOURCES:
+        raise ValueError(f"unknown highlights source: {document.get('source')!r}")
+    sections = document.get("sections")
+    if not isinstance(sections, dict):
+        raise ValueError("highlights sections must be an object")
+    for key in HIGHLIGHTS_SECTION_KEYS:
+        text = sections.get(key)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"highlights section {key} must be a non-empty string")
+
+
 def build_data(best, priorities, now=None) -> dict:
     if not isinstance(best, str) or not MODEL_ID_RE.fullmatch(best.strip()):
         raise ValueError(f"best model id looks wrong: {best!r}")
@@ -413,6 +437,10 @@ def main(argv=None) -> int:
         help="previous history.json (fetched from the live site); merged, pruned and rewritten as history.json next to --output",
     )
     parser.add_argument(
+        "--highlights-file",
+        help="generate_highlights.py output; validated and written as highlights.json next to --output",
+    )
+    parser.add_argument(
         "--priority",
         action="append",
         required=True,
@@ -428,6 +456,15 @@ def main(argv=None) -> int:
             validate_catalog(catalog)
         except (OSError, ValueError) as exc:
             print(f"error: invalid catalog: {exc}", file=sys.stderr)
+            return 1
+    highlights = None
+    if args.highlights_file:
+        try:
+            with open(args.highlights_file) as fh:
+                highlights = json.load(fh)
+            validate_highlights(highlights)
+        except (OSError, ValueError) as exc:
+            print(f"error: invalid highlights: {exc}", file=sys.stderr)
             return 1
     try:
         with open(args.best_file) as fh:
@@ -488,6 +525,17 @@ def main(argv=None) -> int:
         try:
             with open(history_path, "w") as fh:
                 json.dump(history, fh, indent=2)
+                fh.write("\n")
+        except OSError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    if highlights is not None:
+        highlights_path = os.path.join(
+            os.path.dirname(os.path.abspath(args.output)), "highlights.json"
+        )
+        try:
+            with open(highlights_path, "w") as fh:
+                json.dump(highlights, fh, indent=2)
                 fh.write("\n")
         except OSError as exc:
             print(f"error: {exc}", file=sys.stderr)
