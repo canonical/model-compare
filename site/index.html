@@ -102,12 +102,35 @@
         border-bottom: 1px solid #ddd;
         white-space: nowrap;
       }
-      #table th:nth-child(2),
-      #table td:nth-child(2) {
+      #table th:nth-child(3),
+      #table td:nth-child(3) {
         text-align: left;
       }
       #table thead th {
         border-bottom: 2px solid #333;
+      }
+      #table .movement {
+        text-align: center;
+      }
+      .movement.up {
+        color: #1a7f37;
+      }
+      .movement.down {
+        color: #c62828;
+      }
+      .movement.flat {
+        color: #1565c0;
+      }
+      .movement.new {
+        color: #1a7f37;
+      }
+      #highlights h2 {
+        font-size: 1.05rem;
+        margin: 1rem 0 0.25rem;
+      }
+      #highlights p {
+        margin: 0 0 0.5rem;
+        font-size: 0.9rem;
       }
       #copybuttons {
         border: none;
@@ -146,6 +169,15 @@
       of the tab shown here.
     </p>
 
+    <div id="highlights" hidden>
+      <h2>News from OpenRouter</h2>
+      <p id="hl-week"></p>
+      <h2>Quality moves</h2>
+      <p id="hl-intelligence"></p>
+      <h2>Price movements &amp; deals</h2>
+      <p id="hl-prices"></p>
+    </div>
+
     <div class="tabs" id="tabs">
       <button type="button" data-priority="balanced" class="active">
         balanced
@@ -160,6 +192,7 @@
       <thead>
         <tr>
           <th>RANK</th>
+          <th>7-day</th>
           <th>MODEL</th>
           <th>QUAL</th>
           <th>$IN/M</th>
@@ -230,6 +263,7 @@
         curlValue: document.getElementById("curl-value"),
       };
       var data = null;
+      var historyData = null;
       var current = "balanced";
 
       // NOTE: fmtPrice/fmtContext/fmtAge mirror the fmt_* helpers in
@@ -314,8 +348,28 @@
       function render() {
         var rows = (data && data.priorities[current]) || [];
         els.tbody.textContent = "";
+        var baseline = null;
+        if (historyData && historyData.snapshots) {
+          var today = new Date().toISOString().slice(0, 10);
+          var d = new Date(today + "T00:00:00Z");
+          d.setUTCDate(d.getUTCDate() - 7);
+          baseline = historyData.snapshots[d.toISOString().slice(0, 10)] || null;
+        }
         rows.forEach(function (row, i) {
           var tr = document.createElement("tr");
+          var movement = { cls: "", text: "" };
+          if (baseline) {
+            var prevRank = null;
+            (baseline.tabs[current] || []).forEach(function (r) {
+              if (r.id === row.model) prevRank = r.rank;
+            });
+            if (prevRank === null) movement = { cls: "new", text: "new" };
+            else if (prevRank > i + 1)
+              movement = { cls: "up", text: "↑" + (prevRank - i - 1) };
+            else if (prevRank < i + 1)
+              movement = { cls: "down", text: "↓" + (i + 1 - prevRank) };
+            else movement = { cls: "flat", text: "•" };
+          }
           var cells = [
             String(i + 1),
             row.model,
@@ -327,7 +381,13 @@
             fmtAge(row.age_days),
             row.score.toFixed(3),
           ];
-          cells.forEach(function (cell) {
+          cells.forEach(function (cell, idx) {
+            if (idx === 1) {
+              var moveTd = document.createElement("td");
+              if (movement.cls) moveTd.className = "movement " + movement.cls;
+              moveTd.textContent = movement.text;
+              tr.appendChild(moveTd);
+            }
             var td = document.createElement("td");
             td.textContent = cell;
             tr.appendChild(td);
@@ -341,6 +401,19 @@
         els.modelValue.textContent = model === null ? "—" : model;
         els.commandValue.textContent =
           model === null ? "—" : OPENCODE_PREFIX + model;
+      }
+
+      function renderHighlights(sections) {
+        document.getElementById("highlights").hidden = false;
+        Object.keys(sections).forEach(function (key) {
+          var el = document.getElementById("hl-" + key);
+          if (!el) return;
+          var safe = sections[key]
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+          el.innerHTML = safe.replace(/`([^`]+)`/g, "<code>$1</code>");
+        });
       }
 
       function init() {
@@ -388,6 +461,27 @@
             els.status.textContent = "Could not load data.json: " + err.message;
             els.status.hidden = false;
           });
+
+        fetch("history.json", { cache: "no-cache" })
+          .then(function (r) {
+            return r.ok ? r.json() : null;
+          })
+          .then(function (payload) {
+            historyData = payload && payload.snapshots ? payload : null;
+            render();
+          })
+          .catch(function () {
+            historyData = null;
+          });
+
+        fetch("highlights.json", { cache: "no-cache" })
+          .then(function (r) {
+            return r.ok ? r.json() : null;
+          })
+          .then(function (payload) {
+            if (payload && payload.sections) renderHighlights(payload.sections);
+          })
+          .catch(function () {});
       }
 
       init();
