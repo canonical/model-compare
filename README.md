@@ -244,9 +244,13 @@ Regeneration cadence: only LLM-sourced highlights (`source: "openrouter"`)
 younger than 24 hours are reused as is — fallback output is regenerated on
 every publish. When regenerating, `generate_highlights.py` computes a numeric
 diff of today's catalog against the snapshot exactly 7 days back and makes one
-grounded OpenRouter call to write the three sections. On any failure — missing
-key, fetch error, unparseable output — deterministic templates take over, so a
-broken LLM never fails the deploy.
+grounded OpenRouter call to write the three sections. The target model is not
+hardcoded: the free-model lineup on OpenRouter rotates, so the generator
+discovers the currently listed `:free` variants at publish time and walks them
+best-first by OpenRouter's own published AA intelligence index (falling back
+to the public catalog's `:free` list when that data is unavailable). On any
+failure — missing key, no free models listed, fetch error, unparseable output
+— deterministic templates take over, so a broken LLM never fails the deploy.
 
 LLM generation is optional: setting the `OPENROUTER_API_KEY` repository
 secret enables it. Without the secret, the site serves the deterministic

@@ -12,17 +12,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 
 HIGHLIGHTS_SCHEMA_VERSION = 1
 SECTION_KEYS = ("week", "intelligence", "prices")
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
-LLM_MODELS = (
-    "minimax/minimax-m3:free",
-    "thinkingmachines/inkling:free",
-    "z-ai/glm-5.2:free",
+FRONTEND_MODELS_URL = (
+    "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text"
 )
+CATALOG_MODELS_URL = "https://openrouter.ai/api/v1/models"
+USER_AGENT = "model-compare/1.0 (https://github.com/rkratky/model-compare)"
 PROMPT_RULES = (
     "You write deployment notes for a model-ranking site. The user message is"
     " a JSON diff of the last 7 days. Reply with ONE JSON object with keys"
@@ -219,6 +220,62 @@ def _post_chat(model, body, api_key):
         return json.load(resp)
 
 
+def _fetch_json(url):
+    import urllib.request
+
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request, timeout=30) as resp:
+        return json.load(resp)
+
+
+def resolve_llm_models() -> list[str]:
+    """Currently-listed :free models, best-ranked first.
+
+    The free lineup rotates, so the chain is discovered at publish time
+    instead of hardcoded. Primary source: the frontend models API, whose
+    benchmarks payload carries OpenRouter's published AA intelligence per
+    model -- free variants are the endpoint.variant == "free" entries
+    (id = slug + ":free"), ranked by that intelligence. If that endpoint
+    fails or lists nothing, fall back to the public catalog's :free ids
+    (largest context first). An empty result makes generate_with_llm skip
+    straight to the template fallback.
+    """
+    try:
+        data = (_fetch_json(FRONTEND_MODELS_URL).get("data")) or {}
+        intelligence = {}
+        for key, node in (data.get("benchmarks") or {}).items():
+            index = (node or {}).get("aa", {}).get("intelligence_index")
+            if isinstance(index, (int, float)) and not isinstance(index, bool):
+                intelligence[re.sub(r"-\d{8}$", "", key)] = float(index)
+        candidates = []
+        for entry in data.get("models") or []:
+            if not isinstance(entry, dict):
+                continue
+            slug = entry.get("slug") or ""
+            endpoint = entry.get("endpoint") or {}
+            if endpoint.get("variant") != "free" or not slug or slug.startswith("~"):
+                continue
+            bare = re.sub(r"-\d{8}$", "", slug)
+            model_id = bare + ":free"
+            score = intelligence.get(bare)
+            candidates.append((-(score if score is not None else -1.0), model_id))
+        ranked = [model_id for _, model_id in sorted(candidates)]
+        if ranked:
+            return ranked
+    except Exception:
+        pass
+    try:
+        models = (_fetch_json(CATALOG_MODELS_URL).get("data")) or []
+        free_ids = sorted(
+            m.get("id")
+            for m in models
+            if isinstance(m, dict) and str(m.get("id", "")).endswith(":free")
+        )
+        return [model_id for model_id in free_ids if model_id]
+    except Exception:
+        return []
+
+
 def generate_with_llm(diff, api_key):
     """One grounded call; first model in the chain that answers wins.
 
@@ -226,6 +283,9 @@ def generate_with_llm(diff, api_key):
     unparseable output -- the caller then falls back to templates.
     """
     if not api_key:
+        return None
+    models = resolve_llm_models()
+    if not models:
         return None
     body = {
         "messages": [
@@ -235,7 +295,7 @@ def generate_with_llm(diff, api_key):
         "temperature": 0,
         "max_tokens": 300,
     }
-    for model in LLM_MODELS:
+    for model in models:
         try:
             payload = _post_chat(model, {**body, "model": model}, api_key)
             content = payload["choices"][0]["message"]["content"]

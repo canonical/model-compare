@@ -241,11 +241,14 @@ def test_llm_failure_falls_back_to_templates(monkeypatch, tmp_path):
 
 
 def test_generate_with_llm_model_fallback_chain(monkeypatch):
-    # All but the last model fail so the chain is walked end to end: the
-    # first model that answers wins, so a mid-chain success would stop the
-    # loop before the final entry and captured would be shorter than
-    # LLM_MODELS (which the assertion below requires to be fully walked).
-    responses = {m: RuntimeError("boom") for m in gh.LLM_MODELS[:-1]}
+    # Discovery is stubbed to a deterministic chain; all but the last model
+    # fail so the chain is walked end to end: the first model that answers
+    # wins, so a mid-chain success would stop the loop before the final
+    # entry and captured would be shorter than the stubbed chain (which the
+    # assertion below requires to be fully walked).
+    chain = ["free/a:free", "free/b:free", "free/c:free"]
+    monkeypatch.setattr(gh, "resolve_llm_models", lambda: chain)
+    responses = {m: RuntimeError("boom") for m in chain[:-1]}
     captured = []
     captured_bodies = []
 
@@ -269,13 +272,76 @@ def test_generate_with_llm_model_fallback_chain(monkeypatch):
     monkeypatch.setattr(gh, "_post_chat", fake_post)
     texts = gh.generate_with_llm({"baseline_present": False}, "key")
     assert texts == {"week": "w", "intelligence": "i", "prices": "p"}
-    assert captured == list(gh.LLM_MODELS)
+    assert captured == chain
     # every request body must name the model it was sent to, or OpenRouter
     # rejects the call with a 400 before the chain can succeed
-    assert captured_bodies == list(gh.LLM_MODELS)
+    assert captured_bodies == chain
+
+
+def test_resolve_llm_models_ranks_by_published_intelligence(monkeypatch):
+    frontend = {
+        "data": {
+            "models": [
+                {
+                    "slug": "acme/smart-20260801",
+                    "endpoint": {"variant": "free"},
+                },
+                {"slug": "acme/dumb", "endpoint": {"variant": "free"}},
+                {
+                    "slug": "acme/paid",
+                    "endpoint": {"variant": "standard"},
+                },
+                {"slug": "~acme/private", "endpoint": {"variant": "free"}},
+            ],
+            "benchmarks": {
+                "acme/smart-20260801": {"aa": {"intelligence_index": 35.7}},
+                "acme/dumb": {"aa": {"intelligence_index": 20.0}},
+            },
+        }
+    }
+    monkeypatch.setattr(
+        gh, "_fetch_json", lambda url: frontend if "frontend" in url else {}
+    )
+    assert gh.resolve_llm_models() == ["acme/smart:free", "acme/dumb:free"]
+
+
+def test_resolve_llm_models_falls_back_to_catalog(monkeypatch):
+    def boom(url):
+        raise RuntimeError("frontend down")
+
+    monkeypatch.setattr(gh, "_fetch_json", boom)
+    monkeypatch.setattr(
+        gh,
+        "CATALOG_MODELS_URL",
+        "https://openrouter.ai/api/v1/models",
+    )
+    catalog = {
+        "data": [
+            {"id": "acme/b:free", "context_length": 4096},
+            {"id": "acme/a:free", "context_length": 1_000_000},
+            {"id": "acme/paid"},
+        ]
+    }
+
+    def dispatch(url):
+        if url == gh.CATALOG_MODELS_URL:
+            return catalog
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(gh, "_fetch_json", dispatch)
+    assert gh.resolve_llm_models() == ["acme/a:free", "acme/b:free"]
+
+
+def test_resolve_llm_models_empty_when_everything_fails(monkeypatch):
+    def boom(url):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(gh, "_fetch_json", boom)
+    assert gh.resolve_llm_models() == []
 
 
 def test_generate_with_llm_rejects_unparseable(monkeypatch):
+    monkeypatch.setattr(gh, "resolve_llm_models", lambda: ["free/a:free"])
     monkeypatch.setattr(
         gh,
         "_post_chat",
@@ -286,7 +352,12 @@ def test_generate_with_llm_rejects_unparseable(monkeypatch):
     assert gh.generate_with_llm({"baseline_present": False}, "key") is None
 
 
-def test_generate_with_llm_no_key_returns_none():
+def test_generate_with_llm_no_key_skips_discovery(monkeypatch):
+    monkeypatch.setattr(
+        gh,
+        "resolve_llm_models",
+        lambda: pytest.fail("discovery must not run without a key"),
+    )
     assert gh.generate_with_llm({"baseline_present": False}, None) is None
 
 
