@@ -1,5 +1,8 @@
 """Tests for generate_highlights.py -- diff builder and fallback templates."""
 
+import datetime
+import json
+
 import pytest
 
 import generate_highlights as gh
@@ -133,3 +136,162 @@ def test_fallback_texts_first_week():
     diff = gh.build_diff(make_diff_catalog(), {"snapshots": {}})
     texts = gh.fallback_texts(diff)
     assert "building up" in texts["week"]
+
+
+# ---------------------------------------------------------------------------
+# LLM client + reuse rule
+# ---------------------------------------------------------------------------
+
+
+def make_prev_highlights(source, generated_at):
+    return {
+        "schema_version": 1,
+        "generated_at": generated_at,
+        "source": source,
+        "sections": {"week": "w", "intelligence": "i", "prices": "p"},
+    }
+
+
+def test_reuses_recent_llm_output(monkeypatch, tmp_path):
+    prev = make_prev_highlights(
+        "openrouter",
+        datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    )
+    prev_file = tmp_path / "prev.json"
+    prev_file.write_text(json.dumps(prev))
+    monkeypatch.setattr(
+        gh, "generate_with_llm", lambda *a, **k: pytest.fail("must not call LLM")
+    )
+    out = tmp_path / "out.json"
+    assert (
+        gh.main(
+            [
+                "--catalog",
+                str(_write_catalog(tmp_path)),
+                "--history",
+                str(_write_empty_history(tmp_path)),
+                "--prev-highlights",
+                str(prev_file),
+                "--output",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    written = json.loads(out.read_text())
+    assert written["sections"] == prev["sections"]
+    assert written["source"] == "openrouter"
+    assert written["generated_at"] == prev["generated_at"]
+
+
+def test_regenerates_fallback_output_regardless_of_age(monkeypatch, tmp_path):
+    prev = make_prev_highlights("fallback", "2026-08-01T00:00:00+00:00")
+    prev_file = tmp_path / "prev.json"
+    prev_file.write_text(json.dumps(prev))
+    monkeypatch.setattr(
+        gh,
+        "generate_with_llm",
+        lambda diff, key: {"week": "w2", "intelligence": "i2", "prices": "p2"},
+    )
+    out = tmp_path / "out.json"
+    assert (
+        gh.main(
+            [
+                "--catalog",
+                str(_write_catalog(tmp_path)),
+                "--history",
+                str(_write_empty_history(tmp_path)),
+                "--prev-highlights",
+                str(prev_file),
+                "--output",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    written = json.loads(out.read_text())
+    assert written["source"] == "openrouter"
+    assert written["sections"]["week"] == "w2"
+
+
+def test_llm_failure_falls_back_to_templates(monkeypatch, tmp_path):
+    prev = make_prev_highlights("fallback", "2026-08-01T00:00:00+00:00")
+    prev_file = tmp_path / "prev.json"
+    prev_file.write_text(json.dumps(prev))
+    monkeypatch.setattr(gh, "generate_with_llm", lambda diff, key: None)
+    out = tmp_path / "out.json"
+    assert (
+        gh.main(
+            [
+                "--catalog",
+                str(_write_catalog(tmp_path)),
+                "--history",
+                str(_write_empty_history(tmp_path)),
+                "--prev-highlights",
+                str(prev_file),
+                "--output",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    written = json.loads(out.read_text())
+    assert written["source"] == "fallback"
+    assert set(written["sections"]) == {"week", "intelligence", "prices"}
+
+
+def test_generate_with_llm_model_fallback_chain(monkeypatch):
+    # All but the last model fail so the chain is walked end to end: the
+    # first model that answers wins, so a mid-chain success would stop the
+    # loop before the final entry and captured would be shorter than
+    # LLM_MODELS (which the assertion below requires to be fully walked).
+    responses = {m: RuntimeError("boom") for m in gh.LLM_MODELS[:-1]}
+    captured = []
+
+    def fake_post(model, body, api_key):
+        captured.append(model)
+        if model in responses and isinstance(responses[model], Exception):
+            raise responses[model]
+        # _post_chat returns the parsed response body (json.load), so the
+        # fake must return an OpenRouter-shaped dict, not a bare string.
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"week": "w", "intelligence": "i", "prices": "p"}'
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr(gh, "_post_chat", fake_post)
+    texts = gh.generate_with_llm({"baseline_present": False}, "key")
+    assert texts == {"week": "w", "intelligence": "i", "prices": "p"}
+    assert captured == list(gh.LLM_MODELS)
+
+
+def test_generate_with_llm_rejects_unparseable(monkeypatch):
+    monkeypatch.setattr(
+        gh,
+        "_post_chat",
+        lambda model, body, key: {
+            "choices": [{"message": {"content": "not json at all"}}]
+        },
+    )
+    assert gh.generate_with_llm({"baseline_present": False}, "key") is None
+
+
+def test_generate_with_llm_no_key_returns_none():
+    assert gh.generate_with_llm({"baseline_present": False}, None) is None
+
+
+def _write_catalog(tmp_path):
+    f = tmp_path / "catalog.json"
+    f.write_text(json.dumps(make_diff_catalog()))
+    return f
+
+
+def _write_empty_history(tmp_path):
+    f = tmp_path / "history.json"
+    f.write_text(json.dumps({"snapshots": {}}))
+    return f

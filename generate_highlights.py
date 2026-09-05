@@ -11,11 +11,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 
 HIGHLIGHTS_SCHEMA_VERSION = 1
 SECTION_KEYS = ("week", "intelligence", "prices")
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+LLM_MODELS = (
+    "z-ai/glm-5.3-flash:free",
+    "deepseek/deepseek-chat-v3.1:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+)
+PROMPT_RULES = (
+    "You write deployment notes for a model-ranking site. The user message is"
+    " a JSON diff of the last 7 days. Reply with ONE JSON object with keys"
+    ' "week", "intelligence", "prices" -- each value 1-2 short declarative'
+    " sentences (max ~30 words each). State facts only from the diff; invent"
+    " nothing; no hype or filler adjectives; wrap every model id in"
+    " backticks; no markdown besides those backticks. If baseline_present is"
+    " false, say in one sentence that weekly data collection is still"
+    " building up."
+)
+HIGHLIGHTS_MAX_AGE_HOURS = 24
 
 
 def seven_days_before(today: str) -> str:
@@ -185,6 +203,55 @@ def fallback_texts(diff) -> dict:
     return {"week": week, "intelligence": intelligence, "prices": prices}
 
 
+def _post_chat(model, body, api_key):
+    import urllib.request
+
+    request = urllib.request.Request(
+        OPENROUTER_CHAT_URL,
+        data=json.dumps(body).encode(),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as resp:
+        return json.load(resp)
+
+
+def generate_with_llm(diff, api_key):
+    """One grounded call; first model in the chain that answers wins.
+
+    Returns the three texts, or None on no key / all-models failure /
+    unparseable output -- the caller then falls back to templates.
+    """
+    if not api_key:
+        return None
+    body = {
+        "messages": [
+            {"role": "system", "content": PROMPT_RULES},
+            {"role": "user", "content": json.dumps(diff)},
+        ],
+        "temperature": 0,
+        "max_tokens": 300,
+    }
+    for model in LLM_MODELS:
+        try:
+            payload = _post_chat(model, body, api_key)
+            content = payload["choices"][0]["message"]["content"]
+            stripped = content.strip().removeprefix("```json").removeprefix("```")
+            stripped = stripped.removesuffix("```").strip()
+            parsed = json.loads(stripped)
+        except Exception:
+            continue
+        if isinstance(parsed, dict) and all(
+            isinstance(parsed.get(key), str) and parsed[key].strip()
+            for key in SECTION_KEYS
+        ):
+            return {key: parsed[key] for key in SECTION_KEYS}
+    return None
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate highlight sections from weekly history data"
@@ -210,14 +277,40 @@ def main(argv=None) -> int:
     except (OSError, ValueError):
         history = {}
     diff = build_diff(catalog, history)
-    # Task 3 inserts the reuse rule + LLM call here; Task 2 ships templates only.
-    texts = fallback_texts(diff)
-    document = {
-        "schema_version": HIGHLIGHTS_SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "source": "fallback",
-        "sections": texts,
-    }
+
+    prev = None
+    try:
+        with open(args.prev_highlights) as fh:
+            prev = json.load(fh)
+    except (OSError, ValueError):
+        prev = None
+
+    def _prev_is_recent_llm():
+        if not isinstance(prev, dict) or prev.get("source") != "openrouter":
+            return False
+        try:
+            generated = datetime.fromisoformat(str(prev.get("generated_at")))
+            if generated.tzinfo is None:
+                generated = generated.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return False
+        age = datetime.now(timezone.utc) - generated
+        return age < timedelta(hours=HIGHLIGHTS_MAX_AGE_HOURS)
+
+    if _prev_is_recent_llm():
+        document = prev
+    else:
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        texts = generate_with_llm(diff, api_key)
+        source = "openrouter" if texts is not None else "fallback"
+        if texts is None:
+            texts = fallback_texts(diff)
+        document = {
+            "schema_version": HIGHLIGHTS_SCHEMA_VERSION,
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source": source,
+            "sections": texts,
+        }
     with open(args.output, "w") as fh:
         json.dump(document, fh, indent=2)
         fh.write("\n")
