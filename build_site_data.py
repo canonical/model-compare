@@ -233,7 +233,6 @@ def validate_catalog(document) -> None:
 HISTORY_SCHEMA_VERSION = 1
 HISTORY_RETENTION = 10
 HISTORY_TOP_N = 10
-HISTORY_TAB_KEYS = ("balanced", "price", "quality")
 
 
 def _is_iso_date(value) -> bool:
@@ -242,6 +241,22 @@ def _is_iso_date(value) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _has_snapshot_shape(snap) -> bool:
+    if not isinstance(snap, dict):
+        return False
+    generated_at = snap.get("generated_at")
+    if not isinstance(generated_at, str) or not generated_at:
+        return False
+    if not isinstance(snap.get("pool_ids"), list):
+        return False
+    tabs = snap.get("tabs")
+    if not isinstance(tabs, dict):
+        return False
+    if any(not isinstance(tabs.get(key), list) for key in CATALOG_OVERALL_KEYS):
+        return False
+    return isinstance(snap.get("aa"), dict) and isinstance(snap.get("prices"), dict)
 
 
 def build_snapshot(catalog) -> dict:
@@ -253,7 +268,7 @@ def build_snapshot(catalog) -> dict:
     """
     models = catalog["models"]
     tabs = {}
-    for priority in HISTORY_TAB_KEYS:
+    for priority in CATALOG_OVERALL_KEYS:
         ranked = sorted(
             models, key=lambda e: (-e["scores"]["overall"][priority], e["id"])
         )
@@ -292,14 +307,16 @@ def build_snapshot(catalog) -> dict:
 def merge_history(prev, snapshot) -> dict:
     """Upsert the snapshot under its UTC date and prune to the newest 10.
 
-    A malformed previous document starts fresh; garbage entries inside a
-    well-formed one are dropped per date. Same-day upserts are
-    last-write-wins.
+    A malformed previous document starts fresh; previous snapshots are
+    shape-filtered per date, so a date is carried forward only when its
+    snapshot is a dict with a non-empty generated_at string, a pool_ids
+    list, a tabs dict holding a list for each of balanced/price/quality,
+    an aa dict and a prices dict. Same-day upserts are last-write-wins.
     """
     snapshots = {}
     if isinstance(prev, dict) and isinstance(prev.get("snapshots"), dict):
         for date_key, snap in prev["snapshots"].items():
-            if _is_iso_date(date_key) and isinstance(snap, dict):
+            if _is_iso_date(date_key) and _has_snapshot_shape(snap):
                 snapshots[date_key] = snap
     today = snapshot["generated_at"][:10]
     snapshots[today] = snapshot
@@ -334,7 +351,7 @@ def validate_history(document) -> None:
         for key in ("generated_at", "pool_ids", "tabs", "aa", "prices"):
             if key not in snap:
                 raise ValueError(f"history snapshot {date_key} missing key: {key}")
-        for priority in HISTORY_TAB_KEYS:
+        for priority in CATALOG_OVERALL_KEYS:
             rows = snap["tabs"].get(priority)
             if not isinstance(rows, list):
                 raise ValueError(f"history snapshot {date_key} tabs.{priority} missing")

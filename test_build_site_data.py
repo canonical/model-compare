@@ -461,6 +461,32 @@ def test_merge_history_malformed_prev_starts_fresh():
     )["snapshots"]["2026-09-02"]["pool_ids"] == ["acme/model-a"]
 
 
+def test_merge_history_drops_prev_snapshot_missing_generated_at():
+    prev = make_history()
+    garbage = make_history_snapshot("2026-08-25", "2026-08-25T09:15:00+00:00")
+    del garbage["generated_at"]
+    prev["snapshots"]["2026-08-25"] = garbage
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )
+    assert "2026-08-25" not in merged["snapshots"]
+    assert "2026-08-26" in merged["snapshots"]
+    assert merged["snapshots"]["2026-09-02"]["pool_ids"] == ["acme/model-a"]
+
+
+def test_merge_history_drops_prev_snapshot_with_non_dict_tabs():
+    prev = make_history()
+    prev["snapshots"]["2026-08-25"] = make_history_snapshot(
+        "2026-08-25", "2026-08-25T09:15:00+00:00", tabs="garbage"
+    )
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )
+    assert "2026-08-25" not in merged["snapshots"]
+    assert "2026-08-26" in merged["snapshots"]
+    assert merged["snapshots"]["2026-09-02"]["pool_ids"] == ["acme/model-a"]
+
+
 def test_validate_history_happy_and_rejections():
     doc = make_history()
     doc["snapshots"]["2026-09-02"] = make_history_snapshot(
