@@ -17,6 +17,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -43,8 +44,8 @@ jobs:
             python model_compare.py --priority "$p" --json --top 10 > "$p.json"
           done
           python model_compare.py --catalog > catalog.json
-          curl -fsSL https://canonical.github.io/model-compare/history.json -o history-prev.json || true
-          curl -fsSL https://canonical.github.io/model-compare/highlights.json -o highlights-prev.json || true
+          curl -fsSL --max-time 60 --retry 2 https://canonical.github.io/model-compare/history.json -o history-prev.json || true
+          curl -fsSL --max-time 60 --retry 2 https://canonical.github.io/model-compare/highlights.json -o highlights-prev.json || true
           python generate_highlights.py \
             --catalog catalog.json \
             --history history-prev.json \

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -18,6 +19,9 @@ from datetime import date, datetime, timedelta, timezone
 
 HIGHLIGHTS_SCHEMA_VERSION = 1
 SECTION_KEYS = ("week", "intelligence", "prices")
+DIFF_PRIORITY_KEYS = ("balanced", "price", "quality")
+CATALOG_PRICING_KEYS = ("input_per_1m", "output_per_1m", "blended_per_1m")
+MAX_LLM_MODELS = 5
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 FRONTEND_MODELS_URL = (
     "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text"
@@ -41,6 +45,38 @@ def seven_days_before(today: str) -> str:
     return (date.fromisoformat(today) - timedelta(days=7)).isoformat()
 
 
+def _num(value):
+    """Return value unchanged when it is a finite non-bool number, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _overall_score(entry, key):
+    scores = entry.get("scores") if isinstance(entry, dict) else None
+    overall = scores.get("overall") if isinstance(scores, dict) else None
+    return _num(overall.get(key)) if isinstance(overall, dict) else None
+
+
+def _prev_ranks(baseline_tabs, key):
+    """id -> rank map from a tabs list, skipping unusable rows.
+
+    The baseline is a previously deployed file, so it is read defensively:
+    anything that would crash the diff arithmetic is treated as absent.
+    """
+    rows = baseline_tabs.get(key) if isinstance(baseline_tabs, dict) else None
+    ranks = {}
+    for row in rows or []:
+        if (
+            isinstance(row, dict)
+            and isinstance(row.get("id"), str)
+            and isinstance(row.get("rank"), int)
+            and not isinstance(row["rank"], bool)
+        ):
+            ranks[row["id"]] = row["rank"]
+    return ranks
+
+
 def build_diff(catalog, history) -> dict:
     """Numeric-only diff of today's catalog vs the snapshot 7 days ago.
 
@@ -55,8 +91,7 @@ def build_diff(catalog, history) -> dict:
     diff = {"baseline_present": baseline is not None}
     if baseline is None:
         diff["tabs"] = {
-            key: {"entries": [], "new_ids": []}
-            for key in ("balanced", "price", "quality")
+            key: {"entries": [], "new_ids": []} for key in DIFF_PRIORITY_KEYS
         }
         diff["new_pool_ids_count"] = 0
         diff["new_pool_id_sample"] = []
@@ -65,17 +100,27 @@ def build_diff(catalog, history) -> dict:
         diff["discounts"] = {"appeared": [], "vanished": []}
         return diff
 
-    prev_pool = set(baseline.get("pool_ids") or [])
+    prev_pool = {
+        model_id
+        for model_id in baseline.get("pool_ids") or []
+        if isinstance(model_id, str)
+    }
     now_pool = set(
         [e["id"] for e in catalog["models"]] + [e["id"] for e in catalog["filtered"]]
     )
     new_pool = sorted(now_pool - prev_pool)
 
     tabs = {}
-    for key in ("balanced", "price", "quality"):
-        prev_ranks = {row["id"]: row["rank"] for row in baseline["tabs"].get(key) or []}
+    for key in DIFF_PRIORITY_KEYS:
+        prev_ranks = _prev_ranks(baseline.get("tabs"), key)
         ranked = sorted(
-            catalog["models"],
+            (
+                entry
+                for entry in catalog["models"]
+                if isinstance(entry, dict)
+                and isinstance(entry.get("id"), str)
+                and _overall_score(entry, key) is not None
+            ),
             key=lambda e: (-e["scores"]["overall"][key], e["id"]),
         )[:10]
         entries = []
@@ -98,11 +143,11 @@ def build_diff(catalog, history) -> dict:
     diff["new_pool_ids_count"] = len(new_pool)
     diff["new_pool_id_sample"] = new_pool[:5]
 
-    prev_aa = baseline.get("aa") or {}
+    prev_aa = baseline.get("aa") if isinstance(baseline.get("aa"), dict) else {}
     movers = []
     for entry in catalog["models"]:
-        prev = prev_aa.get(entry["id"])
-        now = entry["aa"]["intelligence_index"]
+        prev = _num(prev_aa.get(entry["id"]))
+        now = _num((entry.get("aa") or {}).get("intelligence_index"))
         if prev is None or now is None:
             continue
         movers.append({"id": entry["id"], "delta": round(now - prev, 2), "value": now})
@@ -112,17 +157,23 @@ def build_diff(catalog, history) -> dict:
         "down": sorted(movers, key=lambda m: (m["delta"], m["id"]))[:3],
     }
 
-    prev_prices = baseline.get("prices") or {}
+    prev_prices = (
+        baseline.get("prices") if isinstance(baseline.get("prices"), dict) else {}
+    )
     price_moves = []
     appeared, vanished = [], []
     prev_discounts = {
-        model_id: row[3] for model_id, row in (baseline.get("prices") or {}).items()
+        model_id: row[3]
+        for model_id, row in prev_prices.items()
+        if isinstance(row, list) and len(row) == 4
     }
     for entry in catalog["models"]:
         old = prev_prices.get(entry["id"])
-        if old is None:
+        if not (isinstance(old, list) and len(old) >= 3 and _num(old[2]) is not None):
             continue
-        new_blended = entry["pricing"]["blended_per_1m"]
+        new_blended = _num((entry.get("pricing") or {}).get("blended_per_1m"))
+        if new_blended is None:
+            continue
         price_moves.append(
             {
                 "id": entry["id"],
@@ -131,7 +182,7 @@ def build_diff(catalog, history) -> dict:
                 "delta": round(new_blended - old[2], 4),
             }
         )
-        old_disc, new_disc = prev_discounts.get(entry["id"]), entry["discount"]
+        old_disc, new_disc = prev_discounts.get(entry["id"]), entry.get("discount")
         if old_disc is None and new_disc is not None:
             appeared.append(entry["id"])
         elif old_disc is not None and new_disc is None:
@@ -237,7 +288,7 @@ def resolve_llm_models() -> list[str]:
     model -- free variants are the endpoint.variant == "free" entries
     (id = slug + ":free"), ranked by that intelligence. If that endpoint
     fails or lists nothing, fall back to the public catalog's :free ids
-    (largest context first). An empty result makes generate_with_llm skip
+    (sorted by id). An empty result makes generate_with_llm skip
     straight to the template fallback.
     """
     try:
@@ -295,7 +346,7 @@ def generate_with_llm(diff, api_key):
         "temperature": 0,
         "max_tokens": 300,
     }
-    for model in models:
+    for model in models[:MAX_LLM_MODELS]:
         try:
             payload = _post_chat(model, {**body, "model": model}, api_key)
             content = payload["choices"][0]["message"]["content"]
@@ -310,6 +361,56 @@ def generate_with_llm(diff, api_key):
         ):
             return {key: parsed[key] for key in SECTION_KEYS}
     return None
+
+
+def _validate_catalog_for_diff(catalog) -> None:
+    """Check the numeric fields build_diff reads, with a readable error.
+
+    generate_highlights runs before build_site_data validates the catalog,
+    so a regression emitting a string where a number belongs would
+    otherwise surface as a raw TypeError deep in build_diff instead of a
+    loud, clean failure.
+    """
+    if not isinstance(catalog, dict):
+        raise ValueError("catalog document is not an object")
+    generated_at = catalog.get("generated_at")
+    if not isinstance(generated_at, str) or not generated_at:
+        raise ValueError("catalog generated_at must be a non-empty string")
+    for key in ("models", "filtered"):
+        if not isinstance(catalog.get(key), list):
+            raise ValueError(f"catalog {key} must be a list")
+    for entry in catalog["models"] + catalog["filtered"]:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("id"), str)
+            or not entry["id"]
+        ):
+            raise ValueError("catalog model entries need non-empty string ids")
+    for entry in catalog["models"]:
+        pricing = entry.get("pricing")
+        if not isinstance(pricing, dict):
+            raise ValueError(f"catalog model {entry['id']} pricing must be an object")
+        for key in CATALOG_PRICING_KEYS:
+            value = _num(pricing.get(key))
+            if value is None or value < 0:
+                raise ValueError(
+                    f"catalog model {entry['id']} pricing.{key} must be a "
+                    "non-negative number"
+                )
+        for key in DIFF_PRIORITY_KEYS:
+            if _overall_score(entry, key) is None:
+                raise ValueError(
+                    f"catalog model {entry['id']} scores.overall.{key} must be a number"
+                )
+        aa = entry.get("aa")
+        if not isinstance(aa, dict) or (
+            aa.get("intelligence_index") is not None
+            and _num(aa.get("intelligence_index")) is None
+        ):
+            raise ValueError(
+                f"catalog model {entry['id']} aa.intelligence_index must be a "
+                "number or null"
+            )
 
 
 def main(argv=None) -> int:
@@ -328,8 +429,9 @@ def main(argv=None) -> int:
     try:
         with open(args.catalog) as fh:
             catalog = json.load(fh)
+        _validate_catalog_for_diff(catalog)
     except (OSError, ValueError) as exc:
-        print(f"error: could not read catalog: {exc}", file=sys.stderr)
+        print(f"error: invalid catalog: {exc}", file=sys.stderr)
         return 1
     try:
         with open(args.history) as fh:
@@ -347,6 +449,17 @@ def main(argv=None) -> int:
 
     def _prev_is_recent_llm():
         if not isinstance(prev, dict) or prev.get("source") != "openrouter":
+            return False
+        # Reusing a structurally invalid document would fail validation
+        # downstream and wedge every publish until generated_at ages out,
+        # so the reuse rule mirrors validate_highlights' shape contract.
+        if prev.get("schema_version") != HIGHLIGHTS_SCHEMA_VERSION:
+            return False
+        sections = prev.get("sections")
+        if not isinstance(sections, dict) or any(
+            not isinstance(sections.get(key), str) or not sections[key].strip()
+            for key in SECTION_KEYS
+        ):
             return False
         try:
             generated = datetime.fromisoformat(str(prev.get("generated_at")))

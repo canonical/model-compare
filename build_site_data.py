@@ -15,7 +15,7 @@ import math
 import os
 import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 PRIORITIES = ("balanced", "price", "quality")
 ROW_KEYS = (
@@ -176,6 +176,20 @@ def validate_catalog(document) -> None:
             key not in pricing for key in CATALOG_PRICING_KEYS
         ):
             raise ValueError(f"models[{i}] pricing is incomplete")
+        bad_pricing = [
+            key
+            for key in CATALOG_PRICING_KEYS
+            if not _is_number(pricing[key]) or pricing[key] < 0
+        ]
+        if bad_pricing:
+            raise ValueError(
+                f"models[{i}] pricing must hold non-negative numbers: "
+                + ", ".join(bad_pricing)
+            )
+        if entry["discount"] is not None and not _is_number(entry["discount"]):
+            raise ValueError(f"models[{i}] discount must be a number or null")
+        if entry["context"] is not None and not _is_number(entry["context"]):
+            raise ValueError(f"models[{i}] context must be a number or null")
         scores = entry["scores"]
         if not isinstance(scores, dict):
             raise ValueError(f"models[{i}] scores is not an object")
@@ -235,21 +249,45 @@ HISTORY_RETENTION = 10
 HISTORY_TOP_N = 10
 
 
+def _is_number(value) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 def _is_iso_date(value) -> bool:
+    text = str(value)
+    if not _ISO_DATE_RE.fullmatch(text):
+        return False
     try:
-        date.fromisoformat(str(value))
-    except (TypeError, ValueError):
+        date.fromisoformat(text)
+    except ValueError:
         return False
     return True
 
 
 def _has_snapshot_shape(snap) -> bool:
+    """True when a snapshot satisfies every read build_diff performs.
+
+    rows must be dicts with a non-empty string id and rank == position, aa
+    values numeric or null, prices rows 4-element numeric/null lists, and
+    pool_ids strings -- anything weaker could crash the 7-day baseline
+    arithmetic downstream.
+    """
     if not isinstance(snap, dict):
         return False
     generated_at = snap.get("generated_at")
     if not isinstance(generated_at, str) or not generated_at:
         return False
-    if not isinstance(snap.get("pool_ids"), list):
+    pool_ids = snap.get("pool_ids")
+    if not isinstance(pool_ids, list) or not all(
+        isinstance(model_id, str) for model_id in pool_ids
+    ):
         return False
     tabs = snap.get("tabs")
     if not isinstance(tabs, dict):
@@ -261,7 +299,22 @@ def _has_snapshot_shape(snap) -> bool:
         for i, row in enumerate(rows):
             if not isinstance(row, dict) or row.get("rank") != i + 1:
                 return False
-    return isinstance(snap.get("aa"), dict) and isinstance(snap.get("prices"), dict)
+            if not isinstance(row.get("id"), str) or not row["id"]:
+                return False
+    aa = snap.get("aa")
+    if not isinstance(aa, dict) or not all(
+        value is None or _is_number(value) for value in aa.values()
+    ):
+        return False
+    prices = snap.get("prices")
+    if not isinstance(prices, dict):
+        return False
+    for row in prices.values():
+        if not isinstance(row, list) or len(row) != 4:
+            return False
+        if not all(value is None or _is_number(value) for value in row):
+            return False
+    return True
 
 
 def build_snapshot(catalog) -> dict:
@@ -312,19 +365,31 @@ def build_snapshot(catalog) -> dict:
 def merge_history(prev, snapshot) -> dict:
     """Upsert the snapshot under its UTC date and prune to the newest 10.
 
-    A malformed previous document starts fresh; previous snapshots are
+    A previous document with an unknown schema_version starts fresh (an
+    absent one is tolerated for back-compat); previous snapshots are
     shape-filtered per date, so a date is carried forward only when its
-    snapshot is a dict with a non-empty generated_at string, a pool_ids
-    list, a tabs dict holding a rank-consistent list (each row's rank
-    equals its 1-based position) for each of balanced/price/quality,
-    an aa dict and a prices dict. Same-day upserts are last-write-wins.
+    key is a strict extended-format ISO date no more than a day ahead of
+    the snapshot being written and the snapshot is a dict with a
+    non-empty generated_at string, string pool_ids, a tabs dict holding
+    id-bearing rank-consistent lists for each of balanced/price/quality,
+    a numeric-or-null aa dict and a 4-element numeric/null prices dict.
+    Same-day upserts are last-write-wins.
     """
-    snapshots = {}
-    if isinstance(prev, dict) and isinstance(prev.get("snapshots"), dict):
-        for date_key, snap in prev["snapshots"].items():
-            if _is_iso_date(date_key) and _has_snapshot_shape(snap):
-                snapshots[date_key] = snap
     today = snapshot["generated_at"][:10]
+    horizon = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
+    snapshots = {}
+    if (
+        isinstance(prev, dict)
+        and prev.get("schema_version", HISTORY_SCHEMA_VERSION) == HISTORY_SCHEMA_VERSION
+        and isinstance(prev.get("snapshots"), dict)
+    ):
+        for date_key, snap in prev["snapshots"].items():
+            if (
+                _is_iso_date(date_key)
+                and date_key <= horizon
+                and _has_snapshot_shape(snap)
+            ):
+                snapshots[date_key] = snap
     snapshots[today] = snapshot
     kept = sorted(snapshots)[-HISTORY_RETENTION:]
     return {
@@ -383,6 +448,15 @@ def validate_highlights(document) -> None:
         )
     if document.get("source") not in HIGHLIGHTS_SOURCES:
         raise ValueError(f"unknown highlights source: {document.get('source')!r}")
+    generated_at = document.get("generated_at")
+    if not isinstance(generated_at, str) or not generated_at:
+        raise ValueError("highlights generated_at must be an ISO-8601 string")
+    try:
+        datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"highlights generated_at is not ISO-8601: {generated_at!r}"
+        ) from exc
     sections = document.get("sections")
     if not isinstance(sections, dict):
         raise ValueError("highlights sections must be an object")

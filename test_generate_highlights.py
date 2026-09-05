@@ -123,6 +123,43 @@ def test_build_diff_missing_baseline():
     assert diff["tabs"]["balanced"]["entries"] == []
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # pool_ids may hold unhashables or non-strings in a tampered file
+        lambda snap: snap.update(pool_ids=[["unhashable"], "acme/model-a"]),
+        lambda snap: snap.update(pool_ids="garbage"),
+        # tabs rows may lack ids, be non-dicts, or hold non-int ranks
+        lambda snap: snap["tabs"]["balanced"].__setitem__(0, {"rank": 1}),
+        lambda snap: snap["tabs"]["balanced"].__setitem__(0, "not-a-dict"),
+        lambda snap: snap["tabs"]["balanced"][0].update(rank="1"),
+        lambda snap: snap.update(tabs="garbage"),
+        # aa values may be strings; aa itself may not be a dict
+        lambda snap: snap["aa"].__setitem__("acme/model-a", "55"),
+        lambda snap: snap.update(aa="garbage"),
+        # prices rows may be short, non-lists, or hold non-numeric elements
+        lambda snap: snap["prices"].__setitem__("acme/model-a", [1.0, 2.0]),
+        lambda snap: snap["prices"].__setitem__("acme/model-a", "nope"),
+        lambda snap: snap["prices"].__setitem__("acme/model-a", [1.0, 2.0, "x", None]),
+        lambda snap: snap.update(prices="garbage"),
+    ],
+)
+def test_build_diff_tolerates_malformed_baseline(mutate):
+    history = make_diff_history()
+    mutate(history["snapshots"]["2026-08-26"])
+    diff = gh.build_diff(make_diff_catalog(), history)  # must not raise
+    assert diff["baseline_present"] is True
+    assert len(diff["tabs"]["balanced"]["entries"]) == 3
+
+
+def test_build_diff_baseline_without_tabs_degrades_gracefully():
+    history = make_diff_history()
+    del history["snapshots"]["2026-08-26"]["tabs"]
+    diff = gh.build_diff(make_diff_catalog(), history)  # must not raise
+    assert diff["baseline_present"] is True
+    assert diff["tabs"]["balanced"]["entries"][0]["prev_rank"] is None
+
+
 def test_fallback_texts_grounding():
     diff = gh.build_diff(make_diff_catalog(), make_diff_history())
     texts = gh.fallback_texts(diff)
@@ -352,6 +389,43 @@ def test_generate_with_llm_rejects_unparseable(monkeypatch):
     assert gh.generate_with_llm({"baseline_present": False}, "key") is None
 
 
+def test_generate_with_llm_accepts_fenced_json(monkeypatch):
+    monkeypatch.setattr(gh, "resolve_llm_models", lambda: ["free/a:free"])
+    monkeypatch.setattr(
+        gh,
+        "_post_chat",
+        lambda model, body, key: {
+            "choices": [
+                {
+                    "message": {
+                        "content": '```json\n{"week": "w", "intelligence": "i",'
+                        ' "prices": "p"}\n```'
+                    }
+                }
+            ]
+        },
+    )
+    assert gh.generate_with_llm({"baseline_present": False}, "key") == {
+        "week": "w",
+        "intelligence": "i",
+        "prices": "p",
+    }
+
+
+def test_generate_with_llm_caps_chain(monkeypatch):
+    models = [f"free/m{i}:free" for i in range(8)]
+    monkeypatch.setattr(gh, "resolve_llm_models", lambda: models)
+    captured = []
+
+    def fake_post(model, body, api_key):
+        captured.append(model)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(gh, "_post_chat", fake_post)
+    assert gh.generate_with_llm({"baseline_present": False}, "key") is None
+    assert captured == models[: gh.MAX_LLM_MODELS]
+
+
 def test_generate_with_llm_no_key_skips_discovery(monkeypatch):
     monkeypatch.setattr(
         gh,
@@ -359,6 +433,99 @@ def test_generate_with_llm_no_key_skips_discovery(monkeypatch):
         lambda: pytest.fail("discovery must not run without a key"),
     )
     assert gh.generate_with_llm({"baseline_present": False}, None) is None
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda prev: prev.update(schema_version=2),
+        lambda prev: prev.update(sections={"week": "w"}),
+        lambda prev: prev.update(
+            sections={"week": "", "intelligence": "i", "prices": "p"}
+        ),
+        lambda prev: prev.update(sections="garbage"),
+    ],
+)
+def test_reuse_ignores_invalid_recent_llm_output(monkeypatch, tmp_path, mutate):
+    prev = make_prev_highlights(
+        "openrouter",
+        datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+    )
+    mutate(prev)
+    prev_file = tmp_path / "prev.json"
+    prev_file.write_text(json.dumps(prev))
+    monkeypatch.setattr(
+        gh,
+        "generate_with_llm",
+        lambda diff, key: {"week": "w2", "intelligence": "i2", "prices": "p2"},
+    )
+    out = tmp_path / "out.json"
+    assert (
+        gh.main(
+            [
+                "--catalog",
+                str(_write_catalog(tmp_path)),
+                "--history",
+                str(_write_empty_history(tmp_path)),
+                "--prev-highlights",
+                str(prev_file),
+                "--output",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    written = json.loads(out.read_text())
+    assert written["source"] == "openrouter"
+    assert written["sections"]["week"] == "w2"  # regenerated, not reused
+
+
+def test_main_rejects_non_numeric_catalog_pricing(tmp_path, capsys):
+    catalog = make_diff_catalog()
+    catalog["models"][0]["pricing"]["blended_per_1m"] = "2.6"
+    f = tmp_path / "catalog.json"
+    f.write_text(json.dumps(catalog))
+    out = tmp_path / "out.json"
+    code = gh.main(
+        [
+            "--catalog",
+            str(f),
+            "--history",
+            str(_write_empty_history(tmp_path)),
+            "--prev-highlights",
+            str(tmp_path / "absent.json"),
+            "--output",
+            str(out),
+        ]
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "pricing" in err
+    assert not out.exists()
+
+
+def test_main_rejects_non_numeric_catalog_scores(tmp_path, capsys):
+    catalog = make_diff_catalog()
+    catalog["models"][0]["scores"]["overall"]["balanced"] = "68.4"
+    f = tmp_path / "catalog.json"
+    f.write_text(json.dumps(catalog))
+    out = tmp_path / "out.json"
+    assert (
+        gh.main(
+            [
+                "--catalog",
+                str(f),
+                "--history",
+                str(_write_empty_history(tmp_path)),
+                "--prev-highlights",
+                str(tmp_path / "absent.json"),
+                "--output",
+                str(out),
+            ]
+        )
+        == 1
+    )
+    assert "error:" in capsys.readouterr().err
 
 
 def _write_catalog(tmp_path):

@@ -289,6 +289,14 @@ def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
         lambda doc: doc["sources"]["aa"].update(matched_openrouter=5),
         lambda doc: doc["sources"]["aa"].update(matched=-1),
         lambda doc: doc["sources"]["aa"].update(matched_openrouter=True),
+        # pricing values must be usable in arithmetic downstream: the diff
+        # builder and history snapshots consume them as numbers
+        lambda doc: doc["models"][0]["pricing"].update(blended_per_1m="1.0"),
+        lambda doc: doc["models"][0]["pricing"].update(blended_per_1m=-1.0),
+        lambda doc: doc["models"][0]["pricing"].update(input_per_1m=True),
+        lambda doc: doc["models"][0]["pricing"].pop("blended_per_1m"),
+        lambda doc: doc["models"][0].update(discount="0.5"),
+        lambda doc: doc["models"][0].update(context="2m"),
     ],
 )
 def test_validate_catalog_rejects(mutate):
@@ -510,6 +518,84 @@ def test_merge_history_drops_prev_snapshot_with_corrupt_ranks():
     assert merged["snapshots"]["2026-09-02"]["pool_ids"] == ["acme/model-a"]
 
 
+def test_merge_history_rejects_unknown_schema_version():
+    prev = make_history()
+    prev["schema_version"] = 2
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )
+    assert list(merged["snapshots"]) == ["2026-09-02"]
+    assert merged["schema_version"] == 1
+
+
+def test_merge_history_tolerates_prev_without_schema_version():
+    prev = make_history()
+    del prev["schema_version"]
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )
+    assert "2026-08-26" in merged["snapshots"]
+    assert "2026-09-02" in merged["snapshots"]
+
+
+def test_merge_history_drops_future_dated_snapshot():
+    prev = make_history()
+    prev["snapshots"]["2027-01-01"] = make_history_snapshot(
+        "2027-01-01", "2027-01-01T09:15:00+00:00"
+    )
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )
+    assert "2027-01-01" not in merged["snapshots"]
+    assert merged["updated_at"] == "2026-09-02T09:15:00+00:00"
+
+
+def test_merge_history_drops_basic_format_date_key():
+    prev = make_history()
+    prev["snapshots"]["20260825"] = make_history_snapshot(
+        "2026-08-25", "2026-08-25T09:15:00+00:00"
+    )
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )
+    assert "20260825" not in merged["snapshots"]
+    assert "2026-08-26" in merged["snapshots"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda snap: snap["tabs"]["balanced"].__setitem__(0, {"rank": 1}),
+        lambda snap: snap["tabs"]["balanced"].__setitem__(0, {"id": 5, "rank": 1}),
+        lambda snap: snap["prices"].__setitem__("acme/model-a", [1.0, 2.0]),
+        lambda snap: snap["prices"].__setitem__("acme/model-a", "garbage"),
+        lambda snap: snap["prices"].__setitem__(
+            "acme/model-a", [1.0, 2.0, "1.25", None]
+        ),
+        lambda snap: snap["aa"].__setitem__("acme/model-a", "55"),
+        lambda snap: snap.update(aa="garbage"),
+        lambda snap: snap.update(pool_ids=[["unhashable"]]),
+        lambda snap: snap.update(pool_ids="garbage"),
+    ],
+)
+def test_has_snapshot_shape_rejects_malformed_fields(mutate):
+    snap = make_history_snapshot("2026-08-25", "2026-08-25T09:15:00+00:00")
+    mutate(snap)
+    assert bsd._has_snapshot_shape(snap) is False
+
+
+def test_merge_history_drops_snapshot_with_idless_rows():
+    prev = make_history()
+    prev["snapshots"]["2026-08-25"] = make_history_snapshot(
+        "2026-08-25", "2026-08-25T09:15:00+00:00"
+    )
+    prev["snapshots"]["2026-08-25"]["tabs"]["balanced"][0] = {"rank": 1}
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )
+    assert "2026-08-25" not in merged["snapshots"]
+
+
 def test_validate_history_happy_and_rejections():
     doc = make_history()
     doc["snapshots"]["2026-09-02"] = make_history_snapshot(
@@ -605,6 +691,16 @@ def test_validate_highlights_happy_and_rejections():
     with pytest.raises(ValueError):
         bsd.validate_highlights(bad)
     bad = make_highlights(sections={"week": "", "intelligence": "i", "prices": "p"})
+    with pytest.raises(ValueError):
+        bsd.validate_highlights(bad)
+    bad = make_highlights(generated_at="yesterday")
+    with pytest.raises(ValueError):
+        bsd.validate_highlights(bad)
+    bad = make_highlights(generated_at=None)
+    with pytest.raises(ValueError):
+        bsd.validate_highlights(bad)
+    bad = make_highlights()
+    del bad["generated_at"]
     with pytest.raises(ValueError):
         bsd.validate_highlights(bad)
 
