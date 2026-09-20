@@ -219,6 +219,11 @@ both files move together), and update the user-visible text:
 - `--build` help text: `build fresh data locally with model_compare.py + build_site_data.py instead of using the live data` → unchanged semantics, still accurate in this task
 - `--site-dir` default text: `(default: ./site)` → `(default: ./web/site)`
 
+**Amendment (found during execution):** `test_model_compare.py` imports
+`build_site_data as bsd` for the catalog-contract round-trip. After the move
+it resolves via a `sys.path` insert of the `web/` directory immediately
+before the import (`sys.path.insert(0, str(Path(__file__).resolve().parent / "web"))`).
+
 - [ ] **Step 3: Update README path references**
 
 Find and update every reference to the moved files:
