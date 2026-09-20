@@ -27,235 +27,6 @@ The `--json` output carries both forms: `model` (catalog id) and
 No dependencies beyond Python 3.10+ (stdlib only). Exit codes: `0` success,
 `1` fetch failure, `2` no candidates survive the filters.
 
-## Team usage: published picks
-
-A [GitHub Actions workflow](.github/workflows/publish.yml) publishes
-[the picks](https://canonical.github.io/model-compare/) — a top-10 table per
-priority (`balanced` / `price` / `quality`) with copy buttons for the current
-#1 model, the ready-made `opencode --model …` command, and the curl variant —
-plus a machine-readable `best.txt` for teammates who don't want to run the
-script:
-
-```console
-$ opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"
-```
-
-The same workflow publishes a [`catalog.json`](https://canonical.github.io/model-compare/catalog.json) artifact — see [Catalog output](#catalog-output) — plus the weekly `history.json` and `highlights.json` — see [Weekly history and highlights](#weekly-history-and-highlights).
-
-Tip: save it as an alias so every launch picks up the fresh value:
-
-```console
-$ alias oc-best='opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"'
-```
-
-One-time setup: enable **Settings → Pages → Source: GitHub Actions**. The
-build (`web/build_site_data.py`) validates every payload and fails loudly, so a
-broken run never deploys a broken site. `best.txt` always serves the
-*balanced* #1, regardless of which tab the page shows. Published picks
-consider ZDR models only, matching the tool's default.
-
-## How it works
-
-### Data sources
-
-1. **OpenRouter** — `https://openrouter.ai/api/v1/models` (public, no key),
-   the same endpoint used by
-   [openrouterlist](https://github.com/jvrck/openrouterlist). Provides the
-   catalog: per-token input/output prices, context window, listing date,
-   supported parameters (used for the tool-calling check) and modality info.
-2. **Artificial Analysis** — the [AA intelligence index](https://artificialanalysis.ai/models),
-   a 0–100 composite of reasoning/coding/knowledge benchmarks. Obtained via:
-   - **OpenRouter benchmarks (primary)**: the same undocumented frontend API
-     behind the [`?discount=true`](https://openrouter.ai/models?discount=true)
-     and ZDR filters also republishes the AA intelligence/coding/agentic
-     indices per model (`benchmarks.aa`), keyed by exact OpenRouter id.
-     Consumed first — no separate fetch, and exact keys make conflation
-     impossible.
-   - **AA API v2** (`artificialanalysis.ai/api/v2/data/llms/models`) for
-     models OpenRouter does not cover, when an API key is supplied through
-     `--aa-api-key` or the `AA_API_KEY` env var
-     ([free key](https://artificialanalysis.ai)); full model coverage.
-   - **Page scrape fallback**: the leaderboard embeds a JSON-LD benchmark
-     dataset; the scraper extracts every entry carrying an
-     `artificialAnalysisIntelligenceIndex` (a few dozen top models). Both
-     fallbacks match to OpenRouter ids by exact slug/name only. The previous
-     token-overlap fuzzy pass is gone: it paired `z-ai/glm-5.3-flash` with
-     AA's `glm-5-3` entry and published the wrong model's index. Unmatched
-     models simply score 0 on quality — the tool degrades gracefully rather
-     than failing.
-
-If no quality data is obtainable at all, the quality weight is dropped and the
-remaining weights renormalize.
-
-### Scoring
-
-Each criterion is normalized to [0, 1] across the candidate pool and combined
-with priority-dependent weights:
-
-| priority  | quality | price | context | age |
-|-----------|--------:|------:|--------:|----:|
-| balanced  | 0.40    | 0.40  | 0.10    | 0.10 |
-| price     | 0.20    | 0.60  | 0.10    | 0.10 |
-| quality   | 0.60    | 0.20  | 0.10    | 0.10 |
-
-- **price score** — prices are converted to USD per 1M tokens and blended:
-  `blended = input_share × $in/M + (1 − input_share) × $out/M` (default
-  `--input-share 0.75`, i.e. a 3:1 input:output mix, the convention used by
-  Artificial Analysis and typical of coding-agent traffic). The score is the
-  model's position on a **log-scaled** price axis within the current candidate
-  pool: `1.0 − (log10(price+0.01) − log10(min+0.01)) / span`, clamped to
-  [0, 1]; free listings score 1.0. Log-scaling keeps the pool's three-orders-
-  -of-magnitude price spread from crushing everything above the cheapest
-  listing into one undifferentiated bucket.
-- **quality score** — AA intelligence index ÷ `--quality-ref` (default 70),
-  clamped to [0, 1].
-- **context score** — logarithmic ramp from `--min-context` up to 4× that
-  threshold: headroom helps, but with diminishing returns.
-- **age score** — exponential decay with a `--recency-half-life` of 120 days:
-  a listing half the age of another scores ~0.5× higher on this axis.
-- **context filter** — hard minimum (`--min-context`, default 1M tokens),
-  so a cheap small-window model can never win a big-context job.
-
-### What gets filtered out
-
-Below-minimum context, non-text outputs (image/audio), listings without
-tool-calling support (`--no-require-tools` to relax), unparseable/negative
-prices, expired listings, `:batch` variants (asynchronous completion — no
-good for interactive agents; `--include-batch` to keep them), models without
-a zero-data-retention (ZDR) endpoint by default (`--no-zdr` to consider
-everything), and (with `--exclude-free`) rate-limited `:free` variants.
-
-## Artificial Analysis data, in short
-
-The intelligence index no longer needs a separate source: OpenRouter
-republishes the AA indices alongside its own benchmark data, keyed by exact
-OpenRouter id, and the script reads them from the frontend API it already
-fetches. Only models missing there fall back to the AA API (key required;
-free tier is enough) and then the JSON-LD scrape embedded in
-`artificialanalysis.ai/models` — both matched by exact slug/name only. All
-paths are cached identically; if none yields a value you get a warning on
-stderr and a price/context/age-only ranking. `--quality-ref` controls how
-generous the quality normalization is.
-
-## Caching
-
-Responses are cached under `~/.cache/model-compare/` (`XDG_CACHE_HOME` is
-honored) with a 6-hour TTL (`--cache-ttl`); `--no-cache` forces a refetch. The
-cache keeps repeated invocations (e.g. in shell prompts or wrappers) fast and
-polite.
-
-## Discounts
-
-The `DISC` column and the `--discount` filter use the same data as the
-website's [`?discount=true` model filter](https://openrouter.ai/models?discount=true):
-OpenRouter's frontend models API reports, per model variant, the fraction by
-which the listed price is currently discounted (e.g. `75%`). The endpoint is
-undocumented, so the tool degrades gracefully — if it breaks, every model
-shows `--` and `--discount` returns nothing.
-
-Ranking always uses the listed (undiscounted) prices; the discount is shown
-as information. Variants are matched individually, so a `:batch` twin of a
-discounted model only shows a discount when that variant itself is
-discounted.
-
-## Zero data retention
-
-By default, only models with zero-data-retention (ZDR) endpoints are ranked —
-providers that do not retain prompts or outputs. The ZDR set comes from the
-same OpenRouter frontend API as the discounts (the website's `?zdr=true`
-filter). If that data cannot be fetched, the tool refuses to rank rather than
-silently considering non-ZDR models; pass `--no-zdr` to explicitly consider
-everything.
-
-## Catalog output
-
-`--catalog` prints the full evaluation as one machine-readable JSON document:
-every surviving candidate, ranked, plus every filtered-out model with its drop
-reasons. The published site serves it as
-[`catalog.json`](https://canonical.github.io/model-compare/catalog.json),
-refreshed on the same 6-hour schedule as the picks.
-
-```console
-$ ./model_compare.py --catalog | python3 -m json.tool
-```
-
-The document is a **stable contract** consumed by internal Canonical tooling
-(`tokens.canonical.com`), which deduplicates on content — same inputs produce
-byte-identical output apart from `generated_at` (`age_days`/`listed_at` use
-UTC date precision, so runs within a day match exactly). `schema_version`
-starts at `1`: fields may be added without notice, but renaming or removing
-one bumps the version.
-
-Top level: `schema_version`, `tool`, `generated_at`, `parameters` (all knobs
-plus the **effective** per-priority `weights` — reproducing `scores.overall`
-needs nothing else), `sources` (`openrouter`, `aa` with `mode`
-`openrouter`/`api`/`scrape`/`none` plus the `matched` and
-`matched_openrouter` counts, `zdr` `ok`/`skipped`, `discounts`
-`ok`/`unavailable` — where `unavailable` covers both a failed discount fetch
-and a live pool with zero discounts), `pool` (`listed`, `candidates`,
-`dropped`), `models`, `filtered`.
-
-Each `models` entry carries: `id` (bare `provider/model`), `name`,
-`provider`, `family` (heuristic: leading token of the slug, e.g. `glm-5.3`
-→ `glm`; `null` when there is none), `pricing` (`input_per_1m`,
-`output_per_1m`, `blended_per_1m` in USD per 1M tokens), `context`,
-`listed_at`, `age_days`, `tool_calling`, `zdr`, `discount`, `expired`,
-`quality` (AA intelligence index or `null`), `aa` (the OpenRouter-published
-trio `intelligence_index`/`coding_index`/`agentic_index`, each possibly
-`null`), `quality_match` (`openrouter`/`api`/`scrape`/`null`) and `scores` —
-the four component scores plus
-`overall` for all three priorities, so downstream consumers never re-run
-the scorer.
-
-`filtered` entries are `{"id", "name", "reasons"}`; the reason keys are the
-same strings the tool counts internally:
-
-```
-malformed id, context, pricing, free, batch, no discount, not ZDR,
-modality, tool calling, expired, age
-```
-
-`pool.dropped` lists all of them zero-filled. `--top` and `--priority` are
-ignored with `--catalog` (the document always covers the full pool, sorted by
-the balanced overall score); `--catalog` cannot be combined with `--best` or
-`--json`.
-
-## Weekly history and highlights
-
-Every publish run also maintains a rolling weekly history and a highlights
-panel. The workflow fetches the currently published `history.json` and
-`highlights.json` (a missing file is fine on the first run) and regenerates
-both artifacts next to `catalog.json`:
-
-- **`7-day` column** — each table row is compared against the snapshot dated
-  exactly one week back: `↑N` (green) if the model climbed N places, `↓N`
-  (red) if it slipped, `•` (blue) if it held rank, and `new` if it was not in
-  the top 10 then. The baseline is the weekly snapshot, so the column stays
-  blank during the first week of data collection.
-- **`history.json`** — up to 10 daily snapshots keyed by UTC date. Each
-  snapshot holds the full pool of model ids, the top 10 per priority (id,
-  rank, quality, blended price), the AA intelligence indices and per-model
-  prices (input, output, blended, discount).
-- **`highlights.json`** — three prose sections shown at the bottom of the page
-  (last above the footer) under the headings *News from OpenRouter*,
-  *Quality moves* and *Price movements & deals*.
-
-Regeneration cadence: only LLM-sourced highlights (`source: "openrouter"`)
-younger than 24 hours are reused as is — fallback output is regenerated on
-every publish. When regenerating, `web/generate_highlights.py` computes a numeric
-diff of today's catalog against the snapshot exactly 7 days back and makes one
-grounded OpenRouter call to write the three sections. The target model is not
-hardcoded: the free-model lineup on OpenRouter rotates, so the generator
-discovers the currently listed `:free` variants at publish time and walks them
-best-first by OpenRouter's own published AA intelligence index (falling back
-to the public catalog's `:free` list when that data is unavailable). On any
-failure — missing key, no free models listed, fetch error, unparseable output
-— deterministic templates take over, so a broken LLM never fails the deploy.
-
-LLM generation is optional: setting the `OPENROUTER_API_KEY` repository
-secret enables it. Without the secret, the site serves the deterministic
-templates.
-
 ## Options
 
 | flag | default | meaning |
@@ -279,27 +50,31 @@ templates.
 | `--no-cache` / `--cache-ttl S` | 6h | cache control |
 | `--version` | off | print `model-compare <VERSION>` and exit |
 
-## Releases
+## Published picks
 
-Releases are annotated git tags (`v0.1.0`, `v0.2.0`, …) with GitHub Releases,
-summarized in `CHANGELOG.md`. To pin a copy of the standalone script, download
-it from a tag:
-
-    curl -fsSLO https://raw.githubusercontent.com/canonical/model-compare/v0.1.0/model_compare.py
-
-and check `./model_compare.py --version`. The release checklist lives in
-`docs/superpowers/specs/2026-09-20-web-split-releases-design.md`.
-
-## Tests
-
-A `pytest` suite in `test_model_compare.py` covers the pure logic — input
-coercion, candidate filtering, scoring math, discount parsing, and
-Artificial Analysis matching — with no network access (external calls are
-stubbed). Run it with:
+No need to run anything: a [GitHub Actions workflow](web/README.md) refreshes
+[the picks](https://canonical.github.io/model-compare/) every 6 hours, and
+`best.txt` always serves the current *balanced* #1 as a plain model id:
 
 ```console
-$ pytest
+$ opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"
+$ alias oc-best='opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"'
 ```
+
+The site also serves the machine-readable `catalog.json` (`--catalog` output)
+plus weekly `history.json` and `highlights.json`. How that pipeline works:
+[web/README.md](web/README.md).
+
+## How it works
+
+OpenRouter's public catalog provides prices, context windows and listing
+dates; model quality comes from the Artificial Analysis intelligence index
+(read via OpenRouter's own published benchmarks first, with graceful
+fallbacks). Each candidate is scored on quality, blended price, context
+headroom and listing age with weights depending on `--priority`, after hard
+filters (context floor, text-only, tool-calling, ZDR by default). The full
+scoring formulas, filter list, the `--catalog` JSON contract and the test
+setup are in [DESIGN.md](DESIGN.md).
 
 ## License
 

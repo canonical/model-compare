@@ -5,4 +5,5 @@ venv/
 .serena/
 .worktrees/
 _site/
+docs/superpowers/
 .DS_Store
