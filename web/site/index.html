@@ -11,6 +11,30 @@
     <style>
       :root {
         color-scheme: light dark;
+        /* dark is the base (default); light applies via prefers-color-scheme */
+        --bg: #181A1B;
+        --text: #E8E6E3;
+        --muted: #988F81;
+        --btn-bg: #262A2B;
+        --btn-border: var(--muted);
+        --thead-border: var(--text);
+        --row-border: var(--muted);
+        --status: #E06C60;
+        --up: #7BB98C;
+        --down: #DE8482;
+        --flat: #7FA6D9;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #F6F3EC;
+          --text: #33302B;
+          --muted: #8A8175;
+          --btn-bg: #E9E4D8;
+          --status: #B03A2A;
+          --up: #2E7D4F;
+          --down: #B0392B;
+          --flat: #3A6EA5;
+        }
       }
       * {
         box-sizing: border-box;
@@ -25,13 +49,15 @@
         margin: 2rem auto;
         padding: 0 1rem;
         line-height: 1.45;
+        background: var(--bg);
+        color: var(--text);
       }
       h1 {
         font-size: 1.4rem;
         margin-bottom: 0.25rem;
       }
       .sub {
-        color: gray;
+        color: var(--muted);
         margin-top: 0;
         font-size: 0.95rem;
       }
@@ -43,8 +69,8 @@
         margin: 1.25rem 0 0.75rem;
       }
       .tabs button {
-        border: 1px solid #999;
-        background: transparent;
+        border: 1px solid var(--btn-border);
+        background: var(--bg);
         color: inherit;
         padding: 0.35rem 0.9rem;
         border-radius: 999px;
@@ -52,19 +78,19 @@
         font: inherit;
       }
       .tabs button.active {
-        background: #333;
-        color: #fff;
-        border-color: #333;
+        background: var(--btn-bg);
+        color: var(--text);
+        border-color: var(--btn-border);
       }
       .tabs .stamp {
         margin-left: auto;
         font-size: 0.85rem;
-        color: gray;
+        color: var(--muted);
       }
       .actions button {
-        border: 1px solid #333;
-        background: #333;
-        color: #fff;
+        border: 1px solid var(--btn-border);
+        background: var(--btn-bg);
+        color: var(--text);
         padding: 0.4rem 0.9rem;
         margin-top: 1rem;
         border-radius: 6px;
@@ -77,15 +103,18 @@
       }
       .hint {
         font-size: 0.85rem;
-        color: gray;
+        color: var(--muted);
         margin: 0.6rem 0 0;
       }
       code {
         font-family: ui-monospace, monospace;
         font-size: 0.9em;
       }
+      #alias-hint {
+        color: var(--text);
+      }
       .status {
-        color: #b00;
+        color: var(--status);
         margin: 0.75rem 0;
       }
       #table {
@@ -99,7 +128,7 @@
       #table td {
         padding: 0.3rem 0.6rem;
         text-align: right;
-        border-bottom: 1px solid #ddd;
+        border-bottom: 1px solid var(--row-border);
         white-space: nowrap;
       }
       #table th:nth-child(3),
@@ -107,22 +136,22 @@
         text-align: left;
       }
       #table thead th {
-        border-bottom: 2px solid #333;
+        border-bottom: 2px solid var(--thead-border);
       }
       #table .movement {
         text-align: center;
       }
       .movement.up {
-        color: #1a7f37;
+        color: var(--up);
       }
       .movement.down {
-        color: #c62828;
+        color: var(--down);
       }
       .movement.flat {
-        color: #1565c0;
+        color: var(--flat);
       }
       .movement.new {
-        color: #1a7f37;
+        color: var(--up);
       }
       #highlights h2 {
         font-size: 1.05rem;
@@ -132,7 +161,8 @@
         margin: 0 0 0.5rem;
         font-size: 0.9rem;
       }
-      #copybuttons {
+      #copybuttons,
+      #copybuttons td {
         border: none;
       }
       #copybuttons td:nth-child(2) {
@@ -141,10 +171,14 @@
       footer {
         margin-top: 1.5rem;
         font-size: 0.85rem;
-        color: gray;
+        color: var(--muted);
       }
       a {
         color: inherit;
+      }
+      a:hover {
+        text-decoration: none;
+        color: var(--text);
       }
     </style>
   </head>
@@ -367,9 +401,9 @@
             });
             if (prevRank === null) movement = { cls: "new", text: "new" };
             else if (prevRank > i + 1)
-              movement = { cls: "up", text: "↑" + (prevRank - i - 1) };
+              movement = { cls: "up", text: "▴" + (prevRank - i - 1) };
             else if (prevRank < i + 1)
-              movement = { cls: "down", text: "↓" + (i + 1 - prevRank) };
+              movement = { cls: "down", text: "▾" + (i + 1 - prevRank) };
             else movement = { cls: "flat", text: "•" };
           }
           var cells = [
