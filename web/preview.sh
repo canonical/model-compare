@@ -2,8 +2,10 @@
 # preview.sh — serve web/site/index.html locally for a visual check.
 #
 # Data sources, in order of preference:
-#   1. --build    run the real pipeline via web/publish.py locally;
-#                 set AA_API_KEY for better quality scores
+#   1. --build    run the full publish pipeline (web/publish.py) locally:
+#                 fetches the live site's previous history/highlights and
+#                 may call OpenRouter (LLM spend) if OPENROUTER_API_KEY is
+#                 set; AA_API_KEY improves quality scores
 #   2. default    fetch live data.json/best.txt from the deployed site
 #   3. fallback   synthesize placeholder rows if the live fetch fails
 #
@@ -31,8 +33,10 @@ Serves web/site/index.html at http://127.0.0.1:PORT (default 8734) together
 with data.json and best.txt.
 
   --port N        port to serve on (default: 8734)
-  --build         build fresh data locally with web/publish.py
-                  instead of using the live data
+  --build         build fresh data locally by running the full publish
+                  pipeline (web/publish.py): fetches the deployed site's
+                  previous history/highlights and may call OpenRouter for
+                  highlights (LLM spend) if OPENROUTER_API_KEY is set
   --live-url URL  deployed site to fetch data from
   --site-dir DIR  directory holding index.html (default: ./web/site)
 EOF
@@ -92,6 +96,8 @@ cp "$SITE_DIR/index.html" "$PREVIEW_DIR/index.html"
 if [ "$BUILD" -eq 1 ]; then
 	echo "building data locally with web/publish.py..."
 	python3 "$SCRIPT_DIR/publish.py" --output-dir "$PREVIEW_DIR"
+	# publish.py always copies web/site/index.html; restore a custom --site-dir
+	cp "$SITE_DIR/index.html" "$PREVIEW_DIR/index.html"
 elif command -v curl >/dev/null &&
 	curl -fsSL --max-time 10 "$LIVE_URL/data.json" -o "$PREVIEW_DIR/data.json" &&
 	curl -fsSL --max-time 10 "$LIVE_URL/best.txt" -o "$PREVIEW_DIR/best.txt"; then

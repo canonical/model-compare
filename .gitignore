@@ -4,4 +4,5 @@ __pycache__/
 venv/
 .serena/
 .worktrees/
+_site/
 .DS_Store
