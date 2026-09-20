@@ -277,6 +277,18 @@ templates.
 | `--no-zdr` | off | rank all models, not just zero-data-retention ones |
 | `--no-require-tools` | off | allow models without tool calling |
 | `--no-cache` / `--cache-ttl S` | 6h | cache control |
+| `--version` | off | print `model-compare <VERSION>` and exit |
+
+## Releases
+
+Releases are annotated git tags (`v0.1.0`, `v0.2.0`, …) with GitHub Releases,
+summarized in `CHANGELOG.md`. To pin a copy of the standalone script, download
+it from a tag:
+
+    curl -fsSLO https://raw.githubusercontent.com/canonical/model-compare/v0.1.0/model_compare.py
+
+and check `./model_compare.py --version`. The release checklist lives in
+`docs/superpowers/specs/2026-09-20-web-split-releases-design.md`.
 
 ## Tests
 
