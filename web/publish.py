@@ -22,7 +22,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = Path(__file__).resolve().parent
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 PRIORITIES = ("balanced", "price", "quality")
 PREV_HISTORY_URL = "https://canonical.github.io/model-compare/history.json"
