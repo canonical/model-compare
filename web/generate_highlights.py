@@ -27,7 +27,8 @@ FRONTEND_MODELS_URL = (
     "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text"
 )
 CATALOG_MODELS_URL = "https://openrouter.ai/api/v1/models"
-USER_AGENT = "model-compare/1.0 (https://github.com/rkratky/model-compare)"
+VERSION = "0.2.0"
+USER_AGENT = f"model-compare/{VERSION} (https://github.com/rkratky/model-compare)"
 PROMPT_RULES = (
     "You write deployment notes for a model-ranking site. The user message is"
     " a JSON diff of the last 7 days. Reply with ONE JSON object with keys"
