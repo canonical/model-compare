@@ -37,30 +37,7 @@ jobs:
         env:
           AA_API_KEY: ${{ secrets.AA_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: |
-          mkdir -p _site
-          python model_compare.py --best > best.txt
-          for p in balanced price quality; do
-            python model_compare.py --priority "$p" --json --top 10 > "$p.json"
-          done
-          python model_compare.py --catalog > catalog.json
-          curl -fsSL --max-time 60 --retry 2 https://canonical.github.io/model-compare/history.json -o history-prev.json || true
-          curl -fsSL --max-time 60 --retry 2 https://canonical.github.io/model-compare/highlights.json -o highlights-prev.json || true
-          python generate_highlights.py \
-            --catalog catalog.json \
-            --history history-prev.json \
-            --prev-highlights highlights-prev.json \
-            --output highlights-new.json
-          python build_site_data.py \
-            --best-file best.txt \
-            --output _site/data.json \
-            --catalog-file catalog.json \
-            --history-prev-file history-prev.json \
-            --highlights-file highlights-new.json \
-            --priority balanced=balanced.json \
-            --priority price=price.json \
-            --priority quality=quality.json
-          cp best.txt site/index.html _site/
+        run: python web/publish.py
 
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:

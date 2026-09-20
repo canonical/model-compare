@@ -2,8 +2,8 @@
 # preview.sh — serve web/site/index.html locally for a visual check.
 #
 # Data sources, in order of preference:
-#   1. --build    run the real pipeline (model_compare.py + build_site_data.py)
-#                 locally; set AA_API_KEY for better quality scores
+#   1. --build    run the real pipeline via web/publish.py locally;
+#                 set AA_API_KEY for better quality scores
 #   2. default    fetch live data.json/best.txt from the deployed site
 #   3. fallback   synthesize placeholder rows if the live fetch fails
 #
@@ -17,7 +17,6 @@ LIVE_URL="https://canonical.github.io/model-compare"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SITE_DIR="$SCRIPT_DIR/site"
 SRV_PID=""
-BUILD_DIR=""
 
 die_usage() {
 	echo "preview.sh: $1 (see --help)" >&2
@@ -32,8 +31,8 @@ Serves web/site/index.html at http://127.0.0.1:PORT (default 8734) together
 with data.json and best.txt.
 
   --port N        port to serve on (default: 8734)
-  --build         build fresh data locally with model_compare.py +
-                  build_site_data.py instead of using the live data
+  --build         build fresh data locally with web/publish.py
+                  instead of using the live data
   --live-url URL  deployed site to fetch data from
   --site-dir DIR  directory holding index.html (default: ./web/site)
 EOF
@@ -85,28 +84,14 @@ trap '
 	if [ -n "$SRV_PID" ]; then
 		kill "$SRV_PID" 2>/dev/null || true
 	fi
-	if [ -n "$BUILD_DIR" ]; then
-		rm -rf "$BUILD_DIR"
-	fi
 	rm -rf "$PREVIEW_DIR"
 ' EXIT
 
 cp "$SITE_DIR/index.html" "$PREVIEW_DIR/index.html"
 
 if [ "$BUILD" -eq 1 ]; then
-	echo "building data locally with model_compare.py + build_site_data.py..."
-	BUILD_DIR="$(mktemp -d)"
-	for p in balanced price quality; do
-		python3 "$SCRIPT_DIR/../model_compare.py" --priority "$p" --json --top 10 \
-			>"$BUILD_DIR/$p.json"
-	done
-	python3 "$SCRIPT_DIR/../model_compare.py" --best >"$PREVIEW_DIR/best.txt"
-	python3 "$SCRIPT_DIR/build_site_data.py" \
-		--best-file "$PREVIEW_DIR/best.txt" \
-		--output "$PREVIEW_DIR/data.json" \
-		--priority "balanced=$BUILD_DIR/balanced.json" \
-		--priority "price=$BUILD_DIR/price.json" \
-		--priority "quality=$BUILD_DIR/quality.json"
+	echo "building data locally with web/publish.py..."
+	python3 "$SCRIPT_DIR/publish.py" --output-dir "$PREVIEW_DIR"
 elif command -v curl >/dev/null &&
 	curl -fsSL --max-time 10 "$LIVE_URL/data.json" -o "$PREVIEW_DIR/data.json" &&
 	curl -fsSL --max-time 10 "$LIVE_URL/best.txt" -o "$PREVIEW_DIR/best.txt"; then
