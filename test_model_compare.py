@@ -8,9 +8,12 @@ These cover pure functions only -- no network access is performed. Run with:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import time
 from argparse import Namespace
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -1669,3 +1672,16 @@ def test_parse_args_rejects_catalog_with_json(capsys):
 def test_parse_args_accepts_catalog_alone():
     args = mc.parse_args(["--catalog"])
     assert args.catalog is True
+
+
+MC_SCRIPT = Path(__file__).resolve().parent / "model_compare.py"
+
+
+def test_version_flag():
+    proc = subprocess.run(
+        [sys.executable, str(MC_SCRIPT), "--version"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout.strip() == f"model-compare {mc.VERSION}"

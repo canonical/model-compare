@@ -64,7 +64,8 @@ OPENROUTER_ZDR_URL = (
 )
 AA_MODELS_PAGE_URL = "https://artificialanalysis.ai/models"
 AA_API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
-USER_AGENT = "model-compare/1.0 (https://github.com/rkratky/model-compare)"
+VERSION = "0.1.0"
+USER_AGENT = f"model-compare/{VERSION} (https://github.com/rkratky/model-compare)"
 
 # opencode expects provider-qualified model ids: openrouter/<provider/model>.
 # Single source of truth -- other provider namespaces can be supported later
@@ -1085,6 +1086,11 @@ def parse_args(argv=None):
         description="Pick the best value-for-money LLM on OpenRouter for coding-agent work.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(__doc__ or "").split("Examples:", 1)[-1],
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {VERSION}",
     )
     parser.add_argument(
         "--min-context",
