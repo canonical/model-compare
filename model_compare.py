@@ -65,7 +65,7 @@ OPENROUTER_ZDR_URL = (
 AA_MODELS_PAGE_URL = "https://artificialanalysis.ai/models"
 AA_API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
 VERSION = "0.2.0"
-USER_AGENT = f"model-compare/{VERSION} (https://github.com/rkratky/model-compare)"
+USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 
 # opencode expects provider-qualified model ids: openrouter/<provider/model>.
 # Single source of truth -- other provider namespaces can be supported later
