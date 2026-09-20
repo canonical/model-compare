@@ -1685,4 +1685,5 @@ def test_version_flag():
         text=True,
         check=True,
     )
-    assert proc.stdout.strip() == f"model-compare {mc.VERSION}"
+    # Literal pin: a release that forgets to bump VERSION fails here.
+    assert proc.stdout.strip() == "model-compare 0.2.0"

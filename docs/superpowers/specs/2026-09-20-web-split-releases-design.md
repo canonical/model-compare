@@ -165,11 +165,13 @@ field stays the literal `"model-compare"`.
 ## Release checklist (every release)
 
 1. Bump `VERSION` in `model_compare.py` (and `generate_highlights.py`,
-   `web/build.py` for 0.2+) so `--version` and both user agents match.
+   `web/publish.py`) so `--version` and all user agents match, then update
+   the pinned `0.2.0`-style literal in `test_model_compare.py::test_version_flag`
+   (it exists precisely so a forgotten bump fails the suite).
 2. Add a CHANGELOG entry dated today.
 3. Run `pytest` (root; collects `web/`).
 4. `git tag -a vX.Y.Z -m "model-compare X.Y.Z"`, push main + tag.
 5. `gh release create vX.Y.Z` with notes; the notes link the pinned
-   standalone download: `raw.githubusercontent.com/rkratky/model-compare/vX.Y.Z/model_compare.py`.
+   standalone download: `raw.githubusercontent.com/canonical/model-compare/vX.Y.Z/model_compare.py`.
 6. Never rename the catalog `tool` literal or remove schema fields without
    bumping `schema_version`.
