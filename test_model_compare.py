@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-import build_site_data as bsd
+sys.path.insert(0, str(Path(__file__).resolve().parent / "web"))
+import build_site_data as bsd  # noqa: E402  (web/ module, contract validator)
 import model_compare as mc
 
 

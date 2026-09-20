@@ -49,7 +49,7 @@ $ alias oc-best='opencode --model "$(curl -fsSL https://canonical.github.io/mode
 ```
 
 One-time setup: enable **Settings → Pages → Source: GitHub Actions**. The
-build (`build_site_data.py`) validates every payload and fails loudly, so a
+build (`web/build_site_data.py`) validates every payload and fails loudly, so a
 broken run never deploys a broken site. `best.txt` always serves the
 *balanced* #1, regardless of which tab the page shows. Published picks
 consider ZDR models only, matching the tool's default.
@@ -242,7 +242,7 @@ both artifacts next to `catalog.json`:
 
 Regeneration cadence: only LLM-sourced highlights (`source: "openrouter"`)
 younger than 24 hours are reused as is — fallback output is regenerated on
-every publish. When regenerating, `generate_highlights.py` computes a numeric
+every publish. When regenerating, `web/generate_highlights.py` computes a numeric
 diff of today's catalog against the snapshot exactly 7 days back and makes one
 grounded OpenRouter call to write the three sections. The target model is not
 hardcoded: the free-model lineup on OpenRouter rotates, so the generator

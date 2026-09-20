@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# preview.sh — serve site/index.html locally for a visual check.
+# preview.sh — serve web/site/index.html locally for a visual check.
 #
 # Data sources, in order of preference:
 #   1. --build    run the real pipeline (model_compare.py + build_site_data.py)
@@ -28,14 +28,14 @@ usage() {
 	cat <<EOF
 usage: preview.sh [--port N] [--build] [--live-url URL] [--site-dir DIR]
 
-Serves site/index.html at http://127.0.0.1:PORT (default 8734) together
+Serves web/site/index.html at http://127.0.0.1:PORT (default 8734) together
 with data.json and best.txt.
 
   --port N        port to serve on (default: 8734)
   --build         build fresh data locally with model_compare.py +
                   build_site_data.py instead of using the live data
   --live-url URL  deployed site to fetch data from
-  --site-dir DIR  directory holding index.html (default: ./site)
+  --site-dir DIR  directory holding index.html (default: ./web/site)
 EOF
 	exit 0
 }
@@ -97,10 +97,10 @@ if [ "$BUILD" -eq 1 ]; then
 	echo "building data locally with model_compare.py + build_site_data.py..."
 	BUILD_DIR="$(mktemp -d)"
 	for p in balanced price quality; do
-		python3 "$SCRIPT_DIR/model_compare.py" --priority "$p" --json --top 10 \
+		python3 "$SCRIPT_DIR/../model_compare.py" --priority "$p" --json --top 10 \
 			>"$BUILD_DIR/$p.json"
 	done
-	python3 "$SCRIPT_DIR/model_compare.py" --best >"$PREVIEW_DIR/best.txt"
+	python3 "$SCRIPT_DIR/../model_compare.py" --best >"$PREVIEW_DIR/best.txt"
 	python3 "$SCRIPT_DIR/build_site_data.py" \
 		--best-file "$PREVIEW_DIR/best.txt" \
 		--output "$PREVIEW_DIR/data.json" \
