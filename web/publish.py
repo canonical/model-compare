@@ -10,10 +10,12 @@ any unexpected result so a broken run never deploys a broken site.
 from __future__ import annotations
 
 import argparse
+import http.client
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -21,7 +23,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = Path(__file__).resolve().parent
 VERSION = "0.2.0"
-USER_AGENT = f"model-compare/{VERSION} (https://github.com/rkratky/model-compare)"
+USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 PRIORITIES = ("balanced", "price", "quality")
 PREV_HISTORY_URL = "https://canonical.github.io/model-compare/history.json"
 PREV_HIGHLIGHTS_URL = "https://canonical.github.io/model-compare/highlights.json"
@@ -37,14 +39,24 @@ def run_script(script: Path, args: list[str], out: Path | None = None) -> None:
             subprocess.run(cmd, cwd=REPO_ROOT, stdout=fh, check=True)
 
 
-def fetch_prev(url: str, timeout: int = 60) -> bytes | None:
-    """Fetch a previously published file; None on any failure (|| true)."""
+def fetch_prev(url: str, timeout: int = 60, attempts: int = 3) -> bytes | None:
+    """Fetch a previously published file; None after all attempts fail.
+
+    Mirrors the old `curl -fsSL --retry 2 ... || true`: retry transient
+    failures (a single blip must never reset the accumulated history
+    baseline) and degrade to None on any failure, including truncated
+    bodies (http.client.HTTPException is outside URLError/OSError).
+    """
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except (urllib.error.URLError, OSError):
-        return None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except (urllib.error.URLError, OSError, http.client.HTTPException):
+            if attempt == attempts - 1:
+                return None
+            time.sleep(2**attempt)
+    return None
 
 
 def build_site(output_dir: Path) -> None:
@@ -106,7 +118,20 @@ def build_site(output_dir: Path) -> None:
 
         shutil.copyfile(WEB_DIR / "site" / "index.html", output_dir / "index.html")
 
-    for name in ("data.json", "catalog.json", "best.txt", "index.html"):
+    artifacts = (
+        "data.json",
+        "catalog.json",
+        "history.json",  # self-feeds the next run via PREV_HISTORY_URL
+        "highlights.json",  # ditto via PREV_HIGHLIGHTS_URL
+        "best.txt",
+        "index.html",
+    )
+    missing = [name for name in artifacts if not (output_dir / name).is_file()]
+    if missing:
+        raise RuntimeError(
+            f"publish: expected artifacts not written: {', '.join(missing)}"
+        )
+    for name in artifacts:
         print(f"publish: wrote {output_dir / name}")
 
 
