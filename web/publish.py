@@ -3,14 +3,17 @@
 
 Runs the standalone model_compare.py, then the web-side generators
 (generate_highlights.py, build_site_data.py), and assembles the deploy
-directory: data.json, catalog.json, best.txt and index.html. Fails loudly on
-any unexpected result so a broken run never deploys a broken site.
+directory: data.json, catalog.json, history.json, highlights.json, best.txt
+and index.html. Fails loudly on any unexpected result -- including
+data.json/history.json stamps that disagree with catalog.json's
+generated_at -- so a broken run never deploys a broken site.
 """
 
 from __future__ import annotations
 
 import argparse
 import http.client
+import json
 import shutil
 import subprocess
 import sys
@@ -57,6 +60,41 @@ def fetch_prev(url: str, timeout: int = 60, attempts: int = 3) -> bytes | None:
                 return None
             time.sleep(2**attempt)
     return None
+
+
+def _load_artifact(path: Path, required: tuple[str, ...]) -> dict:
+    """json.load an artifact, raising RuntimeError that names it on any defect."""
+    try:
+        with open(path) as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"publish: unreadable {path.name}: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise RuntimeError(f"publish: {path.name} is not a JSON object")
+    absent = [key for key in required if key not in doc]
+    if absent:
+        raise RuntimeError(f"publish: {path.name} lacks {', '.join(absent)}")
+    return doc
+
+
+def check_stamps(output_dir: Path) -> None:
+    """Fail unless data.json and history.json carry the catalog's generated_at.
+
+    The catalog is the single clock: build_site_data stamps data.json from
+    it and merge_history sets updated_at to the newest snapshot's stamp,
+    which is today's catalog. highlights.json is deliberately excluded --
+    its generated_at is its own writing time (the 24h LLM-reuse window).
+    """
+    catalog = _load_artifact(output_dir / "catalog.json", ("generated_at",))
+    data = _load_artifact(output_dir / "data.json", ("generated_at",))
+    history = _load_artifact(output_dir / "history.json", ("updated_at", "snapshots"))
+    stamp = catalog["generated_at"]
+    if data["generated_at"] != stamp or history["updated_at"] != stamp:
+        raise RuntimeError(
+            "publish: generated_at mismatch: "
+            f"catalog={stamp!r} data={data['generated_at']!r} "
+            f"history={history['updated_at']!r}"
+        )
 
 
 def build_site(output_dir: Path) -> None:
@@ -131,6 +169,7 @@ def build_site(output_dir: Path) -> None:
         raise RuntimeError(
             f"publish: expected artifacts not written: {', '.join(missing)}"
         )
+    check_stamps(output_dir)
     for name in artifacts:
         print(f"publish: wrote {output_dir / name}")
 

@@ -28,6 +28,7 @@ ROW_KEYS = (
     "output_usd_per_m",
     "blended_usd_per_m",
     "discount",
+    "discount_pct",
     "context_tokens",
     "age_days",
 )
@@ -103,6 +104,19 @@ def validate_catalog(document) -> None:
     for key in ("generated_at", "parameters", "sources", "pool", "models", "filtered"):
         if key not in document:
             raise ValueError(f"catalog missing key: {key}")
+    # build_snapshot/merge_history slice and parse this stamp; reject a
+    # malformed one here instead of crashing (or keying history) downstream.
+    generated_at = document["generated_at"]
+    if not isinstance(generated_at, str) or not generated_at:
+        raise ValueError(
+            f"catalog generated_at must be an ISO-8601 string: {generated_at!r}"
+        )
+    try:
+        datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"catalog generated_at is not ISO-8601: {generated_at!r}"
+        ) from None
     parameters = document["parameters"]
     if not isinstance(parameters, dict) or "zdr_required" not in parameters:
         raise ValueError("catalog parameters must set zdr_required")
@@ -321,14 +335,22 @@ def build_snapshot(catalog) -> dict:
     """Project a validated catalog document into one daily history snapshot.
 
     tabs derive from the catalog itself: per priority, models sorted by
-    scores.overall descending (id tiebreak), top 10, rank 1-based. aa and
-    prices cover candidates only -- filtered entries carry neither.
+    scores.overall descending, then quality desc, blended asc, id asc --
+    the same tiebreak model_compare.py uses for the data.json rows the site
+    compares ranks against. Top 10, rank 1-based. aa and prices cover
+    candidates only -- filtered entries carry neither.
     """
     models = catalog["models"]
     tabs = {}
     for priority in CATALOG_OVERALL_KEYS:
         ranked = sorted(
-            models, key=lambda e: (-e["scores"]["overall"][priority], e["id"])
+            models,
+            key=lambda e: (
+                -e["scores"]["overall"][priority],
+                -(e["quality"] or 0.0),
+                e["pricing"]["blended_per_1m"],
+                e["id"],
+            ),
         )
         tabs[priority] = [
             {
@@ -373,7 +395,9 @@ def merge_history(prev, snapshot) -> dict:
     non-empty generated_at string, string pool_ids, a tabs dict holding
     id-bearing rank-consistent lists for each of balanced/price/quality,
     a numeric-or-null aa dict and a 4-element numeric/null prices dict.
-    Same-day upserts are last-write-wins.
+    Same-day upserts are last-write-wins. updated_at is always the written
+    snapshot's generated_at (the catalog's stamp), never a retained
+    future-dated key's, so publish's stamp gate cannot wedge on skewed data.
     """
     today = snapshot["generated_at"][:10]
     horizon = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
@@ -394,7 +418,7 @@ def merge_history(prev, snapshot) -> dict:
     kept = sorted(snapshots)[-HISTORY_RETENTION:]
     return {
         "schema_version": HISTORY_SCHEMA_VERSION,
-        "updated_at": snapshots[kept[-1]]["generated_at"],
+        "updated_at": snapshot["generated_at"],
         "snapshots": {date_key: snapshots[date_key] for date_key in kept},
     }
 
@@ -466,10 +490,29 @@ def validate_highlights(document) -> None:
             raise ValueError(f"highlights section {key} must be a non-empty string")
 
 
-def build_data(best, priorities, now=None) -> dict:
+def build_data(best, priorities, now=None, generated_at=None) -> dict:
+    """Validate the rows and wrap them into the data.json document.
+
+    generated_at, when given, is used verbatim (main passes the catalog's
+    timestamp so the site's 7-day baseline and the history snapshot keys
+    share one date); otherwise the document is stamped with now/wall-clock.
+    """
     if not isinstance(best, str) or not MODEL_ID_RE.fullmatch(best.strip()):
         raise ValueError(f"best model id looks wrong: {best!r}")
     best = best.strip()
+    if generated_at is not None:
+        if not isinstance(generated_at, str) or not generated_at:
+            raise ValueError(
+                f"generated_at must be an ISO-8601 string: {generated_at!r}"
+            )
+        try:
+            datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(
+                f"generated_at is not ISO-8601: {generated_at!r}"
+            ) from None
+    else:
+        generated_at = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     for name in PRIORITIES:
         rows = priorities.get(name)
         if not isinstance(rows, list) or not rows:
@@ -481,9 +524,7 @@ def build_data(best, priorities, now=None) -> dict:
             if missing:
                 raise ValueError(f"{name}[{i}] is missing keys: {', '.join(missing)}")
     return {
-        "generated_at": (now or datetime.now(timezone.utc)).isoformat(
-            timespec="seconds"
-        ),
+        "generated_at": generated_at,
         "best": best,
         "priorities": {name: list(priorities[name]) for name in PRIORITIES},
     }
@@ -557,7 +598,11 @@ def main(argv=None) -> int:
                     f"duplicate --priority {name!r} (want each priority once)"
                 )
             priorities[name] = rows
-        data = build_data(best, priorities)
+        data = build_data(
+            best,
+            priorities,
+            generated_at=catalog["generated_at"] if catalog is not None else None,
+        )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

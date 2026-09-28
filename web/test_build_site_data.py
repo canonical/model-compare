@@ -1,6 +1,7 @@
 """Tests for build_site_data.py -- the data.json builder for the published site."""
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -18,6 +19,7 @@ def make_row(**overrides):
         "output_usd_per_m": 2.0,
         "blended_usd_per_m": 1.25,
         "discount": None,
+        "discount_pct": "--",
         "context_tokens": 2_000_000,
         "age_days": 10.0,
     }
@@ -39,6 +41,21 @@ def test_build_data_happy_path():
     assert set(data["priorities"]) == {"balanced", "price", "quality"}
     assert data["priorities"]["balanced"][0]["model"] == "acme/model-a"
     assert "generated_at" in data
+
+
+def test_build_data_carries_discount_pct_through():
+    priorities = make_priorities()
+    priorities["price"] = [make_row(discount=0.5, discount_pct="50%")]
+    data = bsd.build_data("acme/model-a", priorities)
+    assert data["priorities"]["price"][0]["discount_pct"] == "50%"
+    assert data["priorities"]["balanced"][0]["discount_pct"] == "--"
+
+
+def test_build_data_rejects_row_without_discount_pct():
+    priorities = make_priorities()
+    del priorities["quality"][0]["discount_pct"]
+    with pytest.raises(ValueError, match="discount_pct"):
+        bsd.build_data("acme/model-a", priorities)
 
 
 def test_build_data_accepts_variant_suffix():
@@ -297,6 +314,12 @@ def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
         lambda doc: doc["models"][0]["pricing"].pop("blended_per_1m"),
         lambda doc: doc["models"][0].update(discount="0.5"),
         lambda doc: doc["models"][0].update(context="2m"),
+        # build_snapshot/merge_history slice and parse generated_at, so a
+        # malformed stamp must fail validation, not crash as a traceback
+        lambda doc: doc.pop("generated_at"),
+        lambda doc: doc.update(generated_at=None),
+        lambda doc: doc.update(generated_at=""),
+        lambda doc: doc.update(generated_at="not-a-date"),
     ],
 )
 def test_validate_catalog_rejects(mutate):
@@ -430,6 +453,53 @@ def test_build_snapshot_ranks_per_priority_top10():
         assert [row["rank"] for row in snap["tabs"][priority]] == list(range(1, 11))
 
 
+def test_build_snapshot_ties_break_like_the_cli_table():
+    # Tied overall scores must rank as model_compare.py orders data.json rows
+    # (quality desc, blended asc, id asc), or the site shows false arrows.
+    tied = {"balanced": 0.5, "price": 0.5, "quality": 0.5}
+
+    def entry(model_id, quality, blended):
+        return make_catalog_entry(
+            id=model_id,
+            quality=quality,
+            pricing={
+                "input_per_1m": 1.0,
+                "output_per_1m": 2.0,
+                "blended_per_1m": blended,
+            },
+            scores={
+                "price": 0.5,
+                "quality": 0.5,
+                "context": 0.5,
+                "age": 0.5,
+                "overall": dict(tied),
+            },
+        )
+
+    doc = make_catalog()
+    doc["models"] = [
+        entry("acme/a-low", 50.0, 1.0),
+        entry("acme/b-high", 60.0, 2.0),
+        entry("acme/e-pricey", 70.0, 3.0),
+        entry("acme/f-cheap", 70.0, 1.0),
+        entry("acme/h-unrated", None, 1.0),
+        entry("acme/g-unrated", None, 1.0),
+    ]
+    snap = bsd.build_snapshot(doc)
+    expected = [
+        "acme/f-cheap",
+        "acme/e-pricey",
+        "acme/b-high",
+        "acme/a-low",
+        "acme/g-unrated",
+        "acme/h-unrated",
+    ]
+    for priority in ("balanced", "price", "quality"):
+        rows = snap["tabs"][priority]
+        assert [row["id"] for row in rows] == expected
+        assert [row["rank"] for row in rows] == list(range(1, 7))
+
+
 def test_build_snapshot_dedupes_pool_ids():
     doc = make_catalog()
     doc["filtered"].append(
@@ -547,6 +617,23 @@ def test_merge_history_drops_future_dated_snapshot():
         prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
     )
     assert "2027-01-01" not in merged["snapshots"]
+    assert merged["updated_at"] == "2026-09-02T09:15:00+00:00"
+
+
+def test_merge_history_updated_at_is_the_written_snapshot():
+    # A previously skewed run can leave a snapshot dated today+1 in the live
+    # history; the horizon deliberately retains it. updated_at must still be
+    # this run's stamp, or publish's stamp gate (history.updated_at ==
+    # catalog.generated_at) wedges every deploy until the date catches up.
+    prev = make_history()
+    prev["snapshots"]["2026-09-03"] = make_history_snapshot(
+        "2026-09-03", "2026-09-03T01:00:00+00:00"
+    )
+    snap = make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    merged = bsd.merge_history(prev, snap)
+    assert "2026-09-03" in merged["snapshots"]  # horizon tolerance unchanged
+    assert max(merged["snapshots"]) == "2026-09-03"
+    assert merged["snapshots"]["2026-09-02"] == snap
     assert merged["updated_at"] == "2026-09-02T09:15:00+00:00"
 
 
@@ -732,3 +819,153 @@ def test_main_without_highlights_file_writes_no_highlights(tmp_path):
     assert bsd.main(argv) == 0
     assert out.exists()
     assert not (out.parent / "highlights.json").exists()
+
+
+def test_main_writes_discount_pct_into_data_json(tmp_path):
+    argv, out = catalog_argv(tmp_path)
+    assert bsd.main(argv) == 0
+    written = json.loads(out.read_text())
+    for name in bsd.PRIORITIES:
+        assert written["priorities"][name][0]["discount_pct"] == "--"
+
+
+def test_build_data_uses_explicit_generated_at_verbatim():
+    stamp = "2026-09-15T23:59:50+00:00"
+    data = bsd.build_data("acme/model-a", make_priorities(), generated_at=stamp)
+    assert data["generated_at"] == stamp
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "yesterday", 20260915, ["2026-09-15T00:00:00+00:00"]]
+)
+def test_build_data_rejects_malformed_generated_at(bad):
+    with pytest.raises(ValueError, match="generated_at"):
+        bsd.build_data("acme/model-a", make_priorities(), generated_at=bad)
+
+
+def test_main_rejects_catalog_with_malformed_generated_at(tmp_path, capsys):
+    catalog = make_catalog()
+    catalog["generated_at"] = "not-a-date"
+    catalog_file = tmp_path / "catalog.json"
+    catalog_file.write_text(json.dumps(catalog))
+    argv, out = catalog_argv(tmp_path, catalog_file)
+    assert bsd.main(argv) == 1
+    assert "generated_at" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_build_data_defaults_generated_at_to_now():
+    now = datetime(2026, 9, 16, 0, 0, 5, tzinfo=timezone.utc)
+    data = bsd.build_data("acme/model-a", make_priorities(), now=now)
+    assert data["generated_at"] == "2026-09-16T00:00:05+00:00"
+
+
+def test_main_stamps_data_json_with_catalog_generated_at(tmp_path):
+    # Catalog made just before UTC midnight, data.json built just after: the
+    # site's D-7 baseline must use the catalog date that keys the history.
+    catalog = make_catalog()
+    catalog["generated_at"] = "2026-09-15T23:59:50+00:00"
+    catalog_file = tmp_path / "catalog.json"
+    catalog_file.write_text(json.dumps(catalog))
+    argv, out = catalog_argv(tmp_path, catalog_file)
+    assert bsd.main(argv) == 0
+    written = json.loads(out.read_text())
+    assert written["generated_at"] == "2026-09-15T23:59:50+00:00"
+
+
+# ---------------------------------------------------------------------------
+# cross-artifact invariant: one catalog drives table, history and stamps
+# ---------------------------------------------------------------------------
+
+
+def _invariant_catalog():
+    """Five models whose overall ties exercise every tiebreak level.
+
+    Values are short decimals, so the unrounded and 4dp-rounded orderings
+    agree by construction; this fence pins plumbing, not rounding.
+    """
+    spec = [
+        # id, (balanced, price, quality) overall, quality, blended
+        ("acme/a", (0.80, 0.70, 0.90), 60.0, 2.0),
+        ("acme/b", (0.80, 0.90, 0.60), 50.0, 1.0),
+        ("acme/c", (0.70, 0.90, 0.60), 50.0, 0.5),
+        ("acme/d", (0.70, 0.60, 0.90), None, 1.0),
+        ("acme/e", (0.70, 0.60, 0.90), None, 1.0),
+    ]
+    models = []
+    for model_id, (bal, price, qual), quality, blended in spec:
+        entry = make_catalog_entry(id=model_id, quality=quality)
+        entry["pricing"] = {
+            "input_per_1m": blended,
+            "output_per_1m": blended,
+            "blended_per_1m": blended,
+        }
+        entry["scores"]["overall"] = {"balanced": bal, "price": price, "quality": qual}
+        if quality is None:
+            entry["aa"] = {
+                "intelligence_index": None,
+                "coding_index": None,
+                "agentic_index": None,
+            }
+            entry["quality_match"] = None
+        models.append(entry)
+    doc = make_catalog()
+    doc["models"] = models
+    doc["pool"] = {"listed": 6, "candidates": 5, "dropped": {"context": 1}}
+    doc["sources"]["aa"] = {"mode": "openrouter", "matched": 3, "matched_openrouter": 3}
+    bsd.validate_catalog(doc)
+    return doc
+
+
+def test_table_and_history_rank_from_one_catalog():
+    """Regression fence for F1/F4: data.json rows and history tabs converge.
+
+    The key below deliberately mirrors model_compare.py's compute_scores
+    sort and build_snapshot's key -- drift in either fails here first.
+    """
+    catalog = _invariant_catalog()
+
+    def cli_key(e):
+        return (
+            -e["scores"]["overall"][priority],
+            -(e["quality"] or 0.0),
+            e["pricing"]["blended_per_1m"],
+            e["id"],
+        )
+
+    expected = {}
+    rows = {}
+    for priority in ("balanced", "price", "quality"):
+        ranked = sorted(catalog["models"], key=cli_key)
+        expected[priority] = [e["id"] for e in ranked]
+        rows[priority] = [
+            make_row(
+                model=e["id"],
+                opencode_model=f"openrouter/{e['id']}",
+                score=e["scores"]["overall"][priority],
+                quality_index=e["quality"],
+                blended_usd_per_m=e["pricing"]["blended_per_1m"],
+            )
+            for e in ranked
+        ]
+    # Hand-pinned so the fixture keeps exercising the overall, quality,
+    # blended and id tiebreaks (a key regression cannot hide in both).
+    assert expected == {
+        "balanced": ["acme/a", "acme/b", "acme/c", "acme/d", "acme/e"],
+        "price": ["acme/c", "acme/b", "acme/a", "acme/d", "acme/e"],
+        "quality": ["acme/a", "acme/d", "acme/e", "acme/c", "acme/b"],
+    }
+
+    # Mirror main: rows verbatim, data.json stamped from the catalog.
+    data = bsd.build_data(
+        "openrouter/acme/a", rows, generated_at=catalog["generated_at"]
+    )
+    history = bsd.merge_history(None, bsd.build_snapshot(catalog))
+    bsd.validate_history(history)
+    (tabs,) = [snap["tabs"] for snap in history["snapshots"].values()]
+
+    for priority in ("balanced", "price", "quality"):
+        table = [row["model"] for row in data["priorities"][priority]]
+        tab = [row["id"] for row in tabs[priority]]
+        assert table == tab == expected[priority], priority
+    assert data["generated_at"] == history["updated_at"] == catalog["generated_at"]

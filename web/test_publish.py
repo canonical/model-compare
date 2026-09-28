@@ -1,6 +1,7 @@
 """Tests for the web/publish.py orchestrator (all subprocesses stubbed)."""
 
 import http.client
+import json
 import subprocess
 import urllib.error
 from pathlib import Path
@@ -35,20 +36,33 @@ class _TruncatedResp:
         return False
 
 
-def _fake_run(calls, simulate_build_site_data=True):
+STAMP = "2026-09-28T06:00:00Z"
+
+
+def _write_artifacts(out_dir, overrides=None):
+    """Write minimal valid build_site_data artifacts sharing one stamp.
+
+    `overrides` maps an artifact name to replacement text (for mismatch and
+    malformed-JSON cases); these stubs only feed publish's stamp gate.
+    """
+    docs = {
+        "data.json": {"generated_at": STAMP},
+        "catalog.json": {"generated_at": STAMP, "models": []},
+        "history.json": {"updated_at": STAMP, "snapshots": {}},
+        "highlights.json": {"generated_at": "2026-09-27T00:00:00Z"},
+    }
+    for name, doc in docs.items():
+        text = (overrides or {}).get(name)
+        (out_dir / name).write_text(json.dumps(doc) if text is None else text)
+
+
+def _fake_run(calls, simulate_build_site_data=True, overrides=None):
     def fake_run(cmd, cwd=None, stdout=None, check=True):
         calls.append(cmd)
         if "--best" in cmd:
             stdout.write("openrouter/z-ai/glm-5.3-flash\n")
         if simulate_build_site_data and Path(cmd[1]).name == "build_site_data.py":
-            out_dir = Path(cmd[cmd.index("--output") + 1]).parent
-            for name in (
-                "data.json",
-                "catalog.json",
-                "history.json",
-                "highlights.json",
-            ):
-                (out_dir / name).touch()
+            _write_artifacts(Path(cmd[cmd.index("--output") + 1]).parent, overrides)
         return subprocess.CompletedProcess(cmd, 0)
 
     return fake_run
@@ -187,14 +201,7 @@ def test_fetch_success_feeds_prev_files_to_generators(tmp_path, monkeypatch):
             prev_arg = Path(cmd[cmd.index("--history-prev-file") + 1])
             # read during the call: the scratch dir is removed afterwards
             seen["history_bytes"] = prev_arg.read_bytes() if prev_arg.exists() else None
-            out_dir = Path(cmd[cmd.index("--output") + 1]).parent
-            for name in (
-                "data.json",
-                "catalog.json",
-                "history.json",
-                "highlights.json",
-            ):
-                (out_dir / name).touch()
+            _write_artifacts(Path(cmd[cmd.index("--output") + 1]).parent)
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(publish.subprocess, "run", fake_run)
@@ -215,6 +222,56 @@ def test_build_site_fails_when_expected_artifacts_missing(tmp_path, monkeypatch)
     monkeypatch.setattr(publish.subprocess, "run", fake_run)
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
     with pytest.raises(RuntimeError):
+        publish.build_site(tmp_path / "site")
+
+
+@pytest.mark.parametrize(
+    "name, doc",
+    [
+        ("data.json", {"generated_at": "2026-09-27T06:00:00Z"}),
+        ("history.json", {"updated_at": "2026-09-27T06:00:00Z", "snapshots": {}}),
+    ],
+)
+def test_build_site_fails_on_generated_at_mismatch(tmp_path, monkeypatch, name, doc):
+    overrides = {name: json.dumps(doc)}
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=overrides))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    with pytest.raises(RuntimeError, match="generated_at mismatch") as exc:
+        publish.build_site(tmp_path / "site")
+    assert "2026-09-27T06:00:00Z" in str(exc.value)
+    assert STAMP in str(exc.value)
+
+
+def test_build_site_ignores_highlights_stamp(tmp_path, monkeypatch):
+    # highlights.json keeps its own writing time (24h LLM-reuse window).
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run([]))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    publish.build_site(tmp_path / "site")
+
+
+@pytest.mark.parametrize("name", ["data.json", "catalog.json", "history.json"])
+def test_build_site_fails_on_malformed_artifact(tmp_path, monkeypatch, name):
+    overrides = {name: "{not json"}
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=overrides))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    with pytest.raises(RuntimeError, match=name):
+        publish.build_site(tmp_path / "site")
+
+
+@pytest.mark.parametrize(
+    "name, doc",
+    [
+        ("history.json", {"snapshots": {}}),
+        ("history.json", {"updated_at": STAMP}),
+        ("data.json", {}),
+        ("catalog.json", []),
+    ],
+)
+def test_build_site_fails_on_missing_stamp_fields(tmp_path, monkeypatch, name, doc):
+    overrides = {name: json.dumps(doc)}
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=overrides))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    with pytest.raises(RuntimeError, match=name):
         publish.build_site(tmp_path / "site")
 
 

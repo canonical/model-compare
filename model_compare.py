@@ -928,6 +928,9 @@ def print_json(top):
             "discount": round(cand["discount"], 4)
             if has_discount(cand["discount"])
             else None,
+            # Display string from the DISC column's formatter, so the site
+            # shows exactly what the CLI prints instead of re-rounding.
+            "discount_pct": fmt_discount(cand["discount"]),
             "context_tokens": cand["context"],
             "age_days": round(cand["age_days"], 1)
             if cand["age_days"] is not None

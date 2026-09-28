@@ -269,6 +269,58 @@ def test_unchanged_blended_price_is_not_a_price_move():
     assert gh.fallback_texts(diff)["prices"] == "No notable price moves this week."
 
 
+def test_fallback_prices_report_rises_and_ended_discounts():
+    catalog = make_aa_catalog(
+        {
+            "acme/cheaper": (70.0, 1.0),
+            "acme/pricier": (70.0, 3.0),
+            "acme/promo-new": (70.0, 1.5),
+            "acme/promo-gone": (70.0, 1.5),
+        }
+    )
+    history = make_aa_history(
+        {
+            "acme/cheaper": (70.0, 2.0),
+            "acme/pricier": (70.0, 2.0),
+            "acme/promo-new": (70.0, 1.5),
+            "acme/promo-gone": (70.0, 1.5),
+        }
+    )
+    by_id = {m["id"]: m for m in catalog["models"]}
+    by_id["acme/promo-new"]["discount"] = 0.2
+    history["snapshots"]["2026-08-26"]["prices"]["acme/promo-gone"][3] = 0.3
+    diff = gh.build_diff(catalog, history)
+    texts = gh.fallback_texts(diff)
+    prices = texts["prices"]
+    assert "`acme/cheaper` 2.0 -> 1.0" in prices
+    assert "`acme/pricier` rose 2.0 -> 3.0" in prices
+    assert "discount appeared for `acme/promo-new`" in prices
+    assert "discount ended for `acme/promo-gone`" in prices
+    assert prices.startswith("Blended price moves: ") and prices.endswith(".")
+    assert prices.count("`acme/pricier`") == 1
+    # Other sections keep their shape.
+    assert texts["intelligence"] == "No AA intelligence changes this week."
+    assert texts["week"].startswith("This week: ")
+
+
+def test_fallback_prices_rise_only_week_is_not_reported_as_quiet():
+    catalog = make_aa_catalog({"acme/pricier": (70.0, 3.0)})
+    history = make_aa_history({"acme/pricier": (70.0, 2.0)})
+    diff = gh.build_diff(catalog, history)
+    prices = gh.fallback_texts(diff)["prices"]
+    assert prices != "No notable price moves this week."
+    assert prices == "Blended price moves: `acme/pricier` rose 2.0 -> 3.0."
+
+
+def test_fallback_prices_ended_discount_only_week_is_not_reported_as_quiet():
+    catalog = make_aa_catalog({"acme/promo-gone": (70.0, 1.5)})
+    history = make_aa_history({"acme/promo-gone": (70.0, 1.5)})
+    history["snapshots"]["2026-08-26"]["prices"]["acme/promo-gone"][3] = 0.3
+    diff = gh.build_diff(catalog, history)
+    prices = gh.fallback_texts(diff)["prices"]
+    assert prices == "Blended price moves: discount ended for `acme/promo-gone`."
+
+
 # ---------------------------------------------------------------------------
 # LLM client + reuse rule
 # ---------------------------------------------------------------------------
@@ -620,6 +672,30 @@ def test_main_rejects_non_numeric_catalog_scores(tmp_path, capsys):
         == 1
     )
     assert "error:" in capsys.readouterr().err
+
+
+def test_main_rejects_non_iso_catalog_generated_at(tmp_path, capsys):
+    catalog = make_diff_catalog()
+    catalog["generated_at"] = "not-a-date"
+    f = tmp_path / "catalog.json"
+    f.write_text(json.dumps(catalog))
+    out = tmp_path / "out.json"
+    code = gh.main(
+        [
+            "--catalog",
+            str(f),
+            "--history",
+            str(_write_empty_history(tmp_path)),
+            "--prev-highlights",
+            str(tmp_path / "absent.json"),
+            "--output",
+            str(out),
+        ]
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error: invalid catalog:" in err and "generated_at" in err
+    assert not out.exists()
 
 
 def _write_catalog(tmp_path):

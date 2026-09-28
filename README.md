@@ -22,7 +22,8 @@ $ ./model_compare.py --priority price --top 3
 expects, e.g. `openrouter/z-ai/glm-5.3-flash` (`openrouter/` comes from a
 single constant in the script, so other providers can be supported later).
 The `--json` output carries both forms: `model` (catalog id) and
-`opencode_model` (qualified id).
+`opencode_model` (qualified id), plus `discount_pct`, the `DISC` column's
+display string (e.g. `25%` or `--`).
 
 No dependencies beyond Python 3.10+ (stdlib only). Exit codes: `0` success,
 `1` fetch failure, `2` no candidates survive the filters.
