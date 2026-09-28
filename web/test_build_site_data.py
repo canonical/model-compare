@@ -314,6 +314,12 @@ def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
         lambda doc: doc["models"][0]["pricing"].pop("blended_per_1m"),
         lambda doc: doc["models"][0].update(discount="0.5"),
         lambda doc: doc["models"][0].update(context="2m"),
+        # build_snapshot/merge_history slice and parse generated_at, so a
+        # malformed stamp must fail validation, not crash as a traceback
+        lambda doc: doc.pop("generated_at"),
+        lambda doc: doc.update(generated_at=None),
+        lambda doc: doc.update(generated_at=""),
+        lambda doc: doc.update(generated_at="not-a-date"),
     ],
 )
 def test_validate_catalog_rejects(mutate):

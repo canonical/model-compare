@@ -392,6 +392,14 @@ def _validate_catalog_for_diff(catalog) -> None:
     generated_at = catalog.get("generated_at")
     if not isinstance(generated_at, str) or not generated_at:
         raise ValueError("catalog generated_at must be a non-empty string")
+    # build_diff parses generated_at[:10]; an unparseable stamp would
+    # otherwise escape main's error handling as a raw traceback.
+    try:
+        datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"catalog generated_at is not ISO-8601: {generated_at!r}"
+        ) from None
     for key in ("models", "filtered"):
         if not isinstance(catalog.get(key), list):
             raise ValueError(f"catalog {key} must be a list")

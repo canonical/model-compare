@@ -674,6 +674,30 @@ def test_main_rejects_non_numeric_catalog_scores(tmp_path, capsys):
     assert "error:" in capsys.readouterr().err
 
 
+def test_main_rejects_non_iso_catalog_generated_at(tmp_path, capsys):
+    catalog = make_diff_catalog()
+    catalog["generated_at"] = "not-a-date"
+    f = tmp_path / "catalog.json"
+    f.write_text(json.dumps(catalog))
+    out = tmp_path / "out.json"
+    code = gh.main(
+        [
+            "--catalog",
+            str(f),
+            "--history",
+            str(_write_empty_history(tmp_path)),
+            "--prev-highlights",
+            str(tmp_path / "absent.json"),
+            "--output",
+            str(out),
+        ]
+    )
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "error: invalid catalog:" in err and "generated_at" in err
+    assert not out.exists()
+
+
 def _write_catalog(tmp_path):
     f = tmp_path / "catalog.json"
     f.write_text(json.dumps(make_diff_catalog()))

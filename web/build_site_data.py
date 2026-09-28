@@ -104,6 +104,19 @@ def validate_catalog(document) -> None:
     for key in ("generated_at", "parameters", "sources", "pool", "models", "filtered"):
         if key not in document:
             raise ValueError(f"catalog missing key: {key}")
+    # build_snapshot/merge_history slice and parse this stamp; reject a
+    # malformed one here instead of crashing (or keying history) downstream.
+    generated_at = document["generated_at"]
+    if not isinstance(generated_at, str) or not generated_at:
+        raise ValueError(
+            f"catalog generated_at must be an ISO-8601 string: {generated_at!r}"
+        )
+    try:
+        datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError(
+            f"catalog generated_at is not ISO-8601: {generated_at!r}"
+        ) from None
     parameters = document["parameters"]
     if not isinstance(parameters, dict) or "zdr_required" not in parameters:
         raise ValueError("catalog parameters must set zdr_required")
