@@ -1,6 +1,7 @@
 """Tests for build_site_data.py -- the data.json builder for the published site."""
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 
@@ -803,3 +804,47 @@ def test_main_writes_discount_pct_into_data_json(tmp_path):
     written = json.loads(out.read_text())
     for name in bsd.PRIORITIES:
         assert written["priorities"][name][0]["discount_pct"] == "--"
+
+
+def test_build_data_uses_explicit_generated_at_verbatim():
+    stamp = "2026-09-15T23:59:50+00:00"
+    data = bsd.build_data("acme/model-a", make_priorities(), generated_at=stamp)
+    assert data["generated_at"] == stamp
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "yesterday", 20260915, ["2026-09-15T00:00:00+00:00"]]
+)
+def test_build_data_rejects_malformed_generated_at(bad):
+    with pytest.raises(ValueError, match="generated_at"):
+        bsd.build_data("acme/model-a", make_priorities(), generated_at=bad)
+
+
+def test_main_rejects_catalog_with_malformed_generated_at(tmp_path, capsys):
+    catalog = make_catalog()
+    catalog["generated_at"] = "not-a-date"
+    catalog_file = tmp_path / "catalog.json"
+    catalog_file.write_text(json.dumps(catalog))
+    argv, out = catalog_argv(tmp_path, catalog_file)
+    assert bsd.main(argv) == 1
+    assert "generated_at" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_build_data_defaults_generated_at_to_now():
+    now = datetime(2026, 9, 16, 0, 0, 5, tzinfo=timezone.utc)
+    data = bsd.build_data("acme/model-a", make_priorities(), now=now)
+    assert data["generated_at"] == "2026-09-16T00:00:05+00:00"
+
+
+def test_main_stamps_data_json_with_catalog_generated_at(tmp_path):
+    # Catalog made just before UTC midnight, data.json built just after: the
+    # site's D-7 baseline must use the catalog date that keys the history.
+    catalog = make_catalog()
+    catalog["generated_at"] = "2026-09-15T23:59:50+00:00"
+    catalog_file = tmp_path / "catalog.json"
+    catalog_file.write_text(json.dumps(catalog))
+    argv, out = catalog_argv(tmp_path, catalog_file)
+    assert bsd.main(argv) == 0
+    written = json.loads(out.read_text())
+    assert written["generated_at"] == "2026-09-15T23:59:50+00:00"

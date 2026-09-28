@@ -475,10 +475,29 @@ def validate_highlights(document) -> None:
             raise ValueError(f"highlights section {key} must be a non-empty string")
 
 
-def build_data(best, priorities, now=None) -> dict:
+def build_data(best, priorities, now=None, generated_at=None) -> dict:
+    """Validate the rows and wrap them into the data.json document.
+
+    generated_at, when given, is used verbatim (main passes the catalog's
+    timestamp so the site's 7-day baseline and the history snapshot keys
+    share one date); otherwise the document is stamped with now/wall-clock.
+    """
     if not isinstance(best, str) or not MODEL_ID_RE.fullmatch(best.strip()):
         raise ValueError(f"best model id looks wrong: {best!r}")
     best = best.strip()
+    if generated_at is not None:
+        if not isinstance(generated_at, str) or not generated_at:
+            raise ValueError(
+                f"generated_at must be an ISO-8601 string: {generated_at!r}"
+            )
+        try:
+            datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+        except ValueError:
+            raise ValueError(
+                f"generated_at is not ISO-8601: {generated_at!r}"
+            ) from None
+    else:
+        generated_at = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     for name in PRIORITIES:
         rows = priorities.get(name)
         if not isinstance(rows, list) or not rows:
@@ -490,9 +509,7 @@ def build_data(best, priorities, now=None) -> dict:
             if missing:
                 raise ValueError(f"{name}[{i}] is missing keys: {', '.join(missing)}")
     return {
-        "generated_at": (now or datetime.now(timezone.utc)).isoformat(
-            timespec="seconds"
-        ),
+        "generated_at": generated_at,
         "best": best,
         "priorities": {name: list(priorities[name]) for name in PRIORITIES},
     }
@@ -566,7 +583,11 @@ def main(argv=None) -> int:
                     f"duplicate --priority {name!r} (want each priority once)"
                 )
             priorities[name] = rows
-        data = build_data(best, priorities)
+        data = build_data(
+            best,
+            priorities,
+            generated_at=catalog["generated_at"] if catalog is not None else None,
+        )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
