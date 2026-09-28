@@ -1529,6 +1529,109 @@ def test_catalog_filtered_entries_and_sorting():
     ]
 
 
+def inverting_pool():
+    """Three candidates whose order inverts between the price and quality
+    priorities: a cheap low-quality model, an expensive high-quality one,
+    and a middle one. catalog_pool() cannot catch a wrong-weight-vector bug
+    because one of its two models dominates every priority."""
+    args = make_args(min_context=0)
+    models = [
+        make_model(
+            id="acme/cheap",
+            name="Cheap",
+            pricing={"prompt": "0.0000001", "completion": "0.0000002"},
+        ),
+        make_model(
+            id="acme/pricey",
+            name="Pricey",
+            pricing={"prompt": "0.00001", "completion": "0.00004"},
+        ),
+        make_model(
+            id="acme/middle",
+            name="Middle",
+            pricing={"prompt": "0.000001", "completion": "0.000003"},
+        ),
+    ]
+    zdr = {m["id"] for m in models}
+    quality_by_id = {"acme/cheap": 20.0, "acme/pricey": 69.0, "acme/middle": 45.0}
+    return args, models, zdr, quality_by_id
+
+
+def _cli_order(priority):
+    args, models, zdr, quality_by_id = inverting_pool()
+    args.priority = priority
+    candidates, _ = mc.build_candidates(models, args, {}, zdr, [])
+    mc.compute_scores(candidates, args, quality_by_id)
+    return [c["id"] for c in candidates]
+
+
+def _inverting_catalog():
+    args, models, zdr, quality_by_id = inverting_pool()
+    filtered = []
+    candidates, dropped = mc.build_candidates(models, args, {}, zdr, filtered)
+    mc.compute_scores(candidates, args, quality_by_id)
+    return mc.build_catalog(
+        args, models, candidates, dropped, filtered, {}, quality_by_id, None, {}, {}
+    )
+
+
+def test_catalog_rankings_match_compute_scores_per_priority():
+    # Single-key fence: the catalog ranking for P is exactly the order a
+    # `--priority P` CLI run produces on the same data.
+    doc = _inverting_catalog()
+    assert set(doc["rankings"]) == set(mc.PRIORITY_WEIGHTS)
+    orders = {p: _cli_order(p) for p in mc.PRIORITY_WEIGHTS}
+    # the fixture must actually invert, or a wrong weight vector could pass
+    assert orders["price"][0] == "acme/cheap"
+    assert orders["quality"][0] == "acme/pricey"
+    assert orders["price"] != orders["quality"]
+    for priority in mc.PRIORITY_WEIGHTS:
+        assert doc["rankings"][priority] == orders[priority], priority
+
+
+def test_catalog_rankings_are_full_permutations_of_models():
+    doc = build_doc()
+    ids = {e["id"] for e in doc["models"]}
+    for ranking in doc["rankings"].values():
+        assert len(ranking) == len(doc["models"])
+        assert set(ranking) == ids
+
+
+def test_catalog_rankings_builder_is_pure():
+    args, models, zdr, quality_by_id = inverting_pool()
+    candidates, _ = mc.build_candidates(models, args, {}, zdr, [])
+    mc.compute_scores(candidates, args, quality_by_id)
+    weights = mc.catalog_weights(candidates, quality_by_id)
+    before = json.dumps(candidates, sort_keys=True)
+    order_before = [c["id"] for c in candidates]
+    rankings = mc.catalog_rankings(candidates, weights)
+    assert json.dumps(candidates, sort_keys=True) == before
+    assert [c["id"] for c in candidates] == order_before
+    assert rankings["balanced"] == order_before  # compute_scores ran balanced
+
+
+def test_ranking_key_breaks_ties_like_the_cli():
+    a = {"id": "b/x", "quality": 50.0, "blended": 1.0}
+    b = {"id": "a/x", "quality": 50.0, "blended": 1.0}
+    c = {"id": "c/x", "quality": None, "blended": 0.5}
+    d = {"id": "d/x", "quality": 50.0, "blended": 0.5}
+    ordered = sorted([a, b, c, d], key=lambda cand: mc.ranking_key(0.5, cand))
+    assert [x["id"] for x in ordered] == ["d/x", "a/x", "b/x", "c/x"]
+
+
+def test_weighted_score_operand_order():
+    cand = {
+        "quality_score": 0.1,
+        "price_score": 0.2,
+        "context_score": 0.3,
+        "age_score": 0.7,
+    }
+    w = {"quality": 0.3, "price": 0.3, "context": 0.2, "age": 0.2}
+    expected = 0.3 * 0.1 + 0.3 * 0.2 + 0.2 * 0.3 + 0.2 * 0.7
+    assert mc.weighted_score(cand, w) == expected  # exact, not approx
+    assert mc.weighted_score(cand, {"price": 1.0}) == 1.0 * 0.2
+
+
 def test_catalog_deterministic_modulo_generated_at():
     doc1 = build_doc()
     doc2 = build_doc()
