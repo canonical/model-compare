@@ -126,6 +126,15 @@ def test_order_rows_rejects_drift_naming_missing_and_extra_ids():
     assert "acme/x" in message  # in rows but not in the ranking's top-2
 
 
+def test_order_rows_names_duplicated_ids():
+    # [a, b, a] vs top-3 [a, b, c] used to report "missing: [c], extra: []",
+    # hiding the real problem: the duplicate.
+    rows = _rows("acme/b", "acme/a", "acme/b", "acme/a")
+    with pytest.raises(ValueError) as exc:
+        bsd.order_rows(rows, ["acme/a", "acme/b", "acme/c", "acme/d"])
+    assert "rows contain duplicate model ids: ['acme/a', 'acme/b']" in str(exc.value)
+
+
 @pytest.mark.parametrize(
     "rows,ranking",
     [

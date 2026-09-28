@@ -526,12 +526,17 @@ def order_rows(rows, ranking) -> list:
     the `--priority P --json` and `--catalog` invocations must have ranked
     the same models. Falling back to the CLI order would silently bring back
     the table-vs-history divergence the single ranking exists to remove.
+    Duplicated row ids get their own message (unreachable via print_json,
+    which cannot emit duplicates; diagnostic hardening for hand-made rows).
     """
     ids = [row.get("model") for row in rows]
     if not all(isinstance(model_id, str) for model_id in ids):
         raise ValueError("row model ids must be strings")
+    dupes = sorted({model_id for model_id in ids if ids.count(model_id) > 1})
+    if dupes:
+        raise ValueError(f"rows contain duplicate model ids: {dupes}")
     top = ranking[: len(rows)]
-    if set(ids) != set(top) or len(ids) != len(top) or len(set(ids)) != len(ids):
+    if set(ids) != set(top) or len(ids) != len(top):
         missing = sorted(set(top) - set(ids))
         extra = sorted(set(ids) - set(top))
         raise ValueError(
