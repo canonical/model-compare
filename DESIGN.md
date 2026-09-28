@@ -167,6 +167,13 @@ ignored with `--catalog` (the document always covers the full pool, sorted by
 the balanced overall score); `--catalog` cannot be combined with `--best` or
 `--json`.
 
+On the published site the catalog is the ranking and timestamping authority:
+the `data.json` table rows, the `history.json` tabs and the 7-day highlights
+baseline are all projections of the one catalog built per run, ranked with
+the same overall/quality/blended/id tiebreak. `data.json` is stamped with the
+catalog's `generated_at` (as is the newest `history.json` snapshot), and
+`web/publish.py` fails the run when the deployed artifacts' stamps disagree.
+
 ## Tests
 
 A `pytest` suite covers the ranking logic (`test_model_compare.py` — input

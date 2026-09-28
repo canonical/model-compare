@@ -854,3 +854,101 @@ def test_main_stamps_data_json_with_catalog_generated_at(tmp_path):
     assert bsd.main(argv) == 0
     written = json.loads(out.read_text())
     assert written["generated_at"] == "2026-09-15T23:59:50+00:00"
+
+
+# ---------------------------------------------------------------------------
+# cross-artifact invariant: one catalog drives table, history and stamps
+# ---------------------------------------------------------------------------
+
+
+def _invariant_catalog():
+    """Five models whose overall ties exercise every tiebreak level.
+
+    Values are short decimals, so the unrounded and 4dp-rounded orderings
+    agree by construction; this fence pins plumbing, not rounding.
+    """
+    spec = [
+        # id, (balanced, price, quality) overall, quality, blended
+        ("acme/a", (0.80, 0.70, 0.90), 60.0, 2.0),
+        ("acme/b", (0.80, 0.90, 0.60), 50.0, 1.0),
+        ("acme/c", (0.70, 0.90, 0.60), 50.0, 0.5),
+        ("acme/d", (0.70, 0.60, 0.90), None, 1.0),
+        ("acme/e", (0.70, 0.60, 0.90), None, 1.0),
+    ]
+    models = []
+    for model_id, (bal, price, qual), quality, blended in spec:
+        entry = make_catalog_entry(id=model_id, quality=quality)
+        entry["pricing"] = {
+            "input_per_1m": blended,
+            "output_per_1m": blended,
+            "blended_per_1m": blended,
+        }
+        entry["scores"]["overall"] = {"balanced": bal, "price": price, "quality": qual}
+        if quality is None:
+            entry["aa"] = {
+                "intelligence_index": None,
+                "coding_index": None,
+                "agentic_index": None,
+            }
+            entry["quality_match"] = None
+        models.append(entry)
+    doc = make_catalog()
+    doc["models"] = models
+    doc["pool"] = {"listed": 6, "candidates": 5, "dropped": {"context": 1}}
+    doc["sources"]["aa"] = {"mode": "openrouter", "matched": 3, "matched_openrouter": 3}
+    bsd.validate_catalog(doc)
+    return doc
+
+
+def test_table_and_history_rank_from_one_catalog():
+    """Regression fence for F1/F4: data.json rows and history tabs converge.
+
+    The key below deliberately mirrors model_compare.py's compute_scores
+    sort and build_snapshot's key -- drift in either fails here first.
+    """
+    catalog = _invariant_catalog()
+
+    def cli_key(e):
+        return (
+            -e["scores"]["overall"][priority],
+            -(e["quality"] or 0.0),
+            e["pricing"]["blended_per_1m"],
+            e["id"],
+        )
+
+    expected = {}
+    rows = {}
+    for priority in ("balanced", "price", "quality"):
+        ranked = sorted(catalog["models"], key=cli_key)
+        expected[priority] = [e["id"] for e in ranked]
+        rows[priority] = [
+            make_row(
+                model=e["id"],
+                opencode_model=f"openrouter/{e['id']}",
+                score=e["scores"]["overall"][priority],
+                quality_index=e["quality"],
+                blended_usd_per_m=e["pricing"]["blended_per_1m"],
+            )
+            for e in ranked
+        ]
+    # Hand-pinned so the fixture keeps exercising the overall, quality,
+    # blended and id tiebreaks (a key regression cannot hide in both).
+    assert expected == {
+        "balanced": ["acme/a", "acme/b", "acme/c", "acme/d", "acme/e"],
+        "price": ["acme/c", "acme/b", "acme/a", "acme/d", "acme/e"],
+        "quality": ["acme/a", "acme/d", "acme/e", "acme/c", "acme/b"],
+    }
+
+    # Mirror main: rows verbatim, data.json stamped from the catalog.
+    data = bsd.build_data(
+        "openrouter/acme/a", rows, generated_at=catalog["generated_at"]
+    )
+    history = bsd.merge_history(None, bsd.build_snapshot(catalog))
+    bsd.validate_history(history)
+    (tabs,) = [snap["tabs"] for snap in history["snapshots"].values()]
+
+    for priority in ("balanced", "price", "quality"):
+        table = [row["model"] for row in data["priorities"][priority]]
+        tab = [row["id"] for row in tabs[priority]]
+        assert table == tab == expected[priority], priority
+    assert data["generated_at"] == history["updated_at"] == catalog["generated_at"]
