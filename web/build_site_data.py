@@ -321,14 +321,22 @@ def build_snapshot(catalog) -> dict:
     """Project a validated catalog document into one daily history snapshot.
 
     tabs derive from the catalog itself: per priority, models sorted by
-    scores.overall descending (id tiebreak), top 10, rank 1-based. aa and
-    prices cover candidates only -- filtered entries carry neither.
+    scores.overall descending, then quality desc, blended asc, id asc --
+    the same tiebreak model_compare.py uses for the data.json rows the site
+    compares ranks against. Top 10, rank 1-based. aa and prices cover
+    candidates only -- filtered entries carry neither.
     """
     models = catalog["models"]
     tabs = {}
     for priority in CATALOG_OVERALL_KEYS:
         ranked = sorted(
-            models, key=lambda e: (-e["scores"]["overall"][priority], e["id"])
+            models,
+            key=lambda e: (
+                -e["scores"]["overall"][priority],
+                -(e["quality"] or 0.0),
+                e["pricing"]["blended_per_1m"],
+                e["id"],
+            ),
         )
         tabs[priority] = [
             {

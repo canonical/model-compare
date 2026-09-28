@@ -430,6 +430,53 @@ def test_build_snapshot_ranks_per_priority_top10():
         assert [row["rank"] for row in snap["tabs"][priority]] == list(range(1, 11))
 
 
+def test_build_snapshot_ties_break_like_the_cli_table():
+    # Tied overall scores must rank as model_compare.py orders data.json rows
+    # (quality desc, blended asc, id asc), or the site shows false arrows.
+    tied = {"balanced": 0.5, "price": 0.5, "quality": 0.5}
+
+    def entry(model_id, quality, blended):
+        return make_catalog_entry(
+            id=model_id,
+            quality=quality,
+            pricing={
+                "input_per_1m": 1.0,
+                "output_per_1m": 2.0,
+                "blended_per_1m": blended,
+            },
+            scores={
+                "price": 0.5,
+                "quality": 0.5,
+                "context": 0.5,
+                "age": 0.5,
+                "overall": dict(tied),
+            },
+        )
+
+    doc = make_catalog()
+    doc["models"] = [
+        entry("acme/a-low", 50.0, 1.0),
+        entry("acme/b-high", 60.0, 2.0),
+        entry("acme/e-pricey", 70.0, 3.0),
+        entry("acme/f-cheap", 70.0, 1.0),
+        entry("acme/h-unrated", None, 1.0),
+        entry("acme/g-unrated", None, 1.0),
+    ]
+    snap = bsd.build_snapshot(doc)
+    expected = [
+        "acme/f-cheap",
+        "acme/e-pricey",
+        "acme/b-high",
+        "acme/a-low",
+        "acme/g-unrated",
+        "acme/h-unrated",
+    ]
+    for priority in ("balanced", "price", "quality"):
+        rows = snap["tabs"][priority]
+        assert [row["id"] for row in rows] == expected
+        assert [row["rank"] for row in rows] == list(range(1, 7))
+
+
 def test_build_snapshot_dedupes_pool_ids():
     doc = make_catalog()
     doc["filtered"].append(
