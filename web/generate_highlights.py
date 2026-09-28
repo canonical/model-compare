@@ -112,18 +112,32 @@ def build_diff(catalog, history) -> dict:
     new_pool = sorted(now_pool - prev_pool)
 
     tabs = {}
+    rankings = catalog.get("rankings")
+    by_id = {
+        entry["id"]: entry
+        for entry in catalog["models"]
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
     for key in DIFF_PRIORITY_KEYS:
         prev_ranks = _prev_ranks(baseline.get("tabs"), key)
-        ranked = sorted(
-            (
-                entry
-                for entry in catalog["models"]
-                if isinstance(entry, dict)
-                and isinstance(entry.get("id"), str)
-                and _overall_score(entry, key) is not None
-            ),
-            key=lambda e: (-e["scores"]["overall"][key], e["id"]),
-        )[:10]
+        if rankings is not None:
+            # The catalog's single ranking authority -- the same order the
+            # history tabs we diff against were projected from. Re-sorting on
+            # the 4dp-rounded overall would report movement that never
+            # happened whenever two models tie after rounding.
+            ranked = [by_id[model_id] for model_id in rankings[key][:10]]
+        else:
+            # Historical catalogs predate rankings: rounded-score fallback.
+            ranked = sorted(
+                (
+                    entry
+                    for entry in catalog["models"]
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("id"), str)
+                    and _overall_score(entry, key) is not None
+                ),
+                key=lambda e: (-e["scores"]["overall"][key], e["id"]),
+            )[:10]
         entries = []
         new_ids = []
         for i, entry in enumerate(ranked, start=1):
@@ -435,6 +449,32 @@ def _validate_catalog_for_diff(catalog) -> None:
                 f"catalog model {entry['id']} aa.intelligence_index must be a "
                 "number or null"
             )
+    # Tolerant reader: historical catalogs predate rankings, so absence is
+    # fine (build_diff falls back to the rounded sort). A present-but-broken
+    # ranking authority must never be silently ignored, though.
+    if "rankings" in catalog:
+        rankings = catalog["rankings"]
+        if not isinstance(rankings, dict) or any(
+            key not in rankings for key in DIFF_PRIORITY_KEYS
+        ):
+            raise ValueError(
+                "catalog rankings must be an object covering: "
+                + ", ".join(DIFF_PRIORITY_KEYS)
+            )
+        model_ids = {entry["id"] for entry in catalog["models"]}
+        for key in DIFF_PRIORITY_KEYS:
+            ranking = rankings[key]
+            if not isinstance(ranking, list) or not all(
+                isinstance(model_id, str) for model_id in ranking
+            ):
+                raise ValueError(f"catalog rankings.{key} must be a list of id strings")
+            if len(set(ranking)) != len(ranking):
+                raise ValueError(f"catalog rankings.{key} contains duplicate ids")
+            unknown = sorted(set(ranking) - model_ids)
+            if unknown:
+                raise ValueError(
+                    f"catalog rankings.{key} names ids not in models: {unknown}"
+                )
 
 
 def main(argv=None) -> int:

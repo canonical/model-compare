@@ -704,6 +704,108 @@ def _write_catalog(tmp_path):
     return f
 
 
+def _tied_ranked_catalog():
+    """model-a and model-b tie on the rounded scores.overall, and the
+    catalog's rankings (the unrounded CLI order) put model-b first -- the
+    opposite of the naive (-overall, id) re-sort."""
+    catalog = make_diff_catalog()
+    for entry in catalog["models"]:
+        if entry["id"] in ("acme/model-a", "acme/model-b"):
+            entry["scores"]["overall"] = {"balanced": 0.6, "price": 0.6, "quality": 0.6}
+    catalog["rankings"] = {
+        key: ["acme/model-b", "acme/model-a", "acme/fresh"]
+        for key in gh.DIFF_PRIORITY_KEYS
+    }
+    return catalog
+
+
+def test_build_diff_projects_catalog_rankings_not_a_rounded_sort():
+    catalog = _tied_ranked_catalog()
+    gh._validate_catalog_for_diff(catalog)  # well-formed rankings pass
+    # last week's tabs were projected from the same rankings: no movement
+    tab = [
+        {"id": "acme/model-b", "rank": 1, "quality": 68.4, "blended": 2.5},
+        {"id": "acme/model-a", "rank": 2, "quality": 55.0, "blended": 1.25},
+    ]
+    history = make_diff_history(tabs={"balanced": tab, "price": tab, "quality": tab})
+    diff = gh.build_diff(catalog, history)
+    for key in gh.DIFF_PRIORITY_KEYS:
+        entries = diff["tabs"][key]["entries"]
+        assert [e["id"] for e in entries] == catalog["rankings"][key], key
+        assert [e["delta"] for e in entries] == [0, 0, None], key
+        assert diff["tabs"][key]["new_ids"] == ["acme/fresh"]
+
+
+def test_build_diff_slices_rankings_to_ten():
+    catalog = make_diff_catalog()
+    template = catalog["models"][0]
+    catalog["models"] = [
+        {**template, "id": f"acme/m{i:02d}", "aa": dict(template["aa"])}
+        for i in range(12)
+    ]
+    ids = [e["id"] for e in catalog["models"]]
+    catalog["rankings"] = {key: list(reversed(ids)) for key in gh.DIFF_PRIORITY_KEYS}
+    diff = gh.build_diff(catalog, make_diff_history())
+    for key in gh.DIFF_PRIORITY_KEYS:
+        entries = diff["tabs"][key]["entries"]
+        assert [e["id"] for e in entries] == list(reversed(ids))[:10]
+        assert [e["rank"] for e in entries] == list(range(1, 11))
+
+
+@pytest.mark.parametrize(
+    "rankings",
+    [
+        pytest.param(["acme/model-a"], id="not-dict"),
+        pytest.param(
+            {"balanced": "acme/model-a", "price": [], "quality": []}, id="not-list"
+        ),
+        pytest.param({"balanced": [7], "price": [], "quality": []}, id="non-string"),
+        pytest.param(
+            {"balanced": ["acme/unknown"], "price": [], "quality": []}, id="unknown"
+        ),
+        pytest.param({"balanced": ["acme/model-a"], "price": []}, id="missing-key"),
+        pytest.param(
+            {"balanced": ["acme/model-a"] * 2, "price": [], "quality": []},
+            id="duplicate",
+        ),
+    ],
+)
+def test_validate_catalog_for_diff_rejects_malformed_rankings(rankings):
+    catalog = make_diff_catalog()
+    catalog["rankings"] = rankings
+    with pytest.raises(ValueError, match="rankings"):
+        gh._validate_catalog_for_diff(catalog)
+
+
+def test_validate_catalog_for_diff_tolerates_absent_rankings():
+    catalog = make_diff_catalog()
+    assert "rankings" not in catalog  # historical catalogs predate the field
+    gh._validate_catalog_for_diff(catalog)  # must not raise
+
+
+def test_main_rejects_malformed_catalog_rankings(tmp_path, capsys):
+    catalog = make_diff_catalog()
+    catalog["rankings"] = {key: ["acme/unknown"] for key in gh.DIFF_PRIORITY_KEYS}
+    f = tmp_path / "catalog.json"
+    f.write_text(json.dumps(catalog))
+    out = tmp_path / "out.json"
+    code = gh.main(
+        [
+            "--catalog",
+            str(f),
+            "--history",
+            str(_write_empty_history(tmp_path)),
+            "--prev-highlights",
+            str(tmp_path / "absent.json"),
+            "--output",
+            str(out),
+        ]
+    )
+    assert code == 1
+    assert "error: invalid catalog:" in capsys.readouterr().err
+    assert not out.exists()
+
+
 def _write_empty_history(tmp_path):
     f = tmp_path / "history.json"
     f.write_text(json.dumps({"snapshots": {}}))
