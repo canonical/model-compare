@@ -6,7 +6,8 @@ Runs the standalone model_compare.py, then the web-side generators
 directory: data.json, catalog.json, history.json, highlights.json, best.txt
 and index.html. Fails loudly on any unexpected result -- including
 data.json/history.json stamps that disagree with catalog.json's
-generated_at -- so a broken run never deploys a broken site.
+generated_at, or a best.txt that is not catalog.json's balanced rank 1 --
+so a broken run never deploys a broken site.
 """
 
 from __future__ import annotations
@@ -77,15 +78,16 @@ def _load_artifact(path: Path, required: tuple[str, ...]) -> dict:
     return doc
 
 
-def check_stamps(output_dir: Path) -> None:
+def check_stamps(output_dir: Path) -> dict:
     """Fail unless data.json and history.json carry the catalog's generated_at.
 
     The catalog is the single clock: build_site_data stamps data.json from
     it and merge_history sets updated_at to the newest snapshot's stamp,
     which is today's catalog. highlights.json is deliberately excluded --
     its generated_at is its own writing time (the 24h LLM-reuse window).
+    Returns the loaded catalog (which must carry rankings) for check_best.
     """
-    catalog = _load_artifact(output_dir / "catalog.json", ("generated_at",))
+    catalog = _load_artifact(output_dir / "catalog.json", ("generated_at", "rankings"))
     data = _load_artifact(output_dir / "data.json", ("generated_at",))
     history = _load_artifact(output_dir / "history.json", ("updated_at", "snapshots"))
     stamp = catalog["generated_at"]
@@ -95,6 +97,38 @@ def check_stamps(output_dir: Path) -> None:
             f"catalog={stamp!r} data={data['generated_at']!r} "
             f"history={history['updated_at']!r}"
         )
+    return catalog
+
+
+def check_best(output_dir: Path, catalog: dict) -> None:
+    """Fail unless best.txt names the catalog's balanced rank-1 model.
+
+    `--best` is the argmax of the same ranking the catalog carries, so any
+    disagreement means the invocations saw different inputs.
+    """
+    rankings = catalog["rankings"]
+    balanced = rankings.get("balanced") if isinstance(rankings, dict) else None
+    if not isinstance(balanced, list) or not balanced:
+        raise RuntimeError(
+            "publish: catalog.json rankings.balanced is empty or missing"
+        )
+    top_id = balanced[0]
+    if not isinstance(top_id, str) or not top_id:
+        raise RuntimeError(
+            f"publish: catalog.json rankings.balanced[0] is not an id: {top_id!r}"
+        )
+    try:
+        best_clean = (output_dir / "best.txt").read_text().strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"publish: unreadable best.txt: {exc}") from exc
+    # "openrouter/" duplicates model_compare.OPENCODE_PROVIDER; publish is
+    # deliberately subprocess-only and imports nothing from it. Exact
+    # membership, never prefix stripping (openrouter/openrouter/x must fail).
+    if best_clean not in (top_id, "openrouter/" + top_id):
+        raise RuntimeError(
+            f"publish: best.txt {best_clean!r} disagrees with catalog "
+            f"rankings.balanced[0] {top_id!r}"
+        )
 
 
 def build_site(output_dir: Path) -> None:
@@ -103,6 +137,12 @@ def build_site(output_dir: Path) -> None:
         scratch = Path(tmp)
         model_compare = REPO_ROOT / "model_compare.py"
 
+        # --catalog first: it fetches OpenRouter/AA data and primes the shared
+        # caches, so later invocations very likely rank identical inputs.
+        # Not guaranteed: degraded fetches (empty discounts, no AA entries)
+        # are never cached, so a later run may fetch different data. That
+        # fails loudly (order_rows, check_best) and the next run self-heals.
+        run_script(model_compare, ["--catalog"], out=scratch / "catalog.json")
         run_script(model_compare, ["--best"], out=output_dir / "best.txt")
         for priority in PRIORITIES:
             run_script(
@@ -110,7 +150,6 @@ def build_site(output_dir: Path) -> None:
                 ["--priority", priority, "--json", "--top", "10"],
                 out=scratch / f"{priority}.json",
             )
-        run_script(model_compare, ["--catalog"], out=scratch / "catalog.json")
 
         for url, name in (
             (PREV_HISTORY_URL, "history-prev.json"),
@@ -169,7 +208,7 @@ def build_site(output_dir: Path) -> None:
         raise RuntimeError(
             f"publish: expected artifacts not written: {', '.join(missing)}"
         )
-    check_stamps(output_dir)
+    check_best(output_dir, check_stamps(output_dir))
     for name in artifacts:
         print(f"publish: wrote {output_dir / name}")
 

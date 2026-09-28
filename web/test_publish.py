@@ -37,17 +37,24 @@ class _TruncatedResp:
 
 
 STAMP = "2026-09-28T06:00:00Z"
+BEST = "openrouter/z-ai/glm-5.3-flash"
 
 
-def _write_artifacts(out_dir, overrides=None):
+def _write_artifacts(out_dir, overrides=None, best_id="z-ai/glm-5.3-flash"):
     """Write minimal valid build_site_data artifacts sharing one stamp.
 
     `overrides` maps an artifact name to replacement text (for mismatch and
-    malformed-JSON cases); these stubs only feed publish's stamp gate.
+    malformed-JSON cases); these stubs only feed publish's stamp and best
+    gates. `best_id` is the bare catalog id ranked first for balanced, so it
+    must match what the stubbed `--best` run wrote to best.txt.
     """
     docs = {
         "data.json": {"generated_at": STAMP},
-        "catalog.json": {"generated_at": STAMP, "models": []},
+        "catalog.json": {
+            "generated_at": STAMP,
+            "models": [],
+            "rankings": {"balanced": [best_id]},
+        },
         "history.json": {"updated_at": STAMP, "snapshots": {}},
         "highlights.json": {"generated_at": "2026-09-27T00:00:00Z"},
     }
@@ -56,11 +63,11 @@ def _write_artifacts(out_dir, overrides=None):
         (out_dir / name).write_text(json.dumps(doc) if text is None else text)
 
 
-def _fake_run(calls, simulate_build_site_data=True, overrides=None):
+def _fake_run(calls, simulate_build_site_data=True, overrides=None, best=BEST):
     def fake_run(cmd, cwd=None, stdout=None, check=True):
         calls.append(cmd)
         if "--best" in cmd:
-            stdout.write("openrouter/z-ai/glm-5.3-flash\n")
+            stdout.write(best + "\n")
         if simulate_build_site_data and Path(cmd[1]).name == "build_site_data.py":
             _write_artifacts(Path(cmd[cmd.index("--output") + 1]).parent, overrides)
         return subprocess.CompletedProcess(cmd, 0)
@@ -78,14 +85,16 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
 
     scripts = [Path(cmd[1]).name for cmd in calls]
     assert scripts == [
+        "model_compare.py",  # --catalog (first: primes the shared caches)
         "model_compare.py",  # --best
         "model_compare.py",  # balanced --json --top 10
         "model_compare.py",  # price --json --top 10
         "model_compare.py",  # quality --json --top 10
-        "model_compare.py",  # --catalog
         "generate_highlights.py",
         "build_site_data.py",
     ]
+    assert "--catalog" in calls[0]
+    assert "--best" in calls[1]
     best_cmd = next(cmd for cmd in calls if "--best" in cmd)
     assert not any(a == "--priority" for a in best_cmd)
     assert (
@@ -201,7 +210,7 @@ def test_fetch_success_feeds_prev_files_to_generators(tmp_path, monkeypatch):
             prev_arg = Path(cmd[cmd.index("--history-prev-file") + 1])
             # read during the call: the scratch dir is removed afterwards
             seen["history_bytes"] = prev_arg.read_bytes() if prev_arg.exists() else None
-            _write_artifacts(Path(cmd[cmd.index("--output") + 1]).parent)
+            _write_artifacts(Path(cmd[cmd.index("--output") + 1]).parent, best_id="x/y")
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(publish.subprocess, "run", fake_run)
@@ -265,6 +274,8 @@ def test_build_site_fails_on_malformed_artifact(tmp_path, monkeypatch, name):
         ("history.json", {"updated_at": STAMP}),
         ("data.json", {}),
         ("catalog.json", []),
+        # the best.txt gate reads rankings; a catalog without them is broken
+        ("catalog.json", {"generated_at": STAMP, "models": []}),
     ],
 )
 def test_build_site_fails_on_missing_stamp_fields(tmp_path, monkeypatch, name, doc):
@@ -272,6 +283,60 @@ def test_build_site_fails_on_missing_stamp_fields(tmp_path, monkeypatch, name, d
     monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=overrides))
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
     with pytest.raises(RuntimeError, match=name):
+        publish.build_site(tmp_path / "site")
+
+
+def _catalog_ranking(balanced):
+    return json.dumps(
+        {"generated_at": STAMP, "models": [], "rankings": {"balanced": balanced}}
+    )
+
+
+@pytest.mark.parametrize(
+    "best", ["z-ai/glm-5.3-flash", "openrouter/z-ai/glm-5.3-flash"]
+)
+def test_best_gate_accepts_bare_and_qualified_ids(tmp_path, monkeypatch, best):
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run([], best=best))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    publish.build_site(tmp_path / "site")  # must not raise
+
+
+@pytest.mark.parametrize(
+    "best",
+    [
+        "openrouter/acme/other",
+        # exact membership, never prefix stripping
+        "openrouter/openrouter/z-ai/glm-5.3-flash",
+        "z-ai/glm-5.3",
+    ],
+)
+def test_best_gate_rejects_mismatch_naming_both(tmp_path, monkeypatch, best):
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run([], best=best))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    with pytest.raises(RuntimeError, match="best.txt") as exc:
+        publish.build_site(tmp_path / "site")
+    assert best in str(exc.value)
+    assert "z-ai/glm-5.3-flash" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "catalog_text",
+    [
+        pytest.param(_catalog_ranking([]), id="empty"),
+        pytest.param(
+            json.dumps({"generated_at": STAMP, "rankings": {}}), id="no-balanced"
+        ),
+        pytest.param(
+            json.dumps({"generated_at": STAMP, "rankings": ["x"]}), id="not-dict"
+        ),
+        pytest.param(_catalog_ranking([7]), id="non-string-top"),
+    ],
+)
+def test_best_gate_rejects_unusable_rankings(tmp_path, monkeypatch, catalog_text):
+    overrides = {"catalog.json": catalog_text}
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=overrides))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    with pytest.raises(RuntimeError, match="rankings.balanced"):
         publish.build_site(tmp_path / "site")
 
 

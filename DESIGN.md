@@ -128,8 +128,10 @@ $ ./model_compare.py --catalog | python3 -m json.tool
 
 The document is a **stable contract** consumed by internal Canonical tooling
 (`tokens.canonical.com`), which deduplicates on content — same inputs produce
-byte-identical output apart from `generated_at` (`age_days`/`listed_at` use
-UTC date precision, so runs within a day match exactly). `schema_version`
+the same output apart from `generated_at` and the age score (`age_days`/
+`listed_at` use UTC date precision, but `scores.age` decays continuously, so
+two runs on the same day differ slightly in `scores.age` and the deduplicator
+sees new content). `schema_version`
 starts at `1`: fields may be added without notice, but renaming or removing
 one bumps the version.
 
@@ -140,7 +142,16 @@ needs nothing else), `sources` (`openrouter`, `aa` with `mode`
 `matched_openrouter` counts, `zdr` `ok`/`skipped`, `discounts`
 `ok`/`unavailable` — where `unavailable` covers both a failed discount fetch
 and a live pool with zero discounts), `pool` (`listed`, `candidates`,
-`dropped`), `models`, `filtered`.
+`dropped`), `models`, `rankings`, `filtered`.
+
+`rankings` maps each priority (`balanced`, `price`, `quality`) to the full
+ordered list of candidate ids for that priority (every `models` id exactly
+once; rank = index + 1). The order is exactly what a `--priority P` run
+prints: the unrounded weighted score, then quality descending, blended price
+ascending, id. `rankings` is an additive field, so it arrived without a
+`schema_version` bump; content-deduplicating consumers saw a one-time content
+change on the first run that emitted it. `rankings` adds no new source of
+drift; the only intra-day variance remains the decaying age score.
 
 Each `models` entry carries: `id` (bare `provider/model`), `name`,
 `provider`, `family` (heuristic: leading token of the slug, e.g. `glm-5.3`
@@ -167,12 +178,23 @@ ignored with `--catalog` (the document always covers the full pool, sorted by
 the balanced overall score); `--catalog` cannot be combined with `--best` or
 `--json`.
 
-On the published site the catalog is the ranking and timestamping authority:
-the `data.json` table rows, the `history.json` tabs and the 7-day highlights
-baseline are all projections of the one catalog built per run, ranked with
-the same overall/quality/blended/id tiebreak. `data.json` is stamped with the
-catalog's `generated_at` (as is the newest `history.json` snapshot), and
-`web/publish.py` fails the run when the deployed artifacts' stamps disagree.
+On the published site the catalog is the ranking and timestamping authority.
+It carries the ranking itself in `rankings`, and everything else projects it
+or is checked against it: the `data.json` table rows are reordered to it (and
+the build fails if the `--json` runs ranked different models), the
+`history.json` tabs and the weekly highlights diff slice it, and
+`web/publish.py` fails the run unless `best.txt` is `rankings.balanced[0]`.
+The CLI and the catalog share one score function and one sort key in
+`model_compare.py` rather than copies of either. `web/publish.py` runs
+`--catalog` first to prime the shared caches, which makes the later
+invocations very likely to rank the same inputs. It is not a guarantee:
+degraded fetches (an empty discount map, no AA benchmark entries) are
+deliberately never cached, so a later run may fetch fresh, different data.
+The publish contract is fail-loud: such a mismatch makes `order_rows` or
+`web/publish.py` fail the run, and the next run recovers on its own.
+`data.json` is stamped with the catalog's `generated_at` (as is the
+newest `history.json` snapshot), and `web/publish.py` fails the run when the
+deployed artifacts' stamps disagree.
 
 ## Tests
 

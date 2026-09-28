@@ -106,6 +106,121 @@ def test_build_data_rejects_row_missing_keys():
         bsd.build_data("acme/model-a", priorities)
 
 
+def _rows(*ids):
+    return [make_row(model=model_id) for model_id in ids]
+
+
+def test_order_rows_reorders_to_the_ranking():
+    rows = _rows("acme/b", "acme/a", "acme/c")
+    ordered = bsd.order_rows(rows, ["acme/c", "acme/a", "acme/b", "acme/d"])
+    assert [row["model"] for row in ordered] == ["acme/c", "acme/a", "acme/b"]
+    assert [row["model"] for row in rows] == ["acme/b", "acme/a", "acme/c"]  # pure
+
+
+def test_order_rows_rejects_drift_naming_missing_and_extra_ids():
+    rows = _rows("acme/a", "acme/x")
+    with pytest.raises(ValueError) as exc:
+        bsd.order_rows(rows, ["acme/a", "acme/b", "acme/x"])
+    message = str(exc.value)
+    assert "acme/b" in message  # ranked in the top-2 but missing from rows
+    assert "acme/x" in message  # in rows but not in the ranking's top-2
+
+
+def test_order_rows_names_duplicated_ids():
+    # [a, b, a] vs top-3 [a, b, c] used to report "missing: [c], extra: []",
+    # hiding the real problem: the duplicate.
+    rows = _rows("acme/b", "acme/a", "acme/b", "acme/a")
+    with pytest.raises(ValueError) as exc:
+        bsd.order_rows(rows, ["acme/a", "acme/b", "acme/c", "acme/d"])
+    assert "rows contain duplicate model ids: ['acme/a', 'acme/b']" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "rows,ranking",
+    [
+        pytest.param(_rows("acme/a", "acme/a"), ["acme/a", "acme/b"], id="dup-row"),
+        pytest.param(
+            _rows("acme/a", "acme/b", "acme/a"), ["acme/a", "acme/b"], id="len"
+        ),
+        pytest.param([make_row(model=["acme/a"])], ["acme/a"], id="unhashable"),
+    ],
+)
+def test_order_rows_rejects_mismatched_rows(rows, ranking):
+    with pytest.raises(ValueError):
+        bsd.order_rows(rows, ranking)
+
+
+def _ranked_catalog():
+    doc = make_catalog()
+    doc["rankings"] = {
+        "balanced": ["acme/c", "acme/a", "acme/b"],
+        "price": ["acme/b", "acme/c", "acme/a"],
+        "quality": ["acme/a", "acme/b", "acme/c"],
+    }
+    return doc
+
+
+def test_build_data_orders_rows_by_catalog_rankings():
+    priorities = {p: _rows("acme/a", "acme/b", "acme/c") for p in bsd.PRIORITIES}
+    catalog = _ranked_catalog()
+    data = bsd.build_data("acme/a", priorities, catalog=catalog)
+    for priority in bsd.PRIORITIES:
+        table = [row["model"] for row in data["priorities"][priority]]
+        assert table == catalog["rankings"][priority], priority
+
+
+def test_build_data_without_catalog_keeps_rows_verbatim():
+    priorities = {p: _rows("acme/b", "acme/a") for p in bsd.PRIORITIES}
+    data = bsd.build_data("acme/a", priorities)
+    for priority in bsd.PRIORITIES:
+        assert [r["model"] for r in data["priorities"][priority]] == [
+            "acme/b",
+            "acme/a",
+        ]
+
+
+def test_build_data_rejects_rows_that_drift_from_catalog_rankings():
+    priorities = {p: _rows("acme/a", "acme/b") for p in bsd.PRIORITIES}
+    with pytest.raises(ValueError, match="acme/c"):
+        # balanced ranks acme/c in its top 2; the rows do not have it
+        bsd.build_data("acme/a", priorities, catalog=_ranked_catalog())
+
+
+def _three_model_catalog():
+    doc = make_catalog()
+    doc["models"] = [
+        make_catalog_entry(id=model_id) for model_id in ("acme/a", "acme/b", "acme/c")
+    ]
+    doc["pool"].update(listed=4, candidates=3)
+    doc["rankings"] = _ranked_catalog()["rankings"]
+    bsd.validate_catalog(doc)
+    return doc
+
+
+def test_main_orders_rows_from_catalog_file(tmp_path):
+    raw = tmp_path / "catalog-raw.json"
+    raw.write_text(json.dumps(_three_model_catalog()))
+    argv, out = catalog_argv(tmp_path, raw)
+    rows = tmp_path / "rows.json"
+    rows.write_text(json.dumps(_rows("acme/a", "acme/b", "acme/c")))
+    assert bsd.main(argv) == 0
+    data = json.loads(out.read_text())
+    for priority in bsd.PRIORITIES:
+        table = [row["model"] for row in data["priorities"][priority]]
+        assert table == _ranked_catalog()["rankings"][priority], priority
+
+
+def test_main_fails_when_rows_drift_from_catalog_file(tmp_path, capsys):
+    raw = tmp_path / "catalog-raw.json"
+    raw.write_text(json.dumps(_three_model_catalog()))
+    argv, out = catalog_argv(tmp_path, raw)
+    rows = tmp_path / "rows.json"
+    rows.write_text(json.dumps(_rows("acme/a", "acme/b")))
+    assert bsd.main(argv) == 1
+    assert "acme/c" in capsys.readouterr().err
+    assert not out.exists()
+
+
 def test_main_end_to_end(tmp_path):
     best_file = tmp_path / "best.txt"
     best_file.write_text("openrouter/z-ai/glm-5.3-flash\n")
@@ -230,8 +345,16 @@ def make_catalog():
         },
         "pool": {"listed": 2, "candidates": 1, "dropped": {"context": 1}},
         "models": [make_catalog_entry()],
+        "rankings": {p: ["acme/model-a"] for p in ("balanced", "price", "quality")},
         "filtered": [{"id": "acme/small", "name": "Small", "reasons": ["context"]}],
     }
+
+
+def rank_models(doc):
+    """Give doc a valid rankings object: every priority in models order."""
+    ids = [e["id"] for e in doc["models"]]
+    doc["rankings"] = {p: list(ids) for p in ("balanced", "price", "quality")}
+    return doc
 
 
 def catalog_argv(tmp_path, catalog_file=None):
@@ -327,6 +450,60 @@ def test_validate_catalog_rejects(mutate):
     mutate(doc)
     with pytest.raises(ValueError):
         bsd.validate_catalog(doc)
+
+
+def _add_second_model(doc):
+    doc["models"].append(make_catalog_entry(id="acme/model-b"))
+    doc["pool"].update(listed=3, candidates=2)
+    return doc
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda doc: doc.pop("rankings"), id="missing"),
+        pytest.param(lambda doc: doc.update(rankings=["acme/model-a"]), id="not-dict"),
+        pytest.param(lambda doc: doc["rankings"].pop("price"), id="missing-key"),
+        pytest.param(
+            lambda doc: doc["rankings"].update(extra=["acme/model-a"]), id="extra-key"
+        ),
+        pytest.param(
+            lambda doc: doc["rankings"].update(balanced="acme/model-a"), id="not-list"
+        ),
+        pytest.param(
+            lambda doc: doc["rankings"].update(
+                balanced=["acme/model-a", "acme/model-a"]
+            ),
+            id="duplicate",
+        ),
+        pytest.param(
+            lambda doc: doc["rankings"].update(balanced=["acme/unknown"]), id="unknown"
+        ),
+        pytest.param(
+            lambda doc: _add_second_model(doc)["rankings"].update(
+                balanced=["acme/model-a"]
+            ),
+            id="wrong-length",
+        ),
+        pytest.param(lambda doc: doc["rankings"].update(balanced=[7]), id="non-string"),
+        pytest.param(lambda doc: doc["rankings"].update(balanced=[""]), id="empty-id"),
+    ],
+)
+def test_validate_catalog_rejects_bad_rankings(mutate):
+    doc = make_catalog()
+    mutate(doc)
+    with pytest.raises(ValueError, match="rankings"):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_accepts_any_permutation_per_priority():
+    doc = _add_second_model(make_catalog())
+    doc["rankings"] = {
+        "balanced": ["acme/model-a", "acme/model-b"],
+        "price": ["acme/model-b", "acme/model-a"],
+        "quality": ["acme/model-b", "acme/model-a"],
+    }
+    bsd.validate_catalog(doc)  # must not raise
 
 
 def test_main_writes_catalog_next_to_data_json(tmp_path):
@@ -447,18 +624,23 @@ def test_build_snapshot_ranks_per_priority_top10():
                 },
             )
         )
+    rank_models(doc)
+    ids = [e["id"] for e in doc["models"]]
+    doc["rankings"]["price"] = list(reversed(ids))
+    doc["rankings"]["quality"] = ids[1:] + ids[:1]
     snap = bsd.build_snapshot(doc)
     for priority in ("balanced", "price", "quality"):
         assert len(snap["tabs"][priority]) == 10
         assert [row["rank"] for row in snap["tabs"][priority]] == list(range(1, 11))
+        assert [row["id"] for row in snap["tabs"][priority]] == (
+            doc["rankings"][priority][:10]
+        )
 
 
-def test_build_snapshot_ties_break_like_the_cli_table():
-    # Tied overall scores must rank as model_compare.py orders data.json rows
-    # (quality desc, blended asc, id asc), or the site shows false arrows.
-    tied = {"balanced": 0.5, "price": 0.5, "quality": 0.5}
-
-    def entry(model_id, quality, blended):
+def test_build_snapshot_projects_rankings_not_a_sort():
+    # Authority fence: tabs follow catalog rankings even when a naive sort of
+    # models (on scores.overall or any tiebreak) would order them otherwise.
+    def entry(model_id, overall, quality, blended):
         return make_catalog_entry(
             id=model_id,
             quality=quality,
@@ -472,32 +654,32 @@ def test_build_snapshot_ties_break_like_the_cli_table():
                 "quality": 0.5,
                 "context": 0.5,
                 "age": 0.5,
-                "overall": dict(tied),
+                "overall": {"balanced": overall, "price": overall, "quality": overall},
             },
         )
 
     doc = make_catalog()
     doc["models"] = [
-        entry("acme/a-low", 50.0, 1.0),
-        entry("acme/b-high", 60.0, 2.0),
-        entry("acme/e-pricey", 70.0, 3.0),
-        entry("acme/f-cheap", 70.0, 1.0),
-        entry("acme/h-unrated", None, 1.0),
-        entry("acme/g-unrated", None, 1.0),
+        entry("acme/a-top", 0.9, 70.0, 1.0),
+        entry("acme/b-mid", 0.5, 50.0, 2.0),
+        entry("acme/c-low", 0.1, 30.0, 3.0),
     ]
+    doc["pool"].update(listed=4, candidates=3)
+    doc["rankings"] = {
+        "balanced": ["acme/c-low", "acme/a-top", "acme/b-mid"],
+        "price": ["acme/b-mid", "acme/c-low", "acme/a-top"],
+        "quality": ["acme/c-low", "acme/b-mid", "acme/a-top"],
+    }
+    bsd.validate_catalog(doc)
     snap = bsd.build_snapshot(doc)
-    expected = [
-        "acme/f-cheap",
-        "acme/e-pricey",
-        "acme/b-high",
-        "acme/a-low",
-        "acme/g-unrated",
-        "acme/h-unrated",
-    ]
+    by_id = {e["id"]: e for e in doc["models"]}
     for priority in ("balanced", "price", "quality"):
         rows = snap["tabs"][priority]
-        assert [row["id"] for row in rows] == expected
-        assert [row["rank"] for row in rows] == list(range(1, 7))
+        assert [row["id"] for row in rows] == doc["rankings"][priority]
+        assert [row["rank"] for row in rows] == [1, 2, 3]
+        for row in rows:  # attributes merged from the models entry
+            assert row["quality"] == by_id[row["id"]]["quality"]
+            assert row["blended"] == by_id[row["id"]]["pricing"]["blended_per_1m"]
 
 
 def test_build_snapshot_dedupes_pool_ids():
@@ -879,10 +1061,12 @@ def test_main_stamps_data_json_with_catalog_generated_at(tmp_path):
 
 
 def _invariant_catalog():
-    """Five models whose overall ties exercise every tiebreak level.
+    """Five models carrying the producer's rankings.
 
-    Values are short decimals, so the unrounded and 4dp-rounded orderings
-    agree by construction; this fence pins plumbing, not rounding.
+    The rankings deliberately differ from a naive re-sort of the rounded
+    scores.overall in one place: acme/d and acme/e tie after rounding, and
+    the (unrounded) producer order puts acme/e first for balanced. Anything
+    that re-sorts instead of projecting rankings fails the fence below.
     """
     spec = [
         # id, (balanced, price, quality) overall, quality, blended
@@ -913,52 +1097,45 @@ def _invariant_catalog():
     doc["models"] = models
     doc["pool"] = {"listed": 6, "candidates": 5, "dropped": {"context": 1}}
     doc["sources"]["aa"] = {"mode": "openrouter", "matched": 3, "matched_openrouter": 3}
+    doc["rankings"] = {
+        "balanced": ["acme/a", "acme/b", "acme/c", "acme/e", "acme/d"],
+        "price": ["acme/c", "acme/b", "acme/a", "acme/d", "acme/e"],
+        "quality": ["acme/a", "acme/d", "acme/e", "acme/c", "acme/b"],
+    }
     bsd.validate_catalog(doc)
     return doc
 
 
 def test_table_and_history_rank_from_one_catalog():
-    """Regression fence for F1/F4: data.json rows and history tabs converge.
+    """Projection fence: data.json rows == rankings[p][:10] == history tabs.
 
-    The key below deliberately mirrors model_compare.py's compute_scores
-    sort and build_snapshot's key -- drift in either fails here first.
+    No sort key lives in this test: the catalog's rankings are the only
+    ranking, and every artifact must be a projection of it. The rows arrive
+    in a scrambled order to prove build_data reorders rather than trusts.
     """
     catalog = _invariant_catalog()
-
-    def cli_key(e):
-        return (
-            -e["scores"]["overall"][priority],
-            -(e["quality"] or 0.0),
-            e["pricing"]["blended_per_1m"],
-            e["id"],
-        )
-
-    expected = {}
+    by_id = {e["id"]: e for e in catalog["models"]}
     rows = {}
     for priority in ("balanced", "price", "quality"):
-        ranked = sorted(catalog["models"], key=cli_key)
-        expected[priority] = [e["id"] for e in ranked]
+        # same set as the CLI's top N, deliberately out of order
+        scrambled = sorted(catalog["rankings"][priority][:10], reverse=True)
         rows[priority] = [
             make_row(
-                model=e["id"],
-                opencode_model=f"openrouter/{e['id']}",
-                score=e["scores"]["overall"][priority],
-                quality_index=e["quality"],
-                blended_usd_per_m=e["pricing"]["blended_per_1m"],
+                model=model_id,
+                opencode_model=f"openrouter/{model_id}",
+                score=by_id[model_id]["scores"]["overall"][priority],
+                quality_index=by_id[model_id]["quality"],
+                blended_usd_per_m=by_id[model_id]["pricing"]["blended_per_1m"],
             )
-            for e in ranked
+            for model_id in scrambled
         ]
-    # Hand-pinned so the fixture keeps exercising the overall, quality,
-    # blended and id tiebreaks (a key regression cannot hide in both).
-    assert expected == {
-        "balanced": ["acme/a", "acme/b", "acme/c", "acme/d", "acme/e"],
-        "price": ["acme/c", "acme/b", "acme/a", "acme/d", "acme/e"],
-        "quality": ["acme/a", "acme/d", "acme/e", "acme/c", "acme/b"],
-    }
 
-    # Mirror main: rows verbatim, data.json stamped from the catalog.
+    # Mirror main: data.json stamped from and ordered by the catalog.
     data = bsd.build_data(
-        "openrouter/acme/a", rows, generated_at=catalog["generated_at"]
+        "openrouter/acme/a",
+        rows,
+        generated_at=catalog["generated_at"],
+        catalog=catalog,
     )
     history = bsd.merge_history(None, bsd.build_snapshot(catalog))
     bsd.validate_history(history)
@@ -967,5 +1144,5 @@ def test_table_and_history_rank_from_one_catalog():
     for priority in ("balanced", "price", "quality"):
         table = [row["model"] for row in data["priorities"][priority]]
         tab = [row["id"] for row in tabs[priority]]
-        assert table == tab == expected[priority], priority
+        assert table == tab == catalog["rankings"][priority][:10], priority
     assert data["generated_at"] == history["updated_at"] == catalog["generated_at"]

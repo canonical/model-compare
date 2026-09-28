@@ -797,17 +797,43 @@ def compute_scores(candidates, args, quality_by_id):
         cand["age_score"] = (
             0.5 if age_days is None else 0.5 ** (age_days / args.recency_half_life)
         )
-        cand["score"] = (
-            weights.get("quality", 0.0) * cand["quality_score"]
-            + weights.get("price", 0.0) * cand["price_score"]
-            + weights.get("context", 0.0) * cand["context_score"]
-            + weights.get("age", 0.0) * cand["age_score"]
-        )
+        cand["score"] = weighted_score(cand, weights)
 
-    candidates.sort(
-        key=lambda c: (-c["score"], -(c["quality"] or 0.0), c["blended"], c["id"])
-    )
+    candidates.sort(key=lambda c: ranking_key(c["score"], c))
     return weights
+
+
+def weighted_score(cand, w):
+    """The one unrounded weighted score, shared by compute_scores and
+    catalog_rankings. Keep the operand order (quality, price, context, age):
+    float addition is non-associative, and a reordered sum can differ by one
+    ULP and flip a near-tie between the CLI and the catalog."""
+    return (
+        w.get("quality", 0.0) * cand["quality_score"]
+        + w.get("price", 0.0) * cand["price_score"]
+        + w.get("context", 0.0) * cand["context_score"]
+        + w.get("age", 0.0) * cand["age_score"]
+    )
+
+
+def ranking_key(score, cand):
+    """The one sort key: score desc, then raw quality desc, cheaper first, id."""
+    return (-score, -(cand["quality"] or 0.0), cand["blended"], cand["id"])
+
+
+def catalog_rankings(candidates, weights):
+    """Per-priority full ordered id lists: the order a `--priority P` run
+    produces. Pure: sorted() only, never writes onto the candidate dicts."""
+    return {
+        priority: [
+            c["id"]
+            for c in sorted(
+                candidates,
+                key=lambda c, w=weights[priority]: ranking_key(weighted_score(c, w), c),
+            )
+        ]
+        for priority in PRIORITY_WEIGHTS
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1070,6 +1096,10 @@ def build_catalog(
             },
         },
         "models": entries,
+        # The single ranking authority: every site artifact (data.json rows,
+        # history tabs, the highlights diff, best.txt) projects from or is
+        # checked against it. models keeps its own balanced sort.
+        "rankings": catalog_rankings(candidates, weights),
         "filtered": sorted(filtered, key=lambda e: e["id"]),
     }
 

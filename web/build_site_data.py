@@ -86,6 +86,34 @@ def _is_aa_value(value) -> bool:
     )
 
 
+def _validate_rankings(rankings, model_ids) -> None:
+    """rankings is the single ranking authority every projection reads: per
+    priority, a permutation of the models ids (each exactly once)."""
+    if not isinstance(rankings, dict) or set(rankings) != set(CATALOG_OVERALL_KEYS):
+        raise ValueError(
+            "catalog rankings must have exactly the keys: "
+            + ", ".join(CATALOG_OVERALL_KEYS)
+        )
+    expected = set(model_ids)
+    for priority in CATALOG_OVERALL_KEYS:
+        ranking = rankings[priority]
+        if not isinstance(ranking, list) or not all(
+            isinstance(model_id, str) and model_id for model_id in ranking
+        ):
+            raise ValueError(
+                f"catalog rankings.{priority} must be a list of non-empty id strings"
+            )
+        if len(set(ranking)) != len(ranking):
+            raise ValueError(f"catalog rankings.{priority} contains duplicate ids")
+        if set(ranking) != expected or len(ranking) != len(model_ids):
+            missing = sorted(expected - set(ranking))
+            unknown = sorted(set(ranking) - expected)
+            raise ValueError(
+                f"catalog rankings.{priority} is not a permutation of models ids"
+                f" (missing: {missing}, unknown: {unknown})"
+            )
+
+
 def validate_catalog(document) -> None:
     """Validate a raw model_compare.py --catalog document.
 
@@ -101,7 +129,15 @@ def validate_catalog(document) -> None:
         )
     if document.get("tool") != "model-compare":
         raise ValueError(f"unexpected catalog tool: {document.get('tool')!r}")
-    for key in ("generated_at", "parameters", "sources", "pool", "models", "filtered"):
+    for key in (
+        "generated_at",
+        "parameters",
+        "sources",
+        "pool",
+        "models",
+        "rankings",
+        "filtered",
+    ):
         if key not in document:
             raise ValueError(f"catalog missing key: {key}")
     # build_snapshot/merge_history slice and parse this stamp; reject a
@@ -242,6 +278,7 @@ def validate_catalog(document) -> None:
         raise ValueError("catalog models id must be a string")
     if len(set(model_ids)) != len(model_ids):
         raise ValueError("catalog models contain duplicate ids")
+    _validate_rankings(document["rankings"], model_ids)
     filtered_ids = []
     for i, entry in enumerate(document["filtered"]):
         if not isinstance(entry, dict):
@@ -334,32 +371,24 @@ def _has_snapshot_shape(snap) -> bool:
 def build_snapshot(catalog) -> dict:
     """Project a validated catalog document into one daily history snapshot.
 
-    tabs derive from the catalog itself: per priority, models sorted by
-    scores.overall descending, then quality desc, blended asc, id asc --
-    the same tiebreak model_compare.py uses for the data.json rows the site
-    compares ranks against. Top 10, rank 1-based. aa and prices cover
-    candidates only -- filtered entries carry neither.
+    tabs are a projection of the catalog's rankings (the single ranking
+    authority, the same order the data.json rows follow): per priority the
+    top 10 ids, rank 1-based, quality/blended merged from the models entry.
+    No sort happens here. aa and prices cover candidates only -- filtered
+    entries carry neither.
     """
     models = catalog["models"]
+    by_id = {entry["id"]: entry for entry in models}
     tabs = {}
     for priority in CATALOG_OVERALL_KEYS:
-        ranked = sorted(
-            models,
-            key=lambda e: (
-                -e["scores"]["overall"][priority],
-                -(e["quality"] or 0.0),
-                e["pricing"]["blended_per_1m"],
-                e["id"],
-            ),
-        )
         tabs[priority] = [
             {
-                "id": entry["id"],
+                "id": model_id,
                 "rank": i + 1,
-                "quality": entry["quality"],
-                "blended": entry["pricing"]["blended_per_1m"],
+                "quality": by_id[model_id]["quality"],
+                "blended": by_id[model_id]["pricing"]["blended_per_1m"],
             }
-            for i, entry in enumerate(ranked[:HISTORY_TOP_N])
+            for i, model_id in enumerate(catalog["rankings"][priority][:HISTORY_TOP_N])
         ]
     return {
         "generated_at": catalog["generated_at"],
@@ -490,12 +519,43 @@ def validate_highlights(document) -> None:
             raise ValueError(f"highlights section {key} must be a non-empty string")
 
 
-def build_data(best, priorities, now=None, generated_at=None) -> dict:
+def order_rows(rows, ranking) -> list:
+    """Reorder CLI rows to follow the catalog ranking (a projection, no sort).
+
+    Fails loudly unless the rows are exactly the ranking's top len(rows):
+    the `--priority P --json` and `--catalog` invocations must have ranked
+    the same models. Falling back to the CLI order would silently bring back
+    the table-vs-history divergence the single ranking exists to remove.
+    Duplicated row ids get their own message (unreachable via print_json,
+    which cannot emit duplicates; diagnostic hardening for hand-made rows).
+    """
+    ids = [row.get("model") for row in rows]
+    if not all(isinstance(model_id, str) for model_id in ids):
+        raise ValueError("row model ids must be strings")
+    dupes = sorted({model_id for model_id in ids if ids.count(model_id) > 1})
+    if dupes:
+        raise ValueError(f"rows contain duplicate model ids: {dupes}")
+    top = ranking[: len(rows)]
+    if set(ids) != set(top) or len(ids) != len(top):
+        missing = sorted(set(top) - set(ids))
+        extra = sorted(set(ids) - set(top))
+        raise ValueError(
+            f"rows disagree with the catalog ranking top {len(rows)}"
+            f" (missing: {missing}, extra: {extra})"
+        )
+    by_id = {row["model"]: row for row in rows}
+    return [by_id[model_id] for model_id in top]
+
+
+def build_data(best, priorities, now=None, generated_at=None, catalog=None) -> dict:
     """Validate the rows and wrap them into the data.json document.
 
     generated_at, when given, is used verbatim (main passes the catalog's
     timestamp so the site's 7-day baseline and the history snapshot keys
     share one date); otherwise the document is stamped with now/wall-clock.
+    catalog, when given (already validated), is the ranking authority: each
+    priority's rows are reordered to catalog["rankings"] via order_rows.
+    Without it the rows pass through verbatim.
     """
     if not isinstance(best, str) or not MODEL_ID_RE.fullmatch(best.strip()):
         raise ValueError(f"best model id looks wrong: {best!r}")
@@ -523,10 +583,19 @@ def build_data(best, priorities, now=None, generated_at=None) -> dict:
             missing = [key for key in ROW_KEYS if key not in row]
             if missing:
                 raise ValueError(f"{name}[{i}] is missing keys: {', '.join(missing)}")
+    rows_by_priority = {name: list(priorities[name]) for name in PRIORITIES}
+    if catalog is not None:
+        for name in PRIORITIES:
+            try:
+                rows_by_priority[name] = order_rows(
+                    rows_by_priority[name], catalog["rankings"][name]
+                )
+            except ValueError as exc:
+                raise ValueError(f"priority {name!r}: {exc}") from None
     return {
         "generated_at": generated_at,
         "best": best,
-        "priorities": {name: list(priorities[name]) for name in PRIORITIES},
+        "priorities": rows_by_priority,
     }
 
 
@@ -602,6 +671,7 @@ def main(argv=None) -> int:
             best,
             priorities,
             generated_at=catalog["generated_at"] if catalog is not None else None,
+            catalog=catalog,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

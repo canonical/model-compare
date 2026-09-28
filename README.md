@@ -36,7 +36,7 @@ No dependencies beyond Python 3.10+ (stdlib only). Exit codes: `0` success,
 | `--top N` | 5 | how many models to list |
 | `--best` | off | print only the #1 model id (for scripting) |
 | `--json` | off | machine-readable output |
-| `--catalog` | off | print the full model catalog (ranked candidates + filtered, with reasons) as one JSON document |
+| `--catalog` | off | print the full model catalog (ranked candidates + filtered, with reasons, plus the per-priority model ranking) as one JSON document |
 | `--min-context N` | 1000000 | hard context-window floor (tokens) |
 | `--input-share F` | 0.75 | input share of the blended price (0–1) |
 | `--recency-half-life D` | 120 | age decay half-life (days) |
