@@ -1620,6 +1620,14 @@ def test_ranking_key_breaks_ties_like_the_cli():
 
 
 def test_weighted_score_operand_order():
+    # Pins the operand ORDER (quality, price, context, age): float addition
+    # is non-associative, so a reordered sum can drift by one ULP. The shared
+    # weighted_score function is the structural guarantee that the CLI and
+    # the catalog agree; this test guards against someone reordering it. No
+    # single vector distinguishes all 23 wrong orders (many sums collide
+    # exactly), hence several: the two added vectors each diverge on 22 of
+    # 23. The 23rd (swapping the first two terms) is undetectable and
+    # harmless, since IEEE-754 a + b == b + a exactly.
     cand = {
         "quality_score": 0.1,
         "price_score": 0.2,
@@ -1630,6 +1638,26 @@ def test_weighted_score_operand_order():
     expected = 0.3 * 0.1 + 0.3 * 0.2 + 0.2 * 0.3 + 0.2 * 0.7
     assert mc.weighted_score(cand, w) == expected  # exact, not approx
     assert mc.weighted_score(cand, {"price": 1.0}) == 1.0 * 0.2
+
+    cand = {
+        "quality_score": 0.89,
+        "price_score": 0.66,
+        "context_score": 0.8,
+        "age_score": 0.84,
+    }
+    w = {"quality": 0.17, "price": 0.24, "context": 0.32, "age": 0.27}
+    expected = 0.17 * 0.89 + 0.24 * 0.66 + 0.32 * 0.8 + 0.27 * 0.84
+    assert mc.weighted_score(cand, w) == expected
+
+    cand = {
+        "quality_score": 0.47,
+        "price_score": 0.35,
+        "context_score": 0.43,
+        "age_score": 0.79,
+    }
+    w = {"quality": 0.09, "price": 0.35, "context": 0.34, "age": 0.22}
+    expected = 0.09 * 0.47 + 0.35 * 0.35 + 0.34 * 0.43 + 0.22 * 0.79
+    assert mc.weighted_score(cand, w) == expected
 
 
 def test_catalog_rankings_deterministic_across_builds_and_input_order():
