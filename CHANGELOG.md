@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-09-28
+
+### Added
+
+- The catalog carries the ranking itself: a top-level `rankings` field maps
+  each priority (`balanced`, `price`, `quality`) to the full ordered model id
+  list, produced by the same shared score and sort key the CLI table uses.
+  `data.json` rows, `history.json` tabs and the weekly highlights diff are now
+  projections of that one ranking, and `publish.py` runs `--catalog` first so
+  every invocation in a build reads the same cached data. A 4dp score tie can
+  no longer make the site show movement arrows or climbed/fell prose that did
+  not happen.
+
+### Changed
+
+- `publish.py` gates `best.txt` against `rankings.balanced[0]` before deploy,
+  and fails loudly when the deployed artifacts' ranking-derived facts disagree.
+
 ## [0.2.4] - 2026-09-28
 
 ### Fixed
