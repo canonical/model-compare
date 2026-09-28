@@ -1632,6 +1632,43 @@ def test_weighted_score_operand_order():
     assert mc.weighted_score(cand, {"price": 1.0}) == 1.0 * 0.2
 
 
+def test_catalog_rankings_deterministic_across_builds_and_input_order():
+    # Same synthetic candidates, built twice -> identical rankings; and since
+    # the key is total (id is the last tiebreak), the caller's list order
+    # cannot leak into them either.
+    first = _inverting_catalog()["rankings"]
+    second = _inverting_catalog()["rankings"]
+    assert first == second
+    args, models, zdr, quality_by_id = inverting_pool()
+    candidates, _ = mc.build_candidates(models, args, {}, zdr, [])
+    mc.compute_scores(candidates, args, quality_by_id)
+    weights = mc.catalog_weights(candidates, quality_by_id)
+    assert mc.catalog_rankings(list(reversed(candidates)), weights) == first
+
+
+def test_cli_json_rows_project_cleanly_onto_catalog_rankings(capsys):
+    # Cross-program check: real --json rows (top 2) per priority and the real
+    # catalog pass the site's order_rows / validate_catalog / build_snapshot.
+    doc = _inverting_catalog()
+    bsd.validate_catalog(doc)
+    priorities = {}
+    for priority in mc.PRIORITY_WEIGHTS:
+        args, models, zdr, quality_by_id = inverting_pool()
+        args.priority = priority
+        candidates, _ = mc.build_candidates(models, args, {}, zdr, [])
+        mc.compute_scores(candidates, args, quality_by_id)
+        mc.print_json(candidates[:2])
+        priorities[priority] = json.loads(capsys.readouterr().out)
+    data = bsd.build_data(
+        mc.opencode_model_id(doc["rankings"]["balanced"][0]), priorities, catalog=doc
+    )
+    snap = bsd.build_snapshot(doc)
+    for priority in mc.PRIORITY_WEIGHTS:
+        table = [row["model"] for row in data["priorities"][priority]]
+        assert table == doc["rankings"][priority][:2]
+        assert [row["id"] for row in snap["tabs"][priority]][:2] == table
+
+
 def test_catalog_deterministic_modulo_generated_at():
     doc1 = build_doc()
     doc2 = build_doc()
