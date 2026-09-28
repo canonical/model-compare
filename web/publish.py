@@ -138,8 +138,10 @@ def build_site(output_dir: Path) -> None:
         model_compare = REPO_ROOT / "model_compare.py"
 
         # --catalog first: it fetches OpenRouter/AA data and primes the shared
-        # caches, so every later invocation ranks identical inputs and a
-        # rows-vs-catalog mismatch (order_rows, check_best) is a real anomaly.
+        # caches, so later invocations very likely rank identical inputs.
+        # Not guaranteed: degraded fetches (empty discounts, no AA entries)
+        # are never cached, so a later run may fetch different data. That
+        # fails loudly (order_rows, check_best) and the next run self-heals.
         run_script(model_compare, ["--catalog"], out=scratch / "catalog.json")
         run_script(model_compare, ["--best"], out=output_dir / "best.txt")
         for priority in PRIORITIES:
