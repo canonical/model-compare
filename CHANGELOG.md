@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-09-28
+
+### Fixed
+
+- The site's 7-DAY movement arrows no longer flicker on unchanged data:
+  history tabs now rank with the same quality/blended/id tiebreak as the
+  table, and `data.json` is stamped with the catalog's `generated_at`
+  instead of a second clock. `history.json`'s `updated_at` pins to the
+  snapshot being written, so a stale future-dated snapshot can no longer
+  wedge deploys.
+- The DISC column now uses the same formatter as the CLI (`discount_pct`
+  ships through `--json`), so 0.025-style discounts display identically in
+  both places.
+- The weekly highlights' price section reports rises and ended discounts
+  instead of only drops and appeared discounts.
+- Catalog validation rejects a malformed `generated_at` (non-string or not
+  ISO-8601) with a clean error instead of a traceback.
+
+### Added
+
+- `publish.py` fails loudly when the deployed artifacts' `generated_at`
+  stamps disagree, and tests pin the table, history and highlights to one
+  ranking and one clock.
+
 ## [0.2.3] - 2026-09-28
 
 ### Fixed
