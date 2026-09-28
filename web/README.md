@@ -26,11 +26,13 @@ The workflow runs the pytest suite, then a single command:
 $ python web/publish.py            # assembles ./_site/ and fails loudly
 ```
 
-`web/publish.py` runs `model_compare.py --best`, per-priority `--json` and
-`--catalog`, fetches the previously published `history.json` /
-`highlights.json` (missing files are fine — first run), regenerates both via
-`web/generate_highlights.py` and `web/build_site_data.py`, and assembles the
-deploy directory. Every payload is validated; a broken run never deploys.
+`web/publish.py` runs `model_compare.py --catalog` first (priming the shared
+caches), then `--best` and the per-priority `--json` runs, fetches the
+previously published `history.json` / `highlights.json` (missing files are
+fine — first run), regenerates both via `web/generate_highlights.py` and
+`web/build_site_data.py`, and assembles the deploy directory. The table rows,
+history tabs and highlights diff are all projections of the catalog's
+`rankings`. Every payload is validated; a broken run never deploys.
 
 Repository secrets: `AA_API_KEY` widens quality coverage (AA API fallback),
 `OPENROUTER_API_KEY` enables LLM-written highlights — without it the site
