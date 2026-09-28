@@ -86,6 +86,34 @@ def _is_aa_value(value) -> bool:
     )
 
 
+def _validate_rankings(rankings, model_ids) -> None:
+    """rankings is the single ranking authority every projection reads: per
+    priority, a permutation of the models ids (each exactly once)."""
+    if not isinstance(rankings, dict) or set(rankings) != set(CATALOG_OVERALL_KEYS):
+        raise ValueError(
+            "catalog rankings must have exactly the keys: "
+            + ", ".join(CATALOG_OVERALL_KEYS)
+        )
+    expected = set(model_ids)
+    for priority in CATALOG_OVERALL_KEYS:
+        ranking = rankings[priority]
+        if not isinstance(ranking, list) or not all(
+            isinstance(model_id, str) and model_id for model_id in ranking
+        ):
+            raise ValueError(
+                f"catalog rankings.{priority} must be a list of non-empty id strings"
+            )
+        if len(set(ranking)) != len(ranking):
+            raise ValueError(f"catalog rankings.{priority} contains duplicate ids")
+        if set(ranking) != expected or len(ranking) != len(model_ids):
+            missing = sorted(expected - set(ranking))
+            unknown = sorted(set(ranking) - expected)
+            raise ValueError(
+                f"catalog rankings.{priority} is not a permutation of models ids"
+                f" (missing: {missing}, unknown: {unknown})"
+            )
+
+
 def validate_catalog(document) -> None:
     """Validate a raw model_compare.py --catalog document.
 
@@ -101,7 +129,15 @@ def validate_catalog(document) -> None:
         )
     if document.get("tool") != "model-compare":
         raise ValueError(f"unexpected catalog tool: {document.get('tool')!r}")
-    for key in ("generated_at", "parameters", "sources", "pool", "models", "filtered"):
+    for key in (
+        "generated_at",
+        "parameters",
+        "sources",
+        "pool",
+        "models",
+        "rankings",
+        "filtered",
+    ):
         if key not in document:
             raise ValueError(f"catalog missing key: {key}")
     # build_snapshot/merge_history slice and parse this stamp; reject a
@@ -242,6 +278,7 @@ def validate_catalog(document) -> None:
         raise ValueError("catalog models id must be a string")
     if len(set(model_ids)) != len(model_ids):
         raise ValueError("catalog models contain duplicate ids")
+    _validate_rankings(document["rankings"], model_ids)
     filtered_ids = []
     for i, entry in enumerate(document["filtered"]):
         if not isinstance(entry, dict):

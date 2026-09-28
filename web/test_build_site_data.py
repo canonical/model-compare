@@ -230,8 +230,16 @@ def make_catalog():
         },
         "pool": {"listed": 2, "candidates": 1, "dropped": {"context": 1}},
         "models": [make_catalog_entry()],
+        "rankings": {p: ["acme/model-a"] for p in ("balanced", "price", "quality")},
         "filtered": [{"id": "acme/small", "name": "Small", "reasons": ["context"]}],
     }
+
+
+def rank_models(doc):
+    """Give doc a valid rankings object: every priority in models order."""
+    ids = [e["id"] for e in doc["models"]]
+    doc["rankings"] = {p: list(ids) for p in ("balanced", "price", "quality")}
+    return doc
 
 
 def catalog_argv(tmp_path, catalog_file=None):
@@ -327,6 +335,60 @@ def test_validate_catalog_rejects(mutate):
     mutate(doc)
     with pytest.raises(ValueError):
         bsd.validate_catalog(doc)
+
+
+def _add_second_model(doc):
+    doc["models"].append(make_catalog_entry(id="acme/model-b"))
+    doc["pool"].update(listed=3, candidates=2)
+    return doc
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda doc: doc.pop("rankings"), id="missing"),
+        pytest.param(lambda doc: doc.update(rankings=["acme/model-a"]), id="not-dict"),
+        pytest.param(lambda doc: doc["rankings"].pop("price"), id="missing-key"),
+        pytest.param(
+            lambda doc: doc["rankings"].update(extra=["acme/model-a"]), id="extra-key"
+        ),
+        pytest.param(
+            lambda doc: doc["rankings"].update(balanced="acme/model-a"), id="not-list"
+        ),
+        pytest.param(
+            lambda doc: doc["rankings"].update(
+                balanced=["acme/model-a", "acme/model-a"]
+            ),
+            id="duplicate",
+        ),
+        pytest.param(
+            lambda doc: doc["rankings"].update(balanced=["acme/unknown"]), id="unknown"
+        ),
+        pytest.param(
+            lambda doc: _add_second_model(doc)["rankings"].update(
+                balanced=["acme/model-a"]
+            ),
+            id="wrong-length",
+        ),
+        pytest.param(lambda doc: doc["rankings"].update(balanced=[7]), id="non-string"),
+        pytest.param(lambda doc: doc["rankings"].update(balanced=[""]), id="empty-id"),
+    ],
+)
+def test_validate_catalog_rejects_bad_rankings(mutate):
+    doc = make_catalog()
+    mutate(doc)
+    with pytest.raises(ValueError, match="rankings"):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_accepts_any_permutation_per_priority():
+    doc = _add_second_model(make_catalog())
+    doc["rankings"] = {
+        "balanced": ["acme/model-a", "acme/model-b"],
+        "price": ["acme/model-b", "acme/model-a"],
+        "quality": ["acme/model-b", "acme/model-a"],
+    }
+    bsd.validate_catalog(doc)  # must not raise
 
 
 def test_main_writes_catalog_next_to_data_json(tmp_path):
@@ -913,6 +975,13 @@ def _invariant_catalog():
     doc["models"] = models
     doc["pool"] = {"listed": 6, "candidates": 5, "dropped": {"context": 1}}
     doc["sources"]["aa"] = {"mode": "openrouter", "matched": 3, "matched_openrouter": 3}
+    # The producer's ranking for these values (hand-pinned: it exercises the
+    # overall, quality, blended and id tiebreaks).
+    doc["rankings"] = {
+        "balanced": ["acme/a", "acme/b", "acme/c", "acme/d", "acme/e"],
+        "price": ["acme/c", "acme/b", "acme/a", "acme/d", "acme/e"],
+        "quality": ["acme/a", "acme/d", "acme/e", "acme/c", "acme/b"],
+    }
     bsd.validate_catalog(doc)
     return doc
 
