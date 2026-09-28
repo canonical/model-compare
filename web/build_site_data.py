@@ -519,12 +519,38 @@ def validate_highlights(document) -> None:
             raise ValueError(f"highlights section {key} must be a non-empty string")
 
 
-def build_data(best, priorities, now=None, generated_at=None) -> dict:
+def order_rows(rows, ranking) -> list:
+    """Reorder CLI rows to follow the catalog ranking (a projection, no sort).
+
+    Fails loudly unless the rows are exactly the ranking's top len(rows):
+    the `--priority P --json` and `--catalog` invocations must have ranked
+    the same models. Falling back to the CLI order would silently bring back
+    the table-vs-history divergence the single ranking exists to remove.
+    """
+    ids = [row.get("model") for row in rows]
+    if not all(isinstance(model_id, str) for model_id in ids):
+        raise ValueError("row model ids must be strings")
+    top = ranking[: len(rows)]
+    if set(ids) != set(top) or len(ids) != len(top) or len(set(ids)) != len(ids):
+        missing = sorted(set(top) - set(ids))
+        extra = sorted(set(ids) - set(top))
+        raise ValueError(
+            f"rows disagree with the catalog ranking top {len(rows)}"
+            f" (missing: {missing}, extra: {extra})"
+        )
+    by_id = {row["model"]: row for row in rows}
+    return [by_id[model_id] for model_id in top]
+
+
+def build_data(best, priorities, now=None, generated_at=None, catalog=None) -> dict:
     """Validate the rows and wrap them into the data.json document.
 
     generated_at, when given, is used verbatim (main passes the catalog's
     timestamp so the site's 7-day baseline and the history snapshot keys
     share one date); otherwise the document is stamped with now/wall-clock.
+    catalog, when given (already validated), is the ranking authority: each
+    priority's rows are reordered to catalog["rankings"] via order_rows.
+    Without it the rows pass through verbatim.
     """
     if not isinstance(best, str) or not MODEL_ID_RE.fullmatch(best.strip()):
         raise ValueError(f"best model id looks wrong: {best!r}")
@@ -552,10 +578,19 @@ def build_data(best, priorities, now=None, generated_at=None) -> dict:
             missing = [key for key in ROW_KEYS if key not in row]
             if missing:
                 raise ValueError(f"{name}[{i}] is missing keys: {', '.join(missing)}")
+    rows_by_priority = {name: list(priorities[name]) for name in PRIORITIES}
+    if catalog is not None:
+        for name in PRIORITIES:
+            try:
+                rows_by_priority[name] = order_rows(
+                    rows_by_priority[name], catalog["rankings"][name]
+                )
+            except ValueError as exc:
+                raise ValueError(f"priority {name!r}: {exc}") from None
     return {
         "generated_at": generated_at,
         "best": best,
-        "priorities": {name: list(priorities[name]) for name in PRIORITIES},
+        "priorities": rows_by_priority,
     }
 
 
@@ -631,6 +666,7 @@ def main(argv=None) -> int:
             best,
             priorities,
             generated_at=catalog["generated_at"] if catalog is not None else None,
+            catalog=catalog,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

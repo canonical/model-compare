@@ -106,6 +106,112 @@ def test_build_data_rejects_row_missing_keys():
         bsd.build_data("acme/model-a", priorities)
 
 
+def _rows(*ids):
+    return [make_row(model=model_id) for model_id in ids]
+
+
+def test_order_rows_reorders_to_the_ranking():
+    rows = _rows("acme/b", "acme/a", "acme/c")
+    ordered = bsd.order_rows(rows, ["acme/c", "acme/a", "acme/b", "acme/d"])
+    assert [row["model"] for row in ordered] == ["acme/c", "acme/a", "acme/b"]
+    assert [row["model"] for row in rows] == ["acme/b", "acme/a", "acme/c"]  # pure
+
+
+def test_order_rows_rejects_drift_naming_missing_and_extra_ids():
+    rows = _rows("acme/a", "acme/x")
+    with pytest.raises(ValueError) as exc:
+        bsd.order_rows(rows, ["acme/a", "acme/b", "acme/x"])
+    message = str(exc.value)
+    assert "acme/b" in message  # ranked in the top-2 but missing from rows
+    assert "acme/x" in message  # in rows but not in the ranking's top-2
+
+
+@pytest.mark.parametrize(
+    "rows,ranking",
+    [
+        pytest.param(_rows("acme/a", "acme/a"), ["acme/a", "acme/b"], id="dup-row"),
+        pytest.param(
+            _rows("acme/a", "acme/b", "acme/a"), ["acme/a", "acme/b"], id="len"
+        ),
+        pytest.param([make_row(model=["acme/a"])], ["acme/a"], id="unhashable"),
+    ],
+)
+def test_order_rows_rejects_mismatched_rows(rows, ranking):
+    with pytest.raises(ValueError):
+        bsd.order_rows(rows, ranking)
+
+
+def _ranked_catalog():
+    doc = make_catalog()
+    doc["rankings"] = {
+        "balanced": ["acme/c", "acme/a", "acme/b"],
+        "price": ["acme/b", "acme/c", "acme/a"],
+        "quality": ["acme/a", "acme/b", "acme/c"],
+    }
+    return doc
+
+
+def test_build_data_orders_rows_by_catalog_rankings():
+    priorities = {p: _rows("acme/a", "acme/b", "acme/c") for p in bsd.PRIORITIES}
+    catalog = _ranked_catalog()
+    data = bsd.build_data("acme/a", priorities, catalog=catalog)
+    for priority in bsd.PRIORITIES:
+        table = [row["model"] for row in data["priorities"][priority]]
+        assert table == catalog["rankings"][priority], priority
+
+
+def test_build_data_without_catalog_keeps_rows_verbatim():
+    priorities = {p: _rows("acme/b", "acme/a") for p in bsd.PRIORITIES}
+    data = bsd.build_data("acme/a", priorities)
+    for priority in bsd.PRIORITIES:
+        assert [r["model"] for r in data["priorities"][priority]] == [
+            "acme/b",
+            "acme/a",
+        ]
+
+
+def test_build_data_rejects_rows_that_drift_from_catalog_rankings():
+    priorities = {p: _rows("acme/a", "acme/b") for p in bsd.PRIORITIES}
+    with pytest.raises(ValueError, match="acme/c"):
+        # balanced ranks acme/c in its top 2; the rows do not have it
+        bsd.build_data("acme/a", priorities, catalog=_ranked_catalog())
+
+
+def _three_model_catalog():
+    doc = make_catalog()
+    doc["models"] = [
+        make_catalog_entry(id=model_id) for model_id in ("acme/a", "acme/b", "acme/c")
+    ]
+    doc["pool"].update(listed=4, candidates=3)
+    doc["rankings"] = _ranked_catalog()["rankings"]
+    bsd.validate_catalog(doc)
+    return doc
+
+
+def test_main_orders_rows_from_catalog_file(tmp_path):
+    raw = tmp_path / "catalog-raw.json"
+    raw.write_text(json.dumps(_three_model_catalog()))
+    argv, out = catalog_argv(tmp_path, raw)
+    rows = tmp_path / "rows.json"
+    rows.write_text(json.dumps(_rows("acme/a", "acme/b", "acme/c")))
+    assert bsd.main(argv) == 0
+    data = json.loads(out.read_text())
+    for priority in bsd.PRIORITIES:
+        table = [row["model"] for row in data["priorities"][priority]]
+        assert table == _ranked_catalog()["rankings"][priority], priority
+
+
+def test_main_fails_when_rows_drift_from_catalog_file(tmp_path, capsys):
+    raw = tmp_path / "catalog-raw.json"
+    raw.write_text(json.dumps(_three_model_catalog()))
+    argv, out = catalog_argv(tmp_path, raw)
+    rows = tmp_path / "rows.json"
+    rows.write_text(json.dumps(_rows("acme/a", "acme/b")))
+    assert bsd.main(argv) == 1
+    assert "acme/c" in capsys.readouterr().err
+    assert not out.exists()
+
+
 def test_main_end_to_end(tmp_path):
     best_file = tmp_path / "best.txt"
     best_file.write_text("openrouter/z-ai/glm-5.3-flash\n")
