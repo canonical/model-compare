@@ -509,18 +509,23 @@ def test_build_snapshot_ranks_per_priority_top10():
                 },
             )
         )
+    rank_models(doc)
+    ids = [e["id"] for e in doc["models"]]
+    doc["rankings"]["price"] = list(reversed(ids))
+    doc["rankings"]["quality"] = ids[1:] + ids[:1]
     snap = bsd.build_snapshot(doc)
     for priority in ("balanced", "price", "quality"):
         assert len(snap["tabs"][priority]) == 10
         assert [row["rank"] for row in snap["tabs"][priority]] == list(range(1, 11))
+        assert [row["id"] for row in snap["tabs"][priority]] == (
+            doc["rankings"][priority][:10]
+        )
 
 
-def test_build_snapshot_ties_break_like_the_cli_table():
-    # Tied overall scores must rank as model_compare.py orders data.json rows
-    # (quality desc, blended asc, id asc), or the site shows false arrows.
-    tied = {"balanced": 0.5, "price": 0.5, "quality": 0.5}
-
-    def entry(model_id, quality, blended):
+def test_build_snapshot_projects_rankings_not_a_sort():
+    # Authority fence: tabs follow catalog rankings even when a naive sort of
+    # models (on scores.overall or any tiebreak) would order them otherwise.
+    def entry(model_id, overall, quality, blended):
         return make_catalog_entry(
             id=model_id,
             quality=quality,
@@ -534,32 +539,32 @@ def test_build_snapshot_ties_break_like_the_cli_table():
                 "quality": 0.5,
                 "context": 0.5,
                 "age": 0.5,
-                "overall": dict(tied),
+                "overall": {"balanced": overall, "price": overall, "quality": overall},
             },
         )
 
     doc = make_catalog()
     doc["models"] = [
-        entry("acme/a-low", 50.0, 1.0),
-        entry("acme/b-high", 60.0, 2.0),
-        entry("acme/e-pricey", 70.0, 3.0),
-        entry("acme/f-cheap", 70.0, 1.0),
-        entry("acme/h-unrated", None, 1.0),
-        entry("acme/g-unrated", None, 1.0),
+        entry("acme/a-top", 0.9, 70.0, 1.0),
+        entry("acme/b-mid", 0.5, 50.0, 2.0),
+        entry("acme/c-low", 0.1, 30.0, 3.0),
     ]
+    doc["pool"].update(listed=4, candidates=3)
+    doc["rankings"] = {
+        "balanced": ["acme/c-low", "acme/a-top", "acme/b-mid"],
+        "price": ["acme/b-mid", "acme/c-low", "acme/a-top"],
+        "quality": ["acme/c-low", "acme/b-mid", "acme/a-top"],
+    }
+    bsd.validate_catalog(doc)
     snap = bsd.build_snapshot(doc)
-    expected = [
-        "acme/f-cheap",
-        "acme/e-pricey",
-        "acme/b-high",
-        "acme/a-low",
-        "acme/g-unrated",
-        "acme/h-unrated",
-    ]
+    by_id = {e["id"]: e for e in doc["models"]}
     for priority in ("balanced", "price", "quality"):
         rows = snap["tabs"][priority]
-        assert [row["id"] for row in rows] == expected
-        assert [row["rank"] for row in rows] == list(range(1, 7))
+        assert [row["id"] for row in rows] == doc["rankings"][priority]
+        assert [row["rank"] for row in rows] == [1, 2, 3]
+        for row in rows:  # attributes merged from the models entry
+            assert row["quality"] == by_id[row["id"]]["quality"]
+            assert row["blended"] == by_id[row["id"]]["pricing"]["blended_per_1m"]
 
 
 def test_build_snapshot_dedupes_pool_ids():

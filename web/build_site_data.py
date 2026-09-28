@@ -371,32 +371,24 @@ def _has_snapshot_shape(snap) -> bool:
 def build_snapshot(catalog) -> dict:
     """Project a validated catalog document into one daily history snapshot.
 
-    tabs derive from the catalog itself: per priority, models sorted by
-    scores.overall descending, then quality desc, blended asc, id asc --
-    the same tiebreak model_compare.py uses for the data.json rows the site
-    compares ranks against. Top 10, rank 1-based. aa and prices cover
-    candidates only -- filtered entries carry neither.
+    tabs are a projection of the catalog's rankings (the single ranking
+    authority, the same order the data.json rows follow): per priority the
+    top 10 ids, rank 1-based, quality/blended merged from the models entry.
+    No sort happens here. aa and prices cover candidates only -- filtered
+    entries carry neither.
     """
     models = catalog["models"]
+    by_id = {entry["id"]: entry for entry in models}
     tabs = {}
     for priority in CATALOG_OVERALL_KEYS:
-        ranked = sorted(
-            models,
-            key=lambda e: (
-                -e["scores"]["overall"][priority],
-                -(e["quality"] or 0.0),
-                e["pricing"]["blended_per_1m"],
-                e["id"],
-            ),
-        )
         tabs[priority] = [
             {
-                "id": entry["id"],
+                "id": model_id,
                 "rank": i + 1,
-                "quality": entry["quality"],
-                "blended": entry["pricing"]["blended_per_1m"],
+                "quality": by_id[model_id]["quality"],
+                "blended": by_id[model_id]["pricing"]["blended_per_1m"],
             }
-            for i, entry in enumerate(ranked[:HISTORY_TOP_N])
+            for i, model_id in enumerate(catalog["rankings"][priority][:HISTORY_TOP_N])
         ]
     return {
         "generated_at": catalog["generated_at"],
