@@ -3,8 +3,10 @@
 
 Runs the standalone model_compare.py, then the web-side generators
 (generate_highlights.py, build_site_data.py), and assembles the deploy
-directory: data.json, catalog.json, best.txt and index.html. Fails loudly on
-any unexpected result so a broken run never deploys a broken site.
+directory: data.json, catalog.json, history.json, highlights.json, best.txt
+and index.html. Fails loudly on any unexpected result -- including
+data.json/history.json stamps that disagree with catalog.json's
+generated_at -- so a broken run never deploys a broken site.
 """
 
 from __future__ import annotations
