@@ -121,6 +121,7 @@ def row(model, q, inp, outp, disc, ctx, age, score):
         "output_usd_per_m": outp,
         "blended_usd_per_m": (inp + outp) / 2,
         "discount": disc,
+        "discount_pct": f"{disc:.0%}" if disc else "--",
         "context_tokens": ctx,
         "age_days": age,
     }

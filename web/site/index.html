@@ -412,7 +412,7 @@
             row.quality_index === null ? "-" : row.quality_index.toFixed(1),
             fmtPrice(row.input_usd_per_m),
             fmtPrice(row.output_usd_per_m),
-            row.discount === null ? "--" : Math.round(row.discount * 100) + "%",
+            row.discount_pct || "--",
             fmtContext(row.context_tokens),
             fmtAge(row.age_days),
             row.score.toFixed(3),

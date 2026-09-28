@@ -693,6 +693,7 @@ def test_print_json_includes_discount(capsys):
     mc.print_json(rows)
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["discount"] == 0.25
+    assert payload[0]["discount_pct"] == "25%"
 
 
 def test_print_json_discount_null_when_absent(capsys):
@@ -701,6 +702,7 @@ def test_print_json_discount_null_when_absent(capsys):
     mc.print_json(rows)
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["discount"] is None
+    assert payload[0]["discount_pct"] == "--"
 
 
 def test_print_json_discount_null_for_negligible(capsys):
@@ -709,6 +711,18 @@ def test_print_json_discount_null_for_negligible(capsys):
     mc.print_json(rows)
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["discount"] is None
+    assert payload[0]["discount_pct"] == "--"
+
+
+def test_print_json_discount_pct_matches_table_rounding(capsys):
+    # The site renders discount_pct verbatim, so it must use the DISC column's
+    # half-to-even rounding: 0.025 is "2%" here, not the "3%" Math.round gave.
+    rows = [_cand("a/x", 1.0)]
+    rows[0].update({"score": 0.9, "discount": 0.025})
+    mc.print_json(rows)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["discount_pct"] == "2%"
+    assert payload[0]["discount_pct"] == mc.fmt_discount(0.025)
 
 
 # ---------------------------------------------------------------------------

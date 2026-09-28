@@ -28,6 +28,7 @@ ROW_KEYS = (
     "output_usd_per_m",
     "blended_usd_per_m",
     "discount",
+    "discount_pct",
     "context_tokens",
     "age_days",
 )

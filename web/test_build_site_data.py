@@ -18,6 +18,7 @@ def make_row(**overrides):
         "output_usd_per_m": 2.0,
         "blended_usd_per_m": 1.25,
         "discount": None,
+        "discount_pct": "--",
         "context_tokens": 2_000_000,
         "age_days": 10.0,
     }
@@ -39,6 +40,21 @@ def test_build_data_happy_path():
     assert set(data["priorities"]) == {"balanced", "price", "quality"}
     assert data["priorities"]["balanced"][0]["model"] == "acme/model-a"
     assert "generated_at" in data
+
+
+def test_build_data_carries_discount_pct_through():
+    priorities = make_priorities()
+    priorities["price"] = [make_row(discount=0.5, discount_pct="50%")]
+    data = bsd.build_data("acme/model-a", priorities)
+    assert data["priorities"]["price"][0]["discount_pct"] == "50%"
+    assert data["priorities"]["balanced"][0]["discount_pct"] == "--"
+
+
+def test_build_data_rejects_row_without_discount_pct():
+    priorities = make_priorities()
+    del priorities["quality"][0]["discount_pct"]
+    with pytest.raises(ValueError, match="discount_pct"):
+        bsd.build_data("acme/model-a", priorities)
 
 
 def test_build_data_accepts_variant_suffix():
@@ -779,3 +795,11 @@ def test_main_without_highlights_file_writes_no_highlights(tmp_path):
     assert bsd.main(argv) == 0
     assert out.exists()
     assert not (out.parent / "highlights.json").exists()
+
+
+def test_main_writes_discount_pct_into_data_json(tmp_path):
+    argv, out = catalog_argv(tmp_path)
+    assert bsd.main(argv) == 0
+    written = json.loads(out.read_text())
+    for name in bsd.PRIORITIES:
+        assert written["priorities"][name][0]["discount_pct"] == "--"
