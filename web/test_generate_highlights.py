@@ -175,6 +175,100 @@ def test_fallback_texts_first_week():
     assert "building up" in texts["week"]
 
 
+def make_aa_catalog(entries):
+    """Minimal catalog whose models the AA mover diff reads.
+
+    entries maps id -> (aa intelligence index, blended price).
+    """
+    return {
+        "generated_at": "2026-09-02T09:15:00+00:00",
+        "models": [
+            {
+                "id": model_id,
+                "scores": {
+                    "overall": {"balanced": 50.0, "price": 50.0, "quality": 50.0}
+                },
+                "aa": {"intelligence_index": aa},
+                "pricing": {
+                    "input_per_1m": 1.0,
+                    "output_per_1m": 2.0,
+                    "blended_per_1m": blended,
+                },
+                "discount": None,
+            }
+            for model_id, (aa, blended) in entries.items()
+        ],
+        "filtered": [],
+    }
+
+
+def make_aa_history(entries):
+    """Baseline whose aa and prices cover entries id -> (aa, blended)."""
+    return {
+        "snapshots": {
+            "2026-08-26": {
+                "generated_at": "2026-08-26T09:15:00+00:00",
+                "pool_ids": sorted(entries),
+                "tabs": {"balanced": [], "price": [], "quality": []},
+                "aa": {model_id: aa for model_id, (aa, _) in entries.items()},
+                "prices": {
+                    model_id: [1.0, 2.0, blended, None]
+                    for model_id, (_, blended) in entries.items()
+                },
+            }
+        }
+    }
+
+
+def test_unchanged_aa_index_is_not_reported_as_a_mover():
+    catalog = make_aa_catalog(
+        {
+            "anthropic/claude-opus-5": (70.0, 1.5),
+            "anthropic/claude-sonnet-5": (65.0, 1.5),
+        }
+    )
+    history = make_aa_history(
+        {
+            "anthropic/claude-opus-5": (70.0, 1.5),
+            "anthropic/claude-sonnet-5": (65.0, 1.5),
+        }
+    )
+    diff = gh.build_diff(catalog, history)
+    assert diff["aa_movers"] == {"up": [], "down": []}
+    intelligence = gh.fallback_texts(diff)["intelligence"]
+    assert intelligence == "No AA intelligence changes this week."
+    assert "0.0" not in intelligence
+
+
+def test_aa_movers_do_not_repeat_across_up_and_down():
+    catalog = make_aa_catalog(
+        {
+            "acme/gainer": (79.0, 1.5),
+            "acme/loser": (61.0, 1.5),
+        }
+    )
+    history = make_aa_history(
+        {
+            "acme/gainer": (70.0, 1.5),
+            "acme/loser": (65.0, 1.5),
+        }
+    )
+    diff = gh.build_diff(catalog, history)
+    assert [m["id"] for m in diff["aa_movers"]["up"]] == ["acme/gainer"]
+    assert [m["id"] for m in diff["aa_movers"]["down"]] == ["acme/loser"]
+    intelligence = gh.fallback_texts(diff)["intelligence"]
+    assert intelligence.count("`acme/gainer`") == 1
+    assert intelligence.count("`acme/loser`") == 1
+
+
+def test_unchanged_blended_price_is_not_a_price_move():
+    catalog = make_aa_catalog({"acme/steady": (70.0, 1.5)})
+    history = make_aa_history({"acme/steady": (70.0, 1.5)})
+    diff = gh.build_diff(catalog, history)
+    assert diff["price_moves"] == {"down": [], "up": []}
+    assert gh.fallback_texts(diff)["prices"] == "No notable price moves this week."
+
+
 # ---------------------------------------------------------------------------
 # LLM client + reuse rule
 # ---------------------------------------------------------------------------

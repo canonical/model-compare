@@ -154,8 +154,11 @@ def build_diff(catalog, history) -> dict:
         movers.append({"id": entry["id"], "delta": round(now - prev, 2), "value": now})
     movers.sort(key=lambda m: (-m["delta"], m["id"]))
     diff["aa_movers"] = {
-        "up": movers[:3],
-        "down": sorted(movers, key=lambda m: (m["delta"], m["id"]))[:3],
+        "up": [m for m in movers if m["delta"] > 0][:3],
+        "down": sorted(
+            (m for m in movers if m["delta"] < 0),
+            key=lambda m: (m["delta"], m["id"]),
+        )[:3],
     }
 
     prev_prices = (
@@ -190,8 +193,11 @@ def build_diff(catalog, history) -> dict:
             vanished.append(entry["id"])
     price_moves.sort(key=lambda m: (m["delta"], m["id"]))
     diff["price_moves"] = {
-        "down": price_moves[:3],
-        "up": sorted(price_moves, key=lambda m: (-m["delta"], m["id"]))[:3],
+        "down": [m for m in price_moves if m["delta"] < 0][:3],
+        "up": sorted(
+            (m for m in price_moves if m["delta"] > 0),
+            key=lambda m: (-m["delta"], m["id"]),
+        )[:3],
     }
     diff["discounts"] = {"appeared": sorted(appeared), "vanished": sorted(vanished)}
     return diff
