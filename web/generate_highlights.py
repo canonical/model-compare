@@ -249,10 +249,19 @@ def fallback_texts(diff) -> dict:
     price_bits = [
         f"`{m['id']}` {m['old']} -> {m['new']}" for m in diff["price_moves"]["down"][:2]
     ]
+    price_bits.extend(
+        f"`{m['id']}` rose {m['old']} -> {m['new']}"
+        for m in diff["price_moves"]["up"][:2]
+    )
     if diff["discounts"]["appeared"]:
         price_bits.append(
             "discount appeared for "
             + ", ".join(f"`{i}`" for i in diff["discounts"]["appeared"][:2])
+        )
+    if diff["discounts"]["vanished"]:
+        price_bits.append(
+            "discount ended for "
+            + ", ".join(f"`{i}`" for i in diff["discounts"]["vanished"][:2])
         )
     prices = (
         "Blended price moves: " + "; ".join(price_bits) + "."
