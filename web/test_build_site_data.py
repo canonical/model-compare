@@ -1052,10 +1052,12 @@ def test_main_stamps_data_json_with_catalog_generated_at(tmp_path):
 
 
 def _invariant_catalog():
-    """Five models whose overall ties exercise every tiebreak level.
+    """Five models carrying the producer's rankings.
 
-    Values are short decimals, so the unrounded and 4dp-rounded orderings
-    agree by construction; this fence pins plumbing, not rounding.
+    The rankings deliberately differ from a naive re-sort of the rounded
+    scores.overall in one place: acme/d and acme/e tie after rounding, and
+    the (unrounded) producer order puts acme/e first for balanced. Anything
+    that re-sorts instead of projecting rankings fails the fence below.
     """
     spec = [
         # id, (balanced, price, quality) overall, quality, blended
@@ -1086,10 +1088,8 @@ def _invariant_catalog():
     doc["models"] = models
     doc["pool"] = {"listed": 6, "candidates": 5, "dropped": {"context": 1}}
     doc["sources"]["aa"] = {"mode": "openrouter", "matched": 3, "matched_openrouter": 3}
-    # The producer's ranking for these values (hand-pinned: it exercises the
-    # overall, quality, blended and id tiebreaks).
     doc["rankings"] = {
-        "balanced": ["acme/a", "acme/b", "acme/c", "acme/d", "acme/e"],
+        "balanced": ["acme/a", "acme/b", "acme/c", "acme/e", "acme/d"],
         "price": ["acme/c", "acme/b", "acme/a", "acme/d", "acme/e"],
         "quality": ["acme/a", "acme/d", "acme/e", "acme/c", "acme/b"],
     }
@@ -1098,47 +1098,35 @@ def _invariant_catalog():
 
 
 def test_table_and_history_rank_from_one_catalog():
-    """Regression fence for F1/F4: data.json rows and history tabs converge.
+    """Projection fence: data.json rows == rankings[p][:10] == history tabs.
 
-    The key below deliberately mirrors model_compare.py's compute_scores
-    sort and build_snapshot's key -- drift in either fails here first.
+    No sort key lives in this test: the catalog's rankings are the only
+    ranking, and every artifact must be a projection of it. The rows arrive
+    in a scrambled order to prove build_data reorders rather than trusts.
     """
     catalog = _invariant_catalog()
-
-    def cli_key(e):
-        return (
-            -e["scores"]["overall"][priority],
-            -(e["quality"] or 0.0),
-            e["pricing"]["blended_per_1m"],
-            e["id"],
-        )
-
-    expected = {}
+    by_id = {e["id"]: e for e in catalog["models"]}
     rows = {}
     for priority in ("balanced", "price", "quality"):
-        ranked = sorted(catalog["models"], key=cli_key)
-        expected[priority] = [e["id"] for e in ranked]
+        # same set as the CLI's top N, deliberately out of order
+        scrambled = sorted(catalog["rankings"][priority][:10], reverse=True)
         rows[priority] = [
             make_row(
-                model=e["id"],
-                opencode_model=f"openrouter/{e['id']}",
-                score=e["scores"]["overall"][priority],
-                quality_index=e["quality"],
-                blended_usd_per_m=e["pricing"]["blended_per_1m"],
+                model=model_id,
+                opencode_model=f"openrouter/{model_id}",
+                score=by_id[model_id]["scores"]["overall"][priority],
+                quality_index=by_id[model_id]["quality"],
+                blended_usd_per_m=by_id[model_id]["pricing"]["blended_per_1m"],
             )
-            for e in ranked
+            for model_id in scrambled
         ]
-    # Hand-pinned so the fixture keeps exercising the overall, quality,
-    # blended and id tiebreaks (a key regression cannot hide in both).
-    assert expected == {
-        "balanced": ["acme/a", "acme/b", "acme/c", "acme/d", "acme/e"],
-        "price": ["acme/c", "acme/b", "acme/a", "acme/d", "acme/e"],
-        "quality": ["acme/a", "acme/d", "acme/e", "acme/c", "acme/b"],
-    }
 
-    # Mirror main: rows verbatim, data.json stamped from the catalog.
+    # Mirror main: data.json stamped from and ordered by the catalog.
     data = bsd.build_data(
-        "openrouter/acme/a", rows, generated_at=catalog["generated_at"]
+        "openrouter/acme/a",
+        rows,
+        generated_at=catalog["generated_at"],
+        catalog=catalog,
     )
     history = bsd.merge_history(None, bsd.build_snapshot(catalog))
     bsd.validate_history(history)
@@ -1147,5 +1135,5 @@ def test_table_and_history_rank_from_one_catalog():
     for priority in ("balanced", "price", "quality"):
         table = [row["model"] for row in data["priorities"][priority]]
         tab = [row["id"] for row in tabs[priority]]
-        assert table == tab == expected[priority], priority
+        assert table == tab == catalog["rankings"][priority][:10], priority
     assert data["generated_at"] == history["updated_at"] == catalog["generated_at"]
