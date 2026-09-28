@@ -620,6 +620,23 @@ def test_merge_history_drops_future_dated_snapshot():
     assert merged["updated_at"] == "2026-09-02T09:15:00+00:00"
 
 
+def test_merge_history_updated_at_is_the_written_snapshot():
+    # A previously skewed run can leave a snapshot dated today+1 in the live
+    # history; the horizon deliberately retains it. updated_at must still be
+    # this run's stamp, or publish's stamp gate (history.updated_at ==
+    # catalog.generated_at) wedges every deploy until the date catches up.
+    prev = make_history()
+    prev["snapshots"]["2026-09-03"] = make_history_snapshot(
+        "2026-09-03", "2026-09-03T01:00:00+00:00"
+    )
+    snap = make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    merged = bsd.merge_history(prev, snap)
+    assert "2026-09-03" in merged["snapshots"]  # horizon tolerance unchanged
+    assert max(merged["snapshots"]) == "2026-09-03"
+    assert merged["snapshots"]["2026-09-02"] == snap
+    assert merged["updated_at"] == "2026-09-02T09:15:00+00:00"
+
+
 def test_merge_history_drops_basic_format_date_key():
     prev = make_history()
     prev["snapshots"]["20260825"] = make_history_snapshot(

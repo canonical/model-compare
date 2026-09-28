@@ -395,7 +395,9 @@ def merge_history(prev, snapshot) -> dict:
     non-empty generated_at string, string pool_ids, a tabs dict holding
     id-bearing rank-consistent lists for each of balanced/price/quality,
     a numeric-or-null aa dict and a 4-element numeric/null prices dict.
-    Same-day upserts are last-write-wins.
+    Same-day upserts are last-write-wins. updated_at is always the written
+    snapshot's generated_at (the catalog's stamp), never a retained
+    future-dated key's, so publish's stamp gate cannot wedge on skewed data.
     """
     today = snapshot["generated_at"][:10]
     horizon = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
@@ -416,7 +418,7 @@ def merge_history(prev, snapshot) -> dict:
     kept = sorted(snapshots)[-HISTORY_RETENTION:]
     return {
         "schema_version": HISTORY_SCHEMA_VERSION,
-        "updated_at": snapshots[kept[-1]]["generated_at"],
+        "updated_at": snapshot["generated_at"],
         "snapshots": {date_key: snapshots[date_key] for date_key in kept},
     }
 
