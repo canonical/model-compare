@@ -59,9 +59,8 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_DISCOUNTS_URL = (
     "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text"
 )
-OPENROUTER_ZDR_URL = (
-    "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text&zdr=true"
-)
+# Public (undocumented) per-endpoint list of zero-data-retention endpoints.
+OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
 AA_MODELS_PAGE_URL = "https://artificialanalysis.ai/models"
 AA_API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
 VERSION = "0.2.2"
@@ -210,8 +209,8 @@ def fetch_openrouter_frontend(args):
     """Derive discounts, ZDR ids and OR-published AA benchmarks.
 
     Two loads: the base frontend URL serves discounts and benchmarks in one
-    response; the ?zdr=true URL serves ZDR and is skipped entirely under
-    --no-zdr. Each payload caches independently under its own key and is
+    response; the per-endpoint ZDR list serves ZDR and is skipped entirely
+    under --no-zdr. Each payload caches independently under its own key and is
     cached only when non-empty, so a degraded payload self-heals on the
     next run. A base-URL outage never blocks the ZDR fetch, and vice
     versa. Returns (discounts, zdr_ids, aa_by_id, cache_hits) where
@@ -286,7 +285,10 @@ def fetch_openrouter_frontend(args):
     if args.no_zdr:
         return discounts, zdr_ids, aa_by_id, cache_hits
     if not args.no_cache:
-        cached = load_cache("openrouter-zdr", args.cache_ttl)
+        # v3: the id set now comes from the per-endpoint ZDR list; v1/v2
+        # sets were derived from the models/find response and must never
+        # be read.
+        cached = load_cache("openrouter-zdr-v3", args.cache_ttl)
         if cached:
             return discounts, set(cached), aa_by_id, cache_hits | {"zdr"}
     try:
@@ -294,22 +296,25 @@ def fetch_openrouter_frontend(args):
     except Exception as exc:
         warn(f"could not fetch ZDR data: {exc}")
         return discounts, zdr_ids, aa_by_id, cache_hits
-    data = payload.get("data") if isinstance(payload, dict) else None
-    entries = data.get("models") if isinstance(data, dict) else None
+    # One entry per ZDR endpoint, keyed by the exact model id (variants
+    # such as :free are listed individually). An id is ZDR iff it has at
+    # least one ZDR endpoint. The models/find ?zdr=true filter cannot be
+    # used: it is model-level, so it lists non-ZDR variants (NVIDIA's
+    # :free endpoints) too. No "~" router aliases occur in this list, so
+    # unlike the find parsing there is no "~" skip; any stray id is
+    # harmless because build_candidates only matches real model ids.
+    entries = payload.get("data") if isinstance(payload, dict) else None
     ids = set()
-    for entry in entries or []:
+    for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict):
             continue
-        slug = entry.get("slug") or ""
-        if not slug or slug.startswith("~"):
-            continue
-        endpoint = entry.get("endpoint") or {}
-        variant = endpoint.get("variant") or ""
-        ids.add(slug if variant in ("", "standard") else f"{slug}:{variant}")
+        model_id = entry.get("model_id")
+        if isinstance(model_id, str) and model_id:
+            ids.add(model_id)
     if not ids:
         warn("no ZDR entries found; treating ZDR data as unavailable")
         return discounts, zdr_ids, aa_by_id, cache_hits
-    save_cache("openrouter-zdr", sorted(ids))
+    save_cache("openrouter-zdr-v3", sorted(ids))
     return discounts, ids, aa_by_id, cache_hits
 
 
