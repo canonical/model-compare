@@ -108,11 +108,17 @@ discounted.
 ## Zero data retention
 
 By default, only models with zero-data-retention (ZDR) endpoints are ranked —
-providers that do not retain prompts or outputs. The ZDR set comes from the
-same OpenRouter frontend API as the discounts (the website's `?zdr=true`
-filter). If that data cannot be fetched, the tool refuses to rank rather than
-silently considering non-ZDR models; pass `--no-zdr` to explicitly consider
-everything.
+providers that do not retain prompts or outputs. The ZDR set comes from
+OpenRouter's public per-endpoint ZDR list
+(`https://openrouter.ai/api/v1/endpoints/zdr`, public but undocumented): one
+entry per ZDR endpoint, keyed by the exact model id. A model id counts as ZDR
+if and only if it has at least one entry in that list. The website's
+`zdr=true` model filter matches this at the model level, but the list is
+per variant, so non-ZDR variants of a ZDR model are excluded — NVIDIA's
+`:free` endpoints, for example, train on prompts and are not listed, while
+their paid twins are. If the list cannot be fetched or yields no entries, the
+tool refuses to rank rather than silently considering non-ZDR models; pass
+`--no-zdr` to explicitly consider everything.
 
 ## Catalog output contract
 

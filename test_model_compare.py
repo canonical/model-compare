@@ -275,19 +275,38 @@ def frontend_payload():
     }
 
 
+def zdr_endpoint(model_id, provider="Acme"):
+    """One entry of OpenRouter's public per-endpoint ZDR list (live shape)."""
+    entry = {
+        "name": f"{provider} | {model_id}-20260901",
+        "model_id": model_id,
+        "model_name": f"Acme: {model_id}",
+        "context_length": 131072,
+        "pricing": {"prompt": "0.0000001", "completion": "0.0000002", "discount": 0},
+        "provider_name": provider,
+        "tag": provider.lower(),
+        "status": 0,
+    }
+    return entry
+
+
 def zdr_payload():
+    """GET /api/v1/endpoints/zdr: a flat list, one entry per ZDR endpoint."""
+    no_id = zdr_endpoint("acme/no-id")
+    del no_id["model_id"]
     return {
-        "data": {
-            "models": [
-                {
-                    "slug": "acme/a",
-                    "endpoint": {"variant": "standard", "pricing": {"prompt": "0.1"}},
-                },
-                {"slug": "acme/b", "endpoint": {"variant": "batch", "pricing": {}}},
-                {"slug": "~acme/private", "endpoint": {"variant": "standard"}},
-                {"slug": "acme/no-endpoint", "endpoint": None},
-            ]
-        }
+        "data": [
+            zdr_endpoint("acme/a"),
+            # several ZDR endpoints for the same model are normal
+            zdr_endpoint("acme/a", provider="Other"),
+            zdr_endpoint("acme/b:batch"),
+            no_id,
+            {**zdr_endpoint("acme/null-id"), "model_id": None},
+            {**zdr_endpoint("acme/empty-id"), "model_id": ""},
+            {**zdr_endpoint("acme/non-str-id"), "model_id": {"slug": "acme/x"}},
+            "not-a-dict",
+            None,
+        ]
     }
 
 
@@ -315,7 +334,7 @@ def test_fetch_openrouter_frontend_derives_all_payloads(monkeypatch, tmp_path):
         make_args(no_cache=True)
     )
     assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
-    assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert zdr_ids == {"acme/a", "acme/b:batch"}
     assert aa_by_id == {
         "acme/a": {
             "intelligence_index": 57.5,
@@ -326,6 +345,98 @@ def test_fetch_openrouter_frontend_derives_all_payloads(monkeypatch, tmp_path):
     assert cache_hits == set()
     assert mc.OPENROUTER_DISCOUNTS_URL in calls
     assert mc.OPENROUTER_ZDR_URL in calls
+
+
+def test_openrouter_zdr_url_is_the_per_endpoint_list():
+    # The models/find ?zdr=true response is model-level and its embedded
+    # endpoint is the default route, so it cannot tell which variants are
+    # ZDR. The authoritative source is the public per-endpoint list.
+    assert mc.OPENROUTER_ZDR_URL == "https://openrouter.ai/api/v1/endpoints/zdr"
+    assert mc.OPENROUTER_ZDR_URL != mc.OPENROUTER_DISCOUNTS_URL
+
+
+def test_fetch_openrouter_frontend_zdr_excludes_unlisted_variant(monkeypatch, tmp_path):
+    # Regression: nvidia/nemotron-3-ultra-550b-a55b has a ZDR endpoint, but
+    # its :free variant does not (those endpoints train on prompts) and was
+    # still published with zdr: true. A variant counts only if it is listed
+    # itself, even when its base slug is present and the find response
+    # (discount URL) carries the variant.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    base = {
+        "data": {
+            "models": [
+                {
+                    "slug": "nvidia/nemotron-3-ultra-550b-a55b",
+                    "endpoint": {"variant": "standard", "pricing": {"discount": 0}},
+                },
+                {
+                    "slug": "nvidia/nemotron-3-ultra-550b-a55b",
+                    "endpoint": {"variant": "free", "pricing": {"discount": 0}},
+                },
+            ]
+        }
+    }
+    zdr = {
+        "data": [
+            zdr_endpoint("nvidia/nemotron-3-ultra-550b-a55b", provider="BaseTen"),
+        ]
+    }
+    calls = []
+    stub_frontend(monkeypatch, calls, base, zdr)
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=True)
+    )
+    assert zdr_ids == {"nvidia/nemotron-3-ultra-550b-a55b"}
+    assert "nvidia/nemotron-3-ultra-550b-a55b:free" in discounts  # find has it
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"data": []},
+        {"data": None},
+        {},
+        [],
+        # the old models/find shape is not the per-endpoint list
+        {"data": {"models": [{"slug": "acme/a", "endpoint": {"variant": "standard"}}]}},
+        # entries without a usable model_id
+        {"data": [{"name": "Acme | acme/a", "provider_name": "Acme"}, {"model_id": ""}]},
+    ],
+)
+def test_fetch_openrouter_frontend_zdr_fails_closed_without_entries(
+    monkeypatch, tmp_path, capsys, payload
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+    stub_frontend(monkeypatch, calls, frontend_payload(), payload)
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=False, cache_ttl=3600)
+    )
+    assert zdr_ids == set()
+    assert discounts  # base data unaffected
+    assert "no ZDR entries found" in capsys.readouterr().err
+    assert not (tmp_path / "model-compare" / "openrouter-zdr-v3.json").exists()
+
+
+def test_fetch_openrouter_frontend_ignores_stale_v2_zdr_cache(monkeypatch, tmp_path):
+    # v1/v2 sets were derived from the find response's default-route policy;
+    # the semantics changed, so they must never be read.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    cache_dir = tmp_path / "model-compare"
+    cache_dir.mkdir(parents=True)
+    for stale in ("openrouter-zdr.json", "openrouter-zdr-v2.json"):
+        (cache_dir / stale).write_text(
+            json.dumps({"fetched_at": time.time(), "payload": ["acme/stale"]})
+        )
+    calls = []
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
+    discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
+        make_args(no_cache=False, cache_ttl=3600)
+    )
+    assert zdr_ids == {"acme/a", "acme/b:batch"}
+    assert "zdr" not in cache_hits
+    saved = json.loads((cache_dir / "openrouter-zdr-v3.json").read_text())
+    assert saved["payload"] == ["acme/a", "acme/b:batch"]
 
 
 def test_fetch_openrouter_frontend_caches_per_payload(monkeypatch, tmp_path):
@@ -352,7 +463,7 @@ def test_fetch_openrouter_frontend_base_failure_keeps_zdr_decoupled(
     )
     assert discounts == {}
     assert aa_by_id == {}
-    assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert zdr_ids == {"acme/a", "acme/b:batch"}
     assert cache_hits == set()
     err = capsys.readouterr().err
     assert "could not fetch discount data" in err
@@ -363,9 +474,7 @@ def test_fetch_openrouter_frontend_base_failure_keeps_zdr_decoupled(
 def test_fetch_openrouter_frontend_does_not_cache_empty(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
-    stub_frontend(
-        monkeypatch, calls, {"data": {"models": []}}, {"data": {"models": []}}
-    )
+    stub_frontend(monkeypatch, calls, {"data": {"models": []}}, {"data": []})
     args = make_args(no_cache=False, cache_ttl=3600)
     first = mc.fetch_openrouter_frontend(args)
     second = mc.fetch_openrouter_frontend(args)
@@ -375,7 +484,7 @@ def test_fetch_openrouter_frontend_does_not_cache_empty(monkeypatch, tmp_path):
     cache_dir = tmp_path / "model-compare"
     assert not (cache_dir / "openrouter-frontend-discounts.json").exists()
     assert not (cache_dir / "openrouter-frontend-aa.json").exists()
-    assert not (cache_dir / "openrouter-zdr.json").exists()
+    assert not (cache_dir / "openrouter-zdr-v3.json").exists()
 
 
 def test_fetch_openrouter_frontend_treats_empty_cached_payloads_as_miss(
@@ -393,7 +502,7 @@ def test_fetch_openrouter_frontend_treats_empty_cached_payloads_as_miss(
     (cache_dir / "openrouter-frontend-aa.json").write_text(
         json.dumps({"fetched_at": now, "payload": {}})
     )
-    (cache_dir / "openrouter-zdr.json").write_text(
+    (cache_dir / "openrouter-zdr-v3.json").write_text(
         json.dumps({"fetched_at": now, "payload": []})
     )
     discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
@@ -401,7 +510,7 @@ def test_fetch_openrouter_frontend_treats_empty_cached_payloads_as_miss(
     )
     assert len(calls) == 2  # all three payloads empty in cache -> both fetches
     assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
-    assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert zdr_ids == {"acme/a", "acme/b:batch"}
     assert cache_hits == set()
 
 
@@ -430,7 +539,7 @@ def test_fetch_openrouter_frontend_fresh_fetch_replaces_cached_discounts(
             "agentic_index": 58.2,
         }
     }
-    assert zdr_ids == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert zdr_ids == {"acme/a", "acme/b:batch"}
     assert cache_hits == set()  # fresh discounts discard the cache hit
     saved = json.loads((cache_dir / "openrouter-frontend-discounts.json").read_text())
     assert saved["payload"] == discounts
@@ -616,9 +725,9 @@ def test_fetch_openrouter_frontend_normal_run_after_no_zdr_run(monkeypatch, tmp_
         make_args(no_cache=False, cache_ttl=3600, no_zdr=True)
     )
     assert first[1] == set()
-    assert not (tmp_path / "model-compare" / "openrouter-zdr.json").exists()
+    assert not (tmp_path / "model-compare" / "openrouter-zdr-v3.json").exists()
     second = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
-    assert second[1] == {"acme/a", "acme/b:batch", "acme/no-endpoint"}
+    assert second[1] == {"acme/a", "acme/b:batch"}
     assert calls == [mc.OPENROUTER_DISCOUNTS_URL, mc.OPENROUTER_ZDR_URL]
 
 
@@ -1165,10 +1274,23 @@ def _realistic_openrouter_payload():
     }
 
 
+def _realistic_zdr_payload():
+    """Mirror the real `/api/v1/endpoints/zdr` response with real ids."""
+    return {
+        "data": [
+            zdr_endpoint("openai/gpt-4o", provider="Azure"),
+            zdr_endpoint("openai/gpt-4o", provider="OpenAI"),
+            zdr_endpoint("openai/gpt-4o:free", provider="OpenAI"),
+            zdr_endpoint("anthropic/claude-sonnet-4-20250514:batch", provider="Google"),
+        ]
+    }
+
+
 def test_fetch_openrouter_frontend_realistic_slugs(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    monkeypatch.setattr(
-        mc, "fetch_json", lambda *a, **k: _realistic_openrouter_payload()
+    calls = []
+    stub_frontend(
+        monkeypatch, calls, _realistic_openrouter_payload(), _realistic_zdr_payload()
     )
     discounts, zdr_ids, aa_by_id, cache_hits = mc.fetch_openrouter_frontend(
         make_args(no_cache=True)
