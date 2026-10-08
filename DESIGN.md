@@ -18,7 +18,7 @@ How the tool works under the hood. End-user docs live in the
      indices per model (`benchmarks.aa`), keyed by exact OpenRouter id.
      Consumed first — no separate fetch, and exact keys make conflation
      impossible.
-   - **AA API v2** (`artificialanalysis.ai/api/v2/data/llms/models`) for
+   - **AA API v2** (`artificialanalysis.ai/api/v2/language/models/free`) for
      models OpenRouter does not cover, when an API key is supplied through
      `--aa-api-key` or the `AA_API_KEY` env var
      ([free key](https://artificialanalysis.ai)); full model coverage.
@@ -77,8 +77,11 @@ everything), and (with `--exclude-free`) rate-limited `:free` variants.
 The intelligence index no longer needs a separate source: OpenRouter
 republishes the AA indices alongside its own benchmark data, keyed by exact
 OpenRouter id, and the script reads them from the frontend API it already
-fetches. Only models missing there fall back to the AA API (key required;
-free tier is enough) and then the JSON-LD scrape embedded in
+fetches. Only models missing there fall back to the AA API — the supported
+V2 free-tier endpoint
+[`/api/v2/language/models/free`](https://artificialanalysis.ai/data-api/docs)
+(key required; any tier key works, free is enough; responses paginate at 200
+models per page and are followed) — and then the JSON-LD scrape embedded in
 `artificialanalysis.ai/models` — both matched by exact slug/name only. All
 paths are cached identically; if none yields a value you get a warning on
 stderr and a price/context/age-only ranking. `--quality-ref` controls how

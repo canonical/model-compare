@@ -1,6 +1,7 @@
 """Tests for the web/publish.py orchestrator (all subprocesses stubbed)."""
 
 import http.client
+import json
 import subprocess
 import urllib.error
 from pathlib import Path
@@ -216,6 +217,54 @@ def test_build_site_fails_when_expected_artifacts_missing(tmp_path, monkeypatch)
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
     with pytest.raises(RuntimeError):
         publish.build_site(tmp_path / "site")
+
+
+def _catalog_run(mode, calls):
+    """Stub the pipeline, writing a catalog.json carrying the given AA mode."""
+
+    def fake_run(cmd, cwd=None, stdout=None, check=True):
+        calls.append(cmd)
+        if "--best" in cmd:
+            stdout.write("openrouter/x/y\n")
+        if Path(cmd[1]).name == "build_site_data.py":
+            out_dir = Path(cmd[cmd.index("--output") + 1]).parent
+            (out_dir / "catalog.json").write_text(
+                json.dumps({"sources": {"aa": {"mode": mode}}})
+            )
+            for name in ("data.json", "history.json", "highlights.json"):
+                (out_dir / name).touch()
+        return subprocess.CompletedProcess(cmd, 0)
+
+    return fake_run
+
+
+@pytest.mark.parametrize("mode", ["api", "scrape", "openrouter"])
+def test_build_site_aa_gate_passes_live_modes(tmp_path, monkeypatch, mode):
+    # "openrouter" is what healthy runs publish whenever OpenRouter
+    # benchmarks cover a matched model, key or no key -- the gate must not
+    # false-positive on it.
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _catalog_run(mode, calls))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    monkeypatch.setenv("AA_API_KEY", "dummy-key")
+    publish.build_site(tmp_path / "site")
+
+
+def test_build_site_aa_gate_fails_when_aa_absent_despite_key(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _catalog_run("none", calls))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    monkeypatch.setenv("AA_API_KEY", "dummy-key")
+    with pytest.raises(RuntimeError, match="AA_API_KEY is set"):
+        publish.build_site(tmp_path / "site")
+
+
+def test_build_site_aa_gate_inactive_without_key(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _catalog_run("none", calls))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    publish.build_site(tmp_path / "site")
 
 
 def test_main_output_dir(monkeypatch, tmp_path):

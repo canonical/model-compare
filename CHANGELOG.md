@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The AA intelligence fallback now reads the supported V2 endpoint
+  `/api/v2/language/models/free` (any tier key; responses paginate at 200
+  models per page and are followed, capped at 25 pages) instead of the legacy
+  `/api/v2/data/llms/models`, which Artificial Analysis retires on
+  2026-11-04. Failure behavior is unchanged: page-1 errors still fall back to
+  the page scrape, later-page errors keep the pages already fetched.
+
 ## [0.2.2] - 2026-09-20
 
 ### Changed

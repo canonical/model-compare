@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import json
+import os
 import shutil
 import subprocess
 import sys
@@ -133,6 +135,23 @@ def build_site(output_dir: Path) -> None:
         )
     for name in artifacts:
         print(f"publish: wrote {output_dir / name}")
+
+    # With an AA key configured, a catalog whose AA mode is "none" means the
+    # keyed API and the page scrape both yielded nothing -- a silent auth or
+    # coverage failure the site would otherwise deploy without a peep. Other
+    # modes are live data ("api"/"scrape") or a full OpenRouter-benchmark
+    # takeover ("openrouter"), so only "none" fails the publish.
+    if os.environ.get("AA_API_KEY"):
+        with open(output_dir / "catalog.json", encoding="utf-8") as fh:
+            aa_sources = (json.load(fh).get("sources") or {}).get("aa") or {}
+        aa_mode = aa_sources.get("mode")
+        if aa_mode == "none":
+            raise RuntimeError(
+                "publish: AA_API_KEY is set but catalog sources.aa.mode is "
+                "'none': the AA API and the page scrape both failed. Check "
+                "the key and artificialanalysis.ai before deploying."
+            )
+        print(f"publish: AA source mode {aa_mode}")
 
 
 def main(argv: list[str] | None = None) -> int:

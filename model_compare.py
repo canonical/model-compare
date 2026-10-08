@@ -63,7 +63,10 @@ OPENROUTER_ZDR_URL = (
     "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text&zdr=true"
 )
 AA_MODELS_PAGE_URL = "https://artificialanalysis.ai/models"
-AA_API_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
+# Supported V2 free-tier replacement for the retired /api/v2/data/llms/models
+# (legacy endpoints 410 after 2026-11-04; see
+# https://artificialanalysis.ai/data-api/migrate-v2-data).
+AA_API_URL = "https://artificialanalysis.ai/api/v2/language/models/free"
 VERSION = "0.2.2"
 USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 
@@ -346,57 +349,73 @@ def parse_iso_datetime(value):
 
 
 def aa_api_entries(api_key: str) -> list:
-    payload = fetch_json(AA_API_URL, headers={"x-api-key": api_key}, timeout=30)
-    found = []
+    """Intelligence entries from AA's V2 language models endpoint.
 
-    def pick_index(node: dict):
-        # Prefer the canonical field name; only fall back to a substring match
-        # so a future sibling metric like "estimatedIntelligenceCost" can't win
-        # by sheer dict-ordering luck.
-        canonical = node.get("artificialAnalysisIntelligenceIndex")
-        if isinstance(canonical, (int, float)):
-            return float(canonical)
-        for key, val in node.items():
-            key_l = key.lower()
-            if (
-                isinstance(val, (int, float))
-                and "intelligence" in key_l
-                and "estimated" not in key_l
-                and "cost" not in key_l
-            ):
-                return float(val)
-        return None
-
-    def walk(node, depth=0):
-        if depth > 100:
-            return
-        if isinstance(node, dict):
-            ident = (
-                node.get("id")
-                or node.get("slug")
-                or node.get("model")
-                or node.get("name")
+    Documented envelope: {tier, intelligence_index_version, pagination,
+    data[]} with snake_case fields; the index lives at
+    data[].evaluations.artificial_analysis_intelligence_index. Items
+    without a usable slug/name or without a finite numeric index are
+    skipped (nulls mean "not measured"). Pagination follows the documented
+    has_more/total_pages contract with a 25-page hard cap; a failure past
+    page 1 is best-effort (warn, keep earlier pages), a page-1 failure
+    propagates.
+    """
+    entries = {}
+    page = 1
+    while page <= 25:  # hard cap: halt after processing page 25
+        try:
+            payload = fetch_json(
+                f"{AA_API_URL}?page={page}",
+                headers={"x-api-key": api_key},
+                timeout=30,
             )
-            index = pick_index(node)
-            if ident and index is not None:
-                found.append(
-                    {
-                        "key": str(ident),
-                        "name": str(node.get("name") or ident),
-                        "index": index,
-                    }
-                )
-            for val in node.values():
-                walk(val, depth + 1)
-        elif isinstance(node, list):
-            for val in node:
-                walk(val, depth + 1)
-
-    walk(payload)
-    deduped = {}
-    for entry in found:
-        deduped.setdefault(entry["key"], entry)
-    return list(deduped.values())
+        except Exception as exc:
+            if page == 1:
+                raise
+            warn(f"AA API page {page} failed ({exc}); using entries collected so far")
+            break
+        for item in (payload.get("data") or []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            slug = item.get("slug")
+            name = item.get("name")
+            key = (
+                slug
+                if isinstance(slug, str) and slug
+                else (name if isinstance(name, str) and name else None)
+            )
+            if not key:
+                continue
+            evals = item.get("evaluations")
+            raw = (
+                evals.get("artificial_analysis_intelligence_index")
+                if isinstance(evals, dict)
+                else None
+            )
+            if (
+                not isinstance(raw, (int, float))
+                or isinstance(raw, bool)
+                or not math.isfinite(raw)
+            ):
+                continue
+            entries.setdefault(
+                key,
+                {
+                    "key": key,
+                    "name": name if isinstance(name, str) and name else key,
+                    "index": float(raw),
+                },
+            )
+        pag = payload.get("pagination") if isinstance(payload, dict) else None
+        if not isinstance(pag, dict):
+            break  # undocumented shape: single-page degrade
+        if pag.get("has_more") is not True:
+            break
+        total_pages = pag.get("total_pages")
+        if isinstance(total_pages, int) and page >= total_pages:
+            break
+        page += 1
+    return list(entries.values())
 
 
 def aa_scrape_entries() -> list:

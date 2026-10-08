@@ -998,61 +998,230 @@ def test_base_model_id_strips_variant():
 
 
 # ---------------------------------------------------------------------------
-# aa_api_entries walk (Fix #3 canonical key, Fix #4 depth guard)
+# aa_api_entries (AA V2 language models/free parser)
 # ---------------------------------------------------------------------------
 
 
-def test_aa_api_prefers_canonical_index_key(monkeypatch):
-    payload = {
-        "data": [
-            {
-                "id": "acme/m",
-                "name": "M",
-                # a decoy metric that also contains "intelligence"
-                "otherIntelligenceScore": 999.0,
-                "artificialAnalysisIntelligenceIndex": 42.0,
-            }
-        ]
-    }
+def aa_page(items, page=1, total_pages=1, has_more=False, with_pagination=True):
+    out = {"tier": "free", "intelligence_index_version": 4.3, "data": items}
+    if with_pagination:
+        out["pagination"] = {
+            "page": page,
+            "page_size": 200,
+            "total_pages": total_pages,
+            "has_more": has_more,
+        }
+    return out
+
+
+def aa_item(slug="acme/m", name="M", index=42.0):
+    item = {"name": name}
+    if slug is not None:
+        item["slug"] = slug
+    if index is not None:
+        item["evaluations"] = {"artificial_analysis_intelligence_index": index}
+    return item
+
+
+def test_aa_api_sends_auth_header_and_timeout(monkeypatch):
+    seen = {}
+
+    def fake_fetch(url, headers=None, timeout=None, **k):
+        seen.update(headers=headers, timeout=timeout)
+        return aa_page([aa_item()])
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+    mc.aa_api_entries("dummy-key")
+    assert seen["headers"] == {"x-api-key": "dummy-key"}
+    assert seen["timeout"] == 30
+
+
+def test_aa_api_parses_documented_shape(monkeypatch):
+    payload = aa_page([aa_item("acme/a", "A", 42.5), aa_item("acme/b", "B", None)])
     monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
     entries = mc.aa_api_entries("dummy-key")
+    assert entries == [{"key": "acme/a", "name": "A", "index": 42.5}]
+
+
+def test_aa_api_skips_unmeasurable_indexes(monkeypatch):
+    payload = aa_page(
+        [
+            aa_item("acme/ok", "OK", 5.0),  # the only measurable item
+            aa_item("acme/a", "A", None),  # no evaluations at all
+            {
+                "slug": "acme/b",
+                "name": "B",
+                "evaluations": {"artificial_analysis_intelligence_index": None},
+            },
+            {
+                "slug": "acme/c",
+                "name": "C",
+                "evaluations": {"artificial_analysis_intelligence_index": "42"},
+            },
+            {
+                "slug": "acme/d",
+                "name": "D",
+                "evaluations": {"artificial_analysis_intelligence_index": True},
+            },
+            {
+                "slug": "acme/e",
+                "name": "E",
+                "evaluations": {"artificial_analysis_intelligence_index": float("nan")},
+            },
+        ]
+    )
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    assert mc.aa_api_entries("dummy-key") == [
+        {"key": "acme/ok", "name": "OK", "index": 5.0}
+    ]
+
+
+def test_aa_api_key_falls_back_to_name(monkeypatch):
+    payload = aa_page(
+        [
+            {
+                "name": "Some Model",
+                "evaluations": {"artificial_analysis_intelligence_index": 7.0},
+            }
+        ]
+    )
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    entries = mc.aa_api_entries("dummy-key")
+    assert entries == [{"key": "Some Model", "name": "Some Model", "index": 7.0}]
+
+
+def test_aa_api_ignores_non_dict_data_items(monkeypatch):
+    payload = aa_page(["junk", 3, aa_item()])
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    assert len(mc.aa_api_entries("dummy-key")) == 1
+
+
+def aa_url_stub(payloads_by_page):
+    calls = []
+
+    def fake_fetch(url, *a, **k):
+        calls.append(url)
+        page = int(url.split("page=")[-1])
+        return payloads_by_page[page]
+
+    return fake_fetch, calls
+
+
+def test_aa_api_follows_pagination_and_dedupes(monkeypatch):
+    pages = {
+        1: aa_page([aa_item("acme/a", "A", 40.0)], 1, 2, True),
+        2: aa_page(
+            [aa_item("acme/a", "A", 41.0), aa_item("acme/b", "B", 9.0)], 2, 2, False
+        ),
+    }
+    fake, calls = aa_url_stub(pages)
+    monkeypatch.setattr(mc, "fetch_json", fake)
+    entries = mc.aa_api_entries("dummy-key")
+    assert calls == [f"{mc.AA_API_URL}?page=1", f"{mc.AA_API_URL}?page=2"]
+    assert entries == [
+        {"key": "acme/a", "name": "A", "index": 40.0},  # first page wins
+        {"key": "acme/b", "name": "B", "index": 9.0},
+    ]
+
+
+def test_aa_api_caps_runaway_pagination(monkeypatch, capsys):
+    fake, calls = aa_url_stub(
+        {p: aa_page([aa_item()], p, 999, True) for p in range(1, 30)}
+    )
+    monkeypatch.setattr(mc, "fetch_json", fake)
+    mc.aa_api_entries("dummy-key")
+    assert len(calls) == 25
+    assert calls[-1] == f"{mc.AA_API_URL}?page=25"
+
+
+def test_aa_api_degrades_when_pagination_missing(monkeypatch):
+    fake, calls = aa_url_stub({1: aa_page([aa_item()], with_pagination=False)})
+    monkeypatch.setattr(mc, "fetch_json", fake)
+    entries = mc.aa_api_entries("dummy-key")
+    assert calls == [f"{mc.AA_API_URL}?page=1"]
     assert len(entries) == 1
-    assert entries[0]["index"] == 42.0
 
 
-def test_aa_api_substring_fallback(monkeypatch):
-    payload = {"data": [{"id": "acme/m", "name": "M", "intelligenceIndex": 33.0}]}
-    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+def test_aa_api_survives_null_total_pages(monkeypatch):
+    page1 = aa_page([aa_item()], 1, 2, True)
+    page1["pagination"]["total_pages"] = None
+    fake, calls = aa_url_stub({1: page1, 2: aa_page([], 2, None, False)})
+    monkeypatch.setattr(mc, "fetch_json", fake)
+    mc.aa_api_entries("dummy-key")
+    assert len(calls) == 2  # no TypeError; continued past the null
+
+
+def test_aa_api_stops_when_page_reaches_total_pages(monkeypatch):
+    # has_more=True on the last page is the documented terminal state: page
+    # == total_pages must stop, not loop (or error past the last fixture).
+    fake, calls = aa_url_stub(
+        {
+            1: aa_page([aa_item()], 1, 2, True),
+            2: aa_page([aa_item("acme/b", "B", 9.0)], 2, 2, True),
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_json", fake)
     entries = mc.aa_api_entries("dummy-key")
-    assert entries[0]["index"] == 33.0
+    assert calls == [f"{mc.AA_API_URL}?page=1", f"{mc.AA_API_URL}?page=2"]
+    assert len(entries) == 2
 
 
-def test_aa_api_ignores_estimated_and_cost(monkeypatch):
-    payload = {
-        "data": [
-            {
-                "id": "acme/m",
-                "name": "M",
-                "estimatedIntelligence": 1.0,
-                "intelligenceCost": 2.0,
-            }
-        ]
-    }
-    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+def test_aa_api_treats_truthy_non_true_has_more_as_stop(monkeypatch):
+    # The contract is has_more == True exactly; a truthy non-True value is
+    # an undocumented shape and must stop, not keep paginating.
+    fake, calls = aa_url_stub({1: aa_page([aa_item()], 1, 5, "true")})
+    monkeypatch.setattr(mc, "fetch_json", fake)
+    mc.aa_api_entries("dummy-key")
+    assert calls == [f"{mc.AA_API_URL}?page=1"]
+
+
+def test_aa_api_best_effort_on_mid_pagination_failure(monkeypatch, capsys):
+    def fake_fetch(url, *a, **k):
+        if url.endswith("page=2"):
+            raise RuntimeError("boom")
+        return aa_page([aa_item("acme/a", "A", 40.0)], 1, 2, True)
+
+    monkeypatch.setattr(mc, "fetch_json", fake_fetch)
     entries = mc.aa_api_entries("dummy-key")
-    assert entries == []
+    assert entries == [{"key": "acme/a", "name": "A", "index": 40.0}]
+    assert (
+        "AA API page 2 failed (boom); using entries collected so far"
+        in capsys.readouterr().err
+    )
 
 
-def test_aa_api_depth_guard_does_not_recurse_forever(monkeypatch):
-    # Build a payload deeper than the guard threshold; must return without RecursionError.
-    node = {"id": "acme/deep", "name": "Deep", "intelligenceIndex": 10.0}
-    for _ in range(500):
-        node = {"child": node}
-    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: node)
-    entries = mc.aa_api_entries("dummy-key")
-    # The scored leaf is deeper than the guard, so it is not collected -- but crucially
-    # the call completes instead of raising RecursionError.
-    assert isinstance(entries, list)
+def test_fetch_aa_entries_api_failure_falls_back_to_scrape(monkeypatch, capsys):
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    monkeypatch.setattr(
+        mc,
+        "fetch_json",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("401")),
+    )
+    monkeypatch.setattr(
+        mc,
+        "aa_scrape_entries",
+        lambda: [{"key": "scraped", "name": "S", "index": 1.0, "estimated": False}],
+    )
+    entries, source, cached = mc.fetch_aa_entries(make_args(aa_api_key="dummy-key"))
+    assert entries and source == "AA page scrape" and cached is False
+    assert "AA API request failed" in capsys.readouterr().err
+
+
+def test_fetch_aa_entries_no_key_skips_api(monkeypatch):
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    calls = []
+    monkeypatch.setattr(
+        mc,
+        "fetch_json",
+        lambda *a, **k: (
+            calls.append(1)
+            or (_ for _ in ()).throw(AssertionError("API called without key"))
+        ),
+    )
+    monkeypatch.setattr(mc, "aa_scrape_entries", lambda: [])
+    entries, source, cached = mc.fetch_aa_entries(make_args())
+    assert (entries, source, cached) == ([], None, False)
+    assert calls == []
 
 
 # ---------------------------------------------------------------------------
