@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The AA intelligence fallback now reads the supported V2 endpoint
+  `/api/v2/language/models/free` (any tier key; responses paginate at 200
+  models per page and are followed, capped at 25 pages) instead of the legacy
+  `/api/v2/data/llms/models`, which Artificial Analysis retires on
+  2026-11-04. Failure behavior is unchanged: page-1 errors still fall back to
+  the page scrape, later-page errors keep the pages already fetched.
+
 ### Fixed
 
 - The ZDR filter now reads OpenRouter's per-endpoint ZDR list
