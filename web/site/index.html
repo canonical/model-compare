@@ -609,7 +609,11 @@
       }
 
       function renderDeals() {
-        var deals = (data && data.schedules) || [];
+        // render() also runs when history.json lands first: with data.json
+        // not yet loaded (or failed) the section keeps its initial hidden
+        // state instead of claiming there are no deals.
+        if (!data) return;
+        var deals = data.schedules || [];
         var empty = document.getElementById("deals-empty");
         var intro = document.getElementById("deals-intro");
         var table = document.getElementById("deals");
