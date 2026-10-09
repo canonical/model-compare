@@ -791,6 +791,28 @@ def test_fmt_sched_detail_grammar():
     assert all(s.isascii() for s in [detail])
 
 
+def test_fmt_sched_detail_seven_days_is_daily():
+    def window(days, start, end):
+        return {
+            "utc_days": days,
+            "utc_start": start,
+            "utc_end": end,
+            "coverage": 0.3333,
+            "price_in": 1e-6,
+            "price_out": 1e-6,
+            "blended": 1e-6,
+        }
+
+    week = list(mc.WEEKDAYS)
+    # an explicit all-seven-days list labels exactly like utc_days absent
+    assert mc.fmt_sched_detail([window(week, 0, 800)], 2e-6) == (
+        "daily 00:00-08:00 UTC"
+    )
+    # ... and shares one group with absent-days windows
+    mixed = [window(None, 1600, 0), window(week, 0, 800)]
+    assert mc.fmt_sched_detail(mixed, 2e-6) == "daily 00:00-08:00, 16:00-00:00 UTC"
+
+
 def test_fmt_sched_detail_none_cases():
     assert mc.fmt_sched_detail(None, None) is None
     # a schedule whose every window is at the peak price -> no off-peak -> None

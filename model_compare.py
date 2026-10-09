@@ -735,7 +735,9 @@ def fmt_sched_detail(schedule, peak_blended):
     groups = {}
     for window in offpeak:
         days = window["utc_days"]
-        if days is None:
+        # All seven weekdays listed explicitly is the same day set as
+        # utc_days absent: same group, same "daily" label (spec 5.6).
+        if days is None or set(days) == set(WEEKDAYS):
             key = (0, -1, ())
             label = "daily"
         else:
