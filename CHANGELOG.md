@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- A malformed AA API page (a non-list `data` field, or an intelligence index
+  value too large for a float) no longer discards the whole AA dataset
+  (issue #12): the malformed page or item is skipped and pages already
+  collected are kept.
+
 ## [0.2.7] - 2026-10-09
 
 ### Removed

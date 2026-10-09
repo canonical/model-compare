@@ -424,7 +424,8 @@ def aa_api_entries(api_key: str) -> list:
                 raise
             warn(f"AA API page {page} failed ({exc}); using entries collected so far")
             break
-        for item in (payload.get("data") or []) if isinstance(payload, dict) else []:
+        data = payload.get("data") if isinstance(payload, dict) else None
+        for item in data if isinstance(data, list) else []:
             if not isinstance(item, dict):
                 continue
             slug = item.get("slug")
@@ -442,18 +443,20 @@ def aa_api_entries(api_key: str) -> list:
                 if isinstance(evals, dict)
                 else None
             )
-            if (
-                not isinstance(raw, (int, float))
-                or isinstance(raw, bool)
-                or not math.isfinite(raw)
-            ):
+            if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+                continue
+            try:
+                index = float(raw)  # huge ints raise OverflowError
+            except OverflowError:
+                continue
+            if not math.isfinite(index):
                 continue
             entries.setdefault(
                 key,
                 {
                     "key": key,
                     "name": name if isinstance(name, str) and name else key,
-                    "index": float(raw),
+                    "index": index,
                 },
             )
         pag = payload.get("pagination") if isinstance(payload, dict) else None

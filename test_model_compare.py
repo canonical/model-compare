@@ -415,7 +415,12 @@ def test_fetch_openrouter_frontend_zdr_excludes_unlisted_variant(monkeypatch, tm
         # the old models/find shape is not the per-endpoint list
         {"data": {"models": [{"slug": "acme/a", "endpoint": {"variant": "standard"}}]}},
         # entries without a usable model_id
-        {"data": [{"name": "Acme | acme/a", "provider_name": "Acme"}, {"model_id": ""}]},
+        {
+            "data": [
+                {"name": "Acme | acme/a", "provider_name": "Acme"},
+                {"model_id": ""},
+            ]
+        },
     ],
 )
 def test_fetch_openrouter_frontend_zdr_fails_closed_without_entries(
@@ -1206,12 +1211,47 @@ def test_aa_api_skips_unmeasurable_indexes(monkeypatch):
                 "name": "E",
                 "evaluations": {"artificial_analysis_intelligence_index": float("nan")},
             },
+            {"slug": "acme/f", "name": "F", "evaluations": {}},  # empty dict
+            {"slug": "acme/g", "name": "G", "evaluations": [42.0]},  # non-dict
         ]
     )
     monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
     assert mc.aa_api_entries("dummy-key") == [
         {"key": "acme/ok", "name": "OK", "index": 5.0}
     ]
+
+
+def test_aa_api_skips_index_too_large_for_float(monkeypatch):
+    # A huge JSON integer is a valid int but overflows float conversion; it
+    # must be skipped like any unmeasurable value, not abort the dataset.
+    payload = aa_page(
+        [aa_item("acme/huge", "Huge", 10**400), aa_item("acme/ok", "OK", 5.0)]
+    )
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    assert mc.aa_api_entries("dummy-key") == [
+        {"key": "acme/ok", "name": "OK", "index": 5.0}
+    ]
+
+
+def test_aa_api_non_list_data_on_page_one_yields_nothing(monkeypatch):
+    fake, calls = aa_url_stub({1: aa_page(5)})
+    monkeypatch.setattr(mc, "fetch_json", fake)
+    assert mc.aa_api_entries("dummy-key") == []
+    assert calls == [f"{mc.AA_API_URL}?page=1"]
+
+
+def test_aa_api_non_list_data_mid_pagination_keeps_earlier_pages(monkeypatch):
+    fake, calls = aa_url_stub(
+        {
+            1: aa_page([aa_item("acme/a", "A", 40.0)], 1, 2, True),
+            2: aa_page(5, 2, 2, False),
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_json", fake)
+    assert mc.aa_api_entries("dummy-key") == [
+        {"key": "acme/a", "name": "A", "index": 40.0}
+    ]
+    assert calls == [f"{mc.AA_API_URL}?page=1", f"{mc.AA_API_URL}?page=2"]
 
 
 def test_aa_api_key_falls_back_to_name(monkeypatch):
