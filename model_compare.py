@@ -10,9 +10,9 @@ the most capability per dollar today. Data sources:
     source: OpenRouter's republished AA benchmarks (data.benchmarks in
     the frontend models API, exact per-model keys). When a model is not
     covered there: the AA API v2 (--aa-api-key or the AA_API_KEY
-    environment variable; free key at artificialanalysis.ai), then a
-    best-effort scrape of artificialanalysis.ai/models -- both matched
-    by exact slug/name only. Unmatched models rank on price/context/age.
+    environment variable; free key at artificialanalysis.ai), matched by
+    exact slug/name only. Without a key, AA data comes only from
+    OpenRouter. Unmatched models rank on price/context/age.
 
 Ranking: every criterion is normalized to [0, 1] and combined with
 priority-dependent weights:
@@ -63,7 +63,6 @@ OPENROUTER_DISCOUNTS_URL = (
 # Public per-endpoint list of zero-data-retention endpoints; DESIGN.md
 # ("Zero data retention") describes how its entries are interpreted.
 OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
-AA_MODELS_PAGE_URL = "https://artificialanalysis.ai/models"
 # Supported V2 free-tier replacement for the retired /api/v2/data/llms/models
 # (legacy endpoints 410 after 2026-11-04; see
 # https://artificialanalysis.ai/data-api/migrate-v2-data).
@@ -469,78 +468,34 @@ def aa_api_entries(api_key: str) -> list:
     return list(entries.values())
 
 
-def aa_scrape_entries() -> list:
-    html = http_get(
-        AA_MODELS_PAGE_URL, headers={"Accept": "text/html"}, timeout=45
-    ).decode("utf-8", "replace")
-    entries = {}
-
-    def add(key, name, index, estimated):
-        if not key or index is None:
-            return
-        current = entries.get(key)
-        if current is None or (current["estimated"] and not estimated):
-            entries[key] = {
-                "key": key,
-                "name": name,
-                "index": index,
-                "estimated": estimated,
-            }
-
-    for block in re.findall(
-        r'<script type="application/ld\+json">(.*?)</script>', html, re.S
-    ):
-        try:
-            doc = json.loads(block)
-        except ValueError:
-            continue
-        for node in doc if isinstance(doc, list) else [doc]:
-            if not isinstance(node, dict):
-                continue
-            for item in node.get("data") or []:
-                if isinstance(item, dict) and isinstance(
-                    item.get("artificialAnalysisIntelligenceIndex"), (int, float)
-                ):
-                    slug = (item.get("detailsUrl") or "").rsplit("/", 1)[-1]
-                    add(
-                        slug,
-                        item.get("label") or slug,
-                        float(item["artificialAnalysisIntelligenceIndex"]),
-                        False,
-                    )
-
-    return list(entries.values())
-
-
 def fetch_aa_entries(args):
+    """AA intelligence entries from the keyed AA API v2, or nothing.
+
+    Returns (entries, source, cached). With a key, an API failure or an
+    empty result warns and yields ([], None, False). Without a key this is
+    silent and yields ([], None, False): OpenRouter's benchmarks are the
+    primary source and the catalog records the absence (sources.aa).
+    """
     if not args.no_cache:
         # v2: entries cached under the old key predate the V2 endpoint
-        # migration and must never be read.
+        # migration and must never be read. Only AA API entries are read;
+        # build_catalog rejects any other source as unknown.
         cached = load_cache("aa-intelligence-v2", args.cache_ttl)
-        if isinstance(cached, dict):
+        if isinstance(cached, dict) and cached.get("source") == "AA API v2":
             return cached.get("entries", []), cached.get("source"), True
     api_key = args.aa_api_key or os.environ.get("AA_API_KEY")
-    if api_key:
-        try:
-            entries = aa_api_entries(api_key)
-            if entries:
-                save_cache(
-                    "aa-intelligence-v2", {"entries": entries, "source": "AA API v2"}
-                )
-                return entries, "AA API v2", False
-            warn("AA API returned no intelligence scores; falling back to page scrape")
-        except Exception as exc:
-            warn(f"AA API request failed ({exc}); falling back to page scrape")
+    if not api_key:
+        return [], None, False
     try:
-        entries = aa_scrape_entries()
+        entries = aa_api_entries(api_key)
     except Exception as exc:
-        warn(f"could not fetch AA intelligence data: {exc}")
+        warn(f"AA API request failed ({exc})")
         return [], None, False
     if not entries:
-        warn("no intelligence scores found on the AA page")
+        warn("AA API returned no intelligence scores")
         return [], None, False
-    save_cache("aa-intelligence-v2", {"entries": entries, "source": "AA page scrape"})
-    return entries, "AA page scrape", False
+    save_cache("aa-intelligence-v2", {"entries": entries, "source": "AA API v2"})
+    return entries, "AA API v2", False
 
 
 # ---------------------------------------------------------------------------
@@ -669,9 +624,9 @@ def resolve_quality(candidates, aa_by_id, exact, fuzzy, aa_source):
     OR's per-slug values cannot mispair; the AA fallback is exact-tier only
     (match_quality's fuzzy tier is the proven variant-conflation bug and
     stays off in production). Source values match the catalog contract:
-    "openrouter", "api", "scrape".
+    "openrouter", "api".
     """
-    fallback_source = {"AA API v2": "api", "AA page scrape": "scrape"}.get(aa_source)
+    fallback_source = {"AA API v2": "api"}.get(aa_source)
     quality_by_id = {}
     source_by_id = {}
     for cand in candidates:
@@ -1060,7 +1015,7 @@ def build_catalog(
     """
     now = datetime.now(timezone.utc)
     weights = catalog_weights(candidates, quality_by_id)
-    aa_modes = {"AA API v2": "api", "AA page scrape": "scrape"}
+    aa_modes = {"AA API v2": "api"}
     if aa_source is not None and aa_source not in aa_modes:
         # Never claim mode "none" for a source we do not know: the document
         # would contradict itself (mode none with matched quality scores).
@@ -1068,7 +1023,7 @@ def build_catalog(
     matched_openrouter = sum(
         1 for s in quality_source_by_id.values() if s == "openrouter"
     )
-    # fallback is what the AA API / page scrape yielded on its own; mode
+    # fallback is what the AA API yielded on its own; mode
     # hides it behind "openrouter" as soon as one OpenRouter match exists.
     aa_fallback = aa_modes.get(aa_source, "none")
     aa_mode = "openrouter" if matched_openrouter else aa_fallback

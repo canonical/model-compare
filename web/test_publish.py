@@ -385,12 +385,10 @@ PUBLISH_ARTIFACTS = (
     "mode, fallback",
     [
         ("api", "api"),
-        ("scrape", "scrape"),
         # "openrouter" is what healthy runs publish whenever OpenRouter
         # benchmarks cover a matched model -- the gate must not
-        # false-positive on it while the AA fallback works.
+        # false-positive on it while the AA API works.
         ("openrouter", "api"),
-        ("openrouter", "scrape"),
     ],
 )
 def test_build_site_aa_gate_passes_live_fallback(tmp_path, monkeypatch, mode, fallback):
@@ -414,7 +412,7 @@ def test_build_site_aa_gate_fails_when_openrouter_masks_failed_fallback(
     tmp_path, monkeypatch
 ):
     # Regression: mode "openrouter" says only that some candidate's AA data
-    # came from OpenRouter. A rejected key plus a failed scrape used to pass.
+    # came from OpenRouter. A rejected key used to pass behind it.
     calls = []
     monkeypatch.setattr(
         publish.subprocess, "run", _catalog_run("openrouter", calls, "none")
@@ -439,6 +437,23 @@ def test_build_site_aa_gate_fails_closed_on_unknown_fallback(
     monkeypatch.setenv("AA_API_KEY", "dummy-key")
     with pytest.raises(RuntimeError, match="AA_API_KEY is set"):
         publish.build_site(tmp_path / "site")
+
+
+@pytest.mark.parametrize(
+    "mode, fallback", [("scrape", "scrape"), ("openrouter", "scrape")]
+)
+def test_build_site_aa_gate_rejects_removed_scrape_fallback(
+    tmp_path, monkeypatch, mode, fallback
+):
+    # The page scrape was removed: with the key set, only the AA API itself
+    # counts, so a "scrape" fallback (impossible now) cannot mask a rejected key.
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _catalog_run(mode, calls, fallback))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    monkeypatch.setenv("AA_API_KEY", "dummy-key")
+    with pytest.raises(RuntimeError, match="AA_API_KEY is set") as exc:
+        publish.build_site(tmp_path / "site")
+    assert "'scrape'" in str(exc.value)
 
 
 @pytest.mark.parametrize("key", [None, ""])
