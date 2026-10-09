@@ -427,6 +427,46 @@ def test_non_finite_base_passes_through_for_upstream_drop():
     assert eff["price_out"] == 2e-6
 
 
+HUGE_INT = 10**400  # what json.loads yields for a 401-digit integer literal
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"min_prompt_tokens": HUGE_INT, "prompt": "0.000005"},
+        {"min_prompt_tokens": 1000, "prompt": HUGE_INT},
+        {"min_prompt_tokens": 1000, "completion": HUGE_INT},
+        {"min_prompt_tokens": 1000, "prompt": True},
+    ],
+    ids=["huge-threshold", "huge-prompt", "huge-completion", "bool-prompt"],
+)
+def test_overflowing_or_bool_tier_entry_skipped(entry):
+    pricing = {"prompt": "0.000001", "completion": "0.000002", "overrides": [entry]}
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)  # must not raise
+    assert eff["price_in"] == 1e-6
+    assert eff["price_out"] == 2e-6
+    assert eff["tier_prompt_tokens"] is None
+    assert eff["tiers"] == []
+    assert eff["schedule_error"] is False
+
+
+@pytest.mark.parametrize("key", ["utc_start", "utc_end"])
+def test_overflowing_clock_cascades_to_schedule_error(key):
+    pricing = hy4_pricing()
+    pricing["overrides"][0][key] = HUGE_INT
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)  # must not raise
+    assert eff["schedule_error"] is True
+    assert eff["schedule"] is None
+
+
+def test_parse_price_rejects_overflow_and_bool():
+    assert mc.parse_price(HUGE_INT) is None
+    assert mc.parse_price(True) is None
+    assert mc.parse_price(False) is None
+    assert mc.parse_price("0.000001") == 1e-6
+    assert mc.parse_price(0) == 0.0
+
+
 def test_days_only_window_is_whole_day():
     pricing = {
         "prompt": "0.00000099",

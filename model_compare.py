@@ -368,9 +368,13 @@ def fetch_openrouter_frontend(args):
 
 
 def parse_price(value) -> float | None:
+    # bools are not prices; a huge JSON int (json.loads yields an exact
+    # Python int) overflows float() -- both fail soft to None.
+    if isinstance(value, bool):
+        return None
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -416,6 +420,11 @@ _WEEK_MINUTES = 7 * 24 * 60
 def _integral(value) -> int | None:
     """Finite, non-bool, integral number -> int; else None (fail-soft)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    # Magnitude guard first: math.isfinite raises OverflowError on huge ints
+    # (json.loads of a 400-digit literal); no real token count or clock
+    # comes anywhere near 1e15.
+    if abs(value) > 10**15:
         return None
     if not math.isfinite(value) or value != int(value):
         return None
