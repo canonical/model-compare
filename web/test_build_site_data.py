@@ -380,7 +380,7 @@ def test_validate_catalog_happy_path():
     bsd.validate_catalog(make_catalog())  # must not raise
 
 
-@pytest.mark.parametrize("fallback", ["api", "scrape", "none"])
+@pytest.mark.parametrize("fallback", ["api", "none"])
 def test_validate_catalog_accepts_aa_fallback(fallback):
     doc = make_catalog()
     doc["sources"]["aa"]["fallback"] = fallback
@@ -396,6 +396,8 @@ def test_validate_catalog_accepts_aa_fallback(fallback):
         lambda aa: aa.update(fallback="openrouter"),
         lambda aa: aa.update(fallback=None),
         lambda aa: aa.update(fallback=["api"]),
+        # the AA page scrape was removed; it can no longer be produced
+        lambda aa: aa.update(fallback="scrape"),
     ],
 )
 def test_validate_catalog_rejects_bad_aa_fallback(mutate):
@@ -420,12 +422,31 @@ def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
         "matched_openrouter": 0,
     }
     bsd.validate_catalog(doc)  # must not raise
-    for provenance, mode in (("api", "api"), ("scrape", "scrape")):
-        doc["models"][0]["quality_match"] = provenance
-        doc["sources"]["aa"].update(
-            mode=mode, fallback=mode, matched=1, matched_openrouter=0
-        )
-        bsd.validate_catalog(doc)  # must not raise
+    doc["models"][0]["quality_match"] = "api"
+    doc["sources"]["aa"].update(
+        mode="api", fallback="api", matched=1, matched_openrouter=0
+    )
+    bsd.validate_catalog(doc)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "mutate, field",
+    [
+        (lambda doc: doc["sources"]["aa"].update(mode="scrape"), "sources.aa.mode"),
+        (
+            lambda doc: doc["sources"]["aa"].update(mode="scrape", fallback="scrape"),
+            "sources.aa.mode",
+        ),
+        (lambda doc: doc["models"][0].update(quality_match="scrape"), "quality_match"),
+    ],
+)
+def test_validate_catalog_rejects_removed_scrape_values(mutate, field):
+    # the AA page scrape was removed: a catalog carrying "scrape" anywhere
+    # could not have been produced by this tool, so it fails closed
+    doc = make_catalog()
+    mutate(doc)
+    with pytest.raises(ValueError, match=field):
+        bsd.validate_catalog(doc)
 
 
 @pytest.mark.parametrize(

@@ -1066,7 +1066,7 @@ def test_match_quality_no_match_returns_none():
 
 
 def test_match_quality_fuzzy_disabled_by_default():
-    # Regression: the scrape+fuzzy path paired z-ai/glm-5.3-flash with the
+    # Regression: the fuzzy-matching path paired z-ai/glm-5.3-flash with the
     # single AA entry glm-5-3 (Jaccard 0.6 >= 0.5). Exact-only must refuse.
     entries = [{"key": "glm-5-3", "name": "GLM-5.3 (max)", "index": 59.5}]
     exact, fuzzy = mc.build_aa_lookup(entries)
@@ -1328,25 +1328,51 @@ def test_aa_api_best_effort_on_mid_pagination_failure(monkeypatch, capsys):
     )
 
 
-def test_fetch_aa_entries_api_failure_falls_back_to_scrape(monkeypatch, capsys):
+def _no_page_fetch(monkeypatch):
+    """Record any raw http_get (the removed AA page scrape used it)."""
+    pages = []
+
+    def fake_http_get(url, *a, **k):
+        pages.append(url)
+        raise AssertionError(f"unexpected page fetch: {url}")
+
+    monkeypatch.setattr(mc, "http_get", fake_http_get)
+    return pages
+
+
+def test_fetch_aa_entries_api_failure_returns_empty(monkeypatch, capsys):
     monkeypatch.delenv("AA_API_KEY", raising=False)
+    pages = _no_page_fetch(monkeypatch)
     monkeypatch.setattr(
         mc,
         "fetch_json",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("401")),
     )
-    monkeypatch.setattr(
-        mc,
-        "aa_scrape_entries",
-        lambda: [{"key": "scraped", "name": "S", "index": 1.0, "estimated": False}],
-    )
-    entries, source, cached = mc.fetch_aa_entries(make_args(aa_api_key="dummy-key"))
-    assert entries and source == "AA page scrape" and cached is False
-    assert "AA API request failed" in capsys.readouterr().err
+    result = mc.fetch_aa_entries(make_args(aa_api_key="dummy-key"))
+    assert result == ([], None, False)
+    assert pages == []  # no page-scrape fallback
+    err = capsys.readouterr().err
+    assert "AA API request failed (401)" in err
+    assert "scrape" not in err
 
 
-def test_fetch_aa_entries_no_key_skips_api(monkeypatch):
+def test_fetch_aa_entries_api_empty_returns_empty(monkeypatch, capsys):
     monkeypatch.delenv("AA_API_KEY", raising=False)
+    pages = _no_page_fetch(monkeypatch)
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: aa_page([]))
+    result = mc.fetch_aa_entries(make_args(aa_api_key="dummy-key"))
+    assert result == ([], None, False)
+    assert pages == []
+    err = capsys.readouterr().err
+    assert "AA API returned no intelligence scores" in err
+    assert "scrape" not in err
+
+
+def test_fetch_aa_entries_no_key_is_silent(monkeypatch, capsys):
+    # Keyless runs get AA data only through OpenRouter benchmarks; the
+    # catalog records the absence, so nothing is printed and nothing fetched.
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    pages = _no_page_fetch(monkeypatch)
     calls = []
     monkeypatch.setattr(
         mc,
@@ -1356,63 +1382,32 @@ def test_fetch_aa_entries_no_key_skips_api(monkeypatch):
             or (_ for _ in ()).throw(AssertionError("API called without key"))
         ),
     )
-    monkeypatch.setattr(mc, "aa_scrape_entries", lambda: [])
-    entries, source, cached = mc.fetch_aa_entries(make_args())
-    assert (entries, source, cached) == ([], None, False)
-    assert calls == []
+    result = mc.fetch_aa_entries(make_args())
+    assert result == ([], None, False)
+    assert calls == [] and pages == []
+    assert capsys.readouterr().err == ""
 
 
-# ---------------------------------------------------------------------------
-# aa_scrape_entries (JSON-LD page scrape fallback)
-# ---------------------------------------------------------------------------
-
-
-def _aa_html(*models):
-    """Build a minimal artificialanalysis.ai page with JSON-LD benchmark data."""
-    data = [
+def test_fetch_aa_entries_ignores_cached_scrape_source(monkeypatch, tmp_path):
+    # A cache entry written by the removed page scrape carries a source
+    # build_catalog no longer knows (it would raise); it must never be read.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    _no_page_fetch(monkeypatch)
+    mc.save_cache(
+        "aa-intelligence-v2",
         {
-            "label": label,
-            "detailsUrl": f"https://artificialanalysis.ai/models/{slug}",
-            "artificialAnalysisIntelligenceIndex": index,
-        }
-        for slug, label, index in models
-    ]
-    block = json.dumps({"@type": "ItemList", "data": data})
-    return (
-        "<html><head>"
-        '<script type="application/ld+json">' + block + "</script>"
-        "</head><body></body></html>"
-    ).encode("utf-8")
-
-
-def test_aa_scrape_extracts_index(monkeypatch):
-    html = _aa_html(
-        ("gpt-4o", "GPT-4o", 60.0),
-        ("claude-3-5-sonnet", "Claude 3.5 Sonnet", 55.0),
+            "entries": [{"key": "s", "name": "S", "index": 1.0, "estimated": False}],
+            "source": "AA page scrape",
+        },
     )
-    monkeypatch.setattr(mc, "http_get", lambda *a, **k: html)
-    entries = mc.aa_scrape_entries()
-    by_key = {e["key"]: e for e in entries}
-    assert by_key["gpt-4o"]["index"] == 60.0
-    assert by_key["gpt-4o"]["name"] == "GPT-4o"
-    assert by_key["claude-3-5-sonnet"]["index"] == 55.0
+    result = mc.fetch_aa_entries(make_args(no_cache=False, cache_ttl=3600))
+    assert result == ([], None, False)
 
 
-def test_aa_scrape_skips_entries_without_index(monkeypatch):
-    html = _aa_html(("gpt-4o", "GPT-4o", 60.0))
-    # Add a second JSON-LD block without the index field; must be ignored.
-    noise = b'<script type="application/ld+json">{"@type":"ItemList","data":[{"label":"No Index"}]}</script>'
-    monkeypatch.setattr(mc, "http_get", lambda *a, **k: html + noise)
-    entries = mc.aa_scrape_entries()
-    assert [e["key"] for e in entries] == ["gpt-4o"]
-
-
-def test_aa_scrape_bad_json_block_is_tolerated(monkeypatch):
-    html = _aa_html(("gpt-4o", "GPT-4o", 60.0))
-    bad = b'<script type="application/ld+json">{not valid json}</script>'
-    monkeypatch.setattr(mc, "http_get", lambda *a, **k: html + bad)
-    entries = mc.aa_scrape_entries()
-    assert [e["key"] for e in entries] == ["gpt-4o"]
+def test_aa_page_scrape_is_gone():
+    assert not hasattr(mc, "aa_scrape_entries")
+    assert not hasattr(mc, "AA_MODELS_PAGE_URL")
 
 
 # ---------------------------------------------------------------------------
@@ -1535,10 +1530,10 @@ def test_resolve_quality_trio_without_intelligence_falls_through():
         [{"key": "acme/model-a", "name": "Model A", "index": 44.0}]
     )
     quality, source = mc.resolve_quality(
-        candidates, aa_by_id, exact, fuzzy, "AA page scrape"
+        candidates, aa_by_id, exact, fuzzy, "AA API v2"
     )
     assert quality == {"acme/model-a": 44.0}
-    assert source == {"acme/model-a": "scrape"}
+    assert source == {"acme/model-a": "api"}
 
 
 def test_resolve_quality_unmatched_is_none():
@@ -2094,10 +2089,10 @@ def test_catalog_quality_published_even_without_any_aa_source():
 
 
 def test_catalog_aa_mode_reflects_fallback_when_or_empty():
-    doc = build_doc(aa_source="AA page scrape", aa_by_id={})
+    doc = build_doc(aa_source="AA API v2", aa_by_id={})
     assert doc["sources"]["aa"] == {
-        "mode": "scrape",
-        "fallback": "scrape",
+        "mode": "api",
+        "fallback": "api",
         "matched": 0,
         "matched_openrouter": 0,
     }
@@ -2108,6 +2103,12 @@ def test_catalog_unknown_aa_source_fails_loudly():
     # claiming mode "none" while entries carry matched quality
     with pytest.raises(ValueError, match="unknown AA source"):
         build_doc(aa_source="AA carrier pigeon")
+
+
+def test_catalog_rejects_removed_scrape_source():
+    # the page scrape is gone; its source string must not map to a mode
+    with pytest.raises(ValueError, match="unknown AA source"):
+        build_doc(aa_source="AA page scrape")
 
 
 def test_catalog_no_zdr_marks_skipped(monkeypatch, capsys):
@@ -2258,7 +2259,6 @@ def test_fetch_aa_entries_ignores_legacy_cache(monkeypatch, tmp_path):
             }
         )
     )
-    monkeypatch.setattr(mc, "aa_scrape_entries", lambda: [])
     entries, source, cached = mc.fetch_aa_entries(
         make_args(no_cache=False, cache_ttl=3600)
     )
@@ -2268,9 +2268,10 @@ def test_fetch_aa_entries_ignores_legacy_cache(monkeypatch, tmp_path):
 def test_fetch_aa_entries_writes_v2_cache(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     monkeypatch.delenv("AA_API_KEY", raising=False)
-    scraped = [{"key": "s", "name": "S", "index": 1.0, "estimated": False}]
-    monkeypatch.setattr(mc, "aa_scrape_entries", lambda: scraped)
-    mc.fetch_aa_entries(make_args(no_cache=False, cache_ttl=3600))
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: aa_page([aa_item()]))
+    mc.fetch_aa_entries(
+        make_args(no_cache=False, cache_ttl=3600, aa_api_key="dummy-key")
+    )
     cache_dir = tmp_path / "model-compare"
     assert (cache_dir / "aa-intelligence-v2.json").exists()
     assert not (cache_dir / "aa-intelligence.json").exists()
@@ -2292,9 +2293,8 @@ def test_cache_writes_land_in_isolated_dir_not_real_cache(monkeypatch, tmp_path)
     assert path.is_relative_to(tmp_path), path
     assert not path.is_relative_to(real), path
     monkeypatch.delenv("AA_API_KEY", raising=False)
-    scraped = [{"key": "s", "name": "S", "index": 1.0, "estimated": False}]
-    monkeypatch.setattr(mc, "aa_scrape_entries", lambda: scraped)
-    mc.fetch_aa_entries(make_args())
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: aa_page([aa_item()]))
+    mc.fetch_aa_entries(make_args(aa_api_key="dummy-key"))
     assert path.exists()
     assert _dir_snapshot(real) == before
 
@@ -2415,13 +2415,13 @@ def test_fetch_openrouter_frontend_zdr_one_live_endpoint_suffices(
 
 
 # ---------------------------------------------------------------------------
-# sources.aa.fallback: what the AA API / scrape fallback yielded, unmasked
+# sources.aa.fallback: what the AA API fallback yielded, unmasked
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "aa_source, fallback",
-    [("AA API v2", "api"), ("AA page scrape", "scrape"), (None, "none")],
+    [("AA API v2", "api"), (None, "none")],
 )
 def test_catalog_aa_fallback_tracks_aa_source(aa_source, fallback):
     # with OpenRouter benchmarks matched, mode stays "openrouter"
@@ -2436,7 +2436,7 @@ def test_catalog_aa_fallback_tracks_aa_source(aa_source, fallback):
 
 def test_catalog_aa_fallback_not_masked_by_openrouter_matches():
     # Regression: the publish gate read mode alone, and any OpenRouter
-    # match turned a failed AA API and scrape into mode "openrouter".
+    # match turned a failed AA API into mode "openrouter".
     doc = build_doc(aa_source=None)
     assert doc["sources"]["aa"]["matched_openrouter"] > 0
     assert doc["sources"]["aa"]["mode"] == "openrouter"

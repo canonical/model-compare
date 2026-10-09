@@ -63,9 +63,9 @@ CATALOG_PRICING_KEYS = ("input_per_1m", "output_per_1m", "blended_per_1m")
 CATALOG_SCORE_KEYS = ("price", "quality", "context", "age")
 CATALOG_OVERALL_KEYS = ("balanced", "price", "quality")
 CATALOG_AA_KEYS = ("intelligence_index", "coding_index", "agentic_index")
-CATALOG_QUALITY_MATCH_VALUES = ("openrouter", "api", "scrape")
-CATALOG_AA_MODES = ("openrouter", "api", "scrape", "none")
-CATALOG_AA_FALLBACKS = ("api", "scrape", "none")
+CATALOG_QUALITY_MATCH_VALUES = ("openrouter", "api")
+CATALOG_AA_MODES = ("openrouter", "api", "none")
+CATALOG_AA_FALLBACKS = ("api", "none")
 
 
 def _is_score(value) -> bool:

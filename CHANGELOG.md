@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- The dead JSON-LD page-scrape fallback for AA intelligence data
+  (`artificialanalysis.ai/models`), which had returned no entries for weeks
+  (issue #11). With `AA_API_KEY` set, a publish now requires the AA API
+  itself (`sources.aa.fallback` `api`), so a rejected key can no longer hide
+  behind the scrape. Keyless runs get AA data only through OpenRouter
+  benchmarks and no longer print a warning. The `sources.aa.mode`,
+  `sources.aa.fallback` and `quality_match` enums narrow: `scrape` can no
+  longer occur and `build_site_data.py` rejects it. An AA cache entry left
+  by the scrape is ignored.
+
 ## [0.2.6] - 2026-10-09
 
 ### Changed

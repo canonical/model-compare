@@ -21,15 +21,14 @@ How the tool works under the hood. End-user docs live in the
    - **AA API v2** (`artificialanalysis.ai/api/v2/language/models/free`) for
      models OpenRouter does not cover, when an API key is supplied through
      `--aa-api-key` or the `AA_API_KEY` env var
-     ([free key](https://artificialanalysis.ai)); full model coverage.
-   - **Page scrape fallback**: the leaderboard embeds a JSON-LD benchmark
-     dataset; the scraper extracts every entry carrying an
-     `artificialAnalysisIntelligenceIndex` (a few dozen top models). Both
-     fallbacks match to OpenRouter ids by exact slug/name only. The previous
+     ([free key](https://artificialanalysis.ai)); full model coverage. It
+     matches to OpenRouter ids by exact slug/name only. The previous
      token-overlap fuzzy pass is gone: it paired `z-ai/glm-5.3-flash` with
-     AA's `glm-5-3` entry and published the wrong model's index. Unmatched
-     models simply score 0 on quality — the tool degrades gracefully rather
-     than failing.
+     AA's `glm-5-3` entry and published the wrong model's index. Without a
+     key there is no AA fallback: keyless runs get AA data only through the
+     OpenRouter benchmarks, and do so silently (the catalog records the
+     absence in `sources.aa.fallback`). Unmatched models simply score 0 on
+     quality — the tool degrades gracefully rather than failing.
 
 If no quality data is obtainable at all, the quality weight is dropped and the
 remaining weights renormalize.
@@ -81,10 +80,11 @@ fetches. Only models missing there fall back to the AA API — the supported
 V2 free-tier endpoint
 [`/api/v2/language/models/free`](https://artificialanalysis.ai/data-api/docs)
 (key required; any tier key works, free is enough; responses paginate at 200
-models per page and are followed) — and then the JSON-LD scrape embedded in
-`artificialanalysis.ai/models` — both matched by exact slug/name only. All
-paths are cached identically; if none yields a value you get a warning on
-stderr and a price/context/age-only ranking. `--quality-ref` controls how
+models per page and are followed), matched by exact slug/name only. Without
+a key there is no fallback and no warning: OpenRouter is the primary source.
+With a key, an AA API failure or an empty result prints a warning on stderr.
+Both paths are cached identically; models without a value rank on
+price/context/age only. `--quality-ref` controls how
 generous the quality normalization is.
 
 ## Caching
@@ -160,7 +160,7 @@ one bumps the version.
 Top level: `schema_version`, `tool`, `generated_at`, `parameters` (all knobs
 plus the **effective** per-priority `weights` — reproducing `scores.overall`
 needs nothing else), `sources` (`openrouter`, `aa` with `mode`
-`openrouter`/`api`/`scrape`/`none`, `fallback` `api`/`scrape`/`none`, plus
+`openrouter`/`api`/`none`, `fallback` `api`/`none`, plus
 the `matched` and `matched_openrouter` counts, `zdr` `ok`/`skipped`, `discounts`
 `ok`/`unavailable` — where `unavailable` covers both a failed discount fetch
 and a live pool with zero discounts), `pool` (`listed`, `candidates`,
@@ -168,11 +168,15 @@ and a live pool with zero discounts), `pool` (`listed`, `candidates`,
 
 `sources.aa.mode` is `openrouter` whenever at least one candidate's AA data
 came from OpenRouter, and otherwise names the fallback. It says nothing about
-whether the AA API or the page scrape worked. `sources.aa.fallback` records
-that on its own: `api` or `scrape` when that path yielded entries, `none` when
-both failed or no key was set and the scrape failed. It is an additive field,
-so it arrived without a `schema_version` bump. With `AA_API_KEY` set,
-`web/publish.py` fails the run unless `fallback` is `api` or `scrape`, and
+whether the AA API worked. `sources.aa.fallback` records that on its own:
+`api` when the AA API yielded entries, `none` when no key was set or the API
+failed or returned nothing. It is an additive field, so it arrived without a
+`schema_version` bump. Earlier releases could also report `scrape` (a JSON-LD
+page-scrape fallback, now removed); that value can no longer be produced and
+`web/build_site_data.py` rejects it, which needed no `schema_version` bump
+because no emitted document changes. With `AA_API_KEY` set,
+`web/publish.py` fails the run unless `fallback` is `api` — a rejected key
+yields `none` — and
 checks this right after the `--catalog` step, before any artifact is written.
 
 `rankings` maps each priority (`balanced`, `price`, `quality`) to the full
@@ -191,7 +195,7 @@ Each `models` entry carries: `id` (bare `provider/model`), `name`,
 `listed_at`, `age_days`, `tool_calling`, `zdr`, `discount`, `expired`,
 `quality` (AA intelligence index or `null`), `aa` (the OpenRouter-published
 trio `intelligence_index`/`coding_index`/`agentic_index`, each possibly
-`null`), `quality_match` (`openrouter`/`api`/`scrape`/`null`) and `scores` —
+`null`), `quality_match` (`openrouter`/`api`/`null`) and `scores` —
 the four component scores plus
 `overall` for all three priorities, so downstream consumers never re-run
 the scorer.

@@ -132,18 +132,19 @@ def check_best(output_dir: Path, catalog: dict) -> None:
         )
 
 
-AA_FALLBACKS_LIVE = ("api", "scrape")
+AA_FALLBACKS_LIVE = ("api",)
 
 
 def check_aa_fallback(catalog_path: Path) -> None:
-    """With AA_API_KEY set, fail unless the AA API or the page scrape worked.
+    """With AA_API_KEY set, fail unless the AA API itself worked.
 
     sources.aa.mode "openrouter" means at least one candidate's AA data came
-    from OpenRouter; it says nothing about whether the AA API or the scrape
-    worked. sources.aa.fallback records that ("api", "scrape" or "none"), so
-    the gate reads fallback, and a missing or unknown value fails closed.
-    Without a key the scrape is the only source and its absence is not
-    checked here, so the gate never raises.
+    from OpenRouter; it says nothing about whether the AA API worked.
+    sources.aa.fallback records that ("api" or "none"; the page scrape that
+    could also yield "scrape" was removed), so the gate reads fallback and
+    requires "api": a rejected key yields "none" and fails. A missing or
+    unknown value fails closed. Without a key AA data comes only from
+    OpenRouter, so the gate never raises.
     """
     if not os.environ.get("AA_API_KEY"):
         return
@@ -156,9 +157,9 @@ def check_aa_fallback(catalog_path: Path) -> None:
     if fallback not in AA_FALLBACKS_LIVE:
         raise RuntimeError(
             "publish: AA_API_KEY is set but catalog sources.aa.fallback is "
-            f"{fallback!r} (mode {aa_sources.get('mode')!r}): the AA API and "
-            "the page scrape did not yield data. Check the key and "
-            "artificialanalysis.ai, or unset AA_API_KEY, before deploying."
+            f"{fallback!r} (mode {aa_sources.get('mode')!r}): the AA API "
+            "did not yield data. Check the key and artificialanalysis.ai, "
+            "or unset AA_API_KEY, before deploying."
         )
     print(f"publish: AA source mode {aa_sources.get('mode')}, fallback {fallback}")
 
