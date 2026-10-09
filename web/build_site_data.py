@@ -537,8 +537,8 @@ def build_snapshot(catalog) -> dict:
 
     tabs are a projection of the catalog's rankings (the single ranking
     authority, the same order the data.json rows follow): per priority the
-    top 10 ids, rank 1-based, quality/blended merged from the models entry.
-    No sort happens here. aa and prices cover candidates only -- filtered
+    top `HISTORY_TOP_N` ids (20), rank 1-based, quality/blended merged from
+    the models entry. No sort happens here. aa and prices cover candidates only -- filtered
     entries carry neither.
     """
     models = catalog["models"]
