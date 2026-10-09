@@ -373,6 +373,382 @@ def parse_price(value) -> float | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# OpenRouter tiered pricing (pricing.overrides)
+# ---------------------------------------------------------------------------
+
+# Keys of a pricing.overrides entry (OpenRouter docs, verified 2026-10-09).
+# An entry carrying any other key is skipped whole (docs forward-compat rule).
+TIER_CONDITION_KEYS = (
+    "min_prompt_tokens",
+    "utc_start",
+    "utc_end",
+    "utc_days",
+)
+TIER_PRICE_KEYS = (
+    "prompt",
+    "completion",
+    "request",
+    "image",
+    "image_output",
+    "audio",
+    "audio_output",
+    "web_search",
+    "internal_reasoning",
+    "input_cache_read",
+    "input_cache_write",
+    "input_cache_write_1h",
+    "input_audio_cache",
+)
+WEEKDAYS = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+_WEEK_MINUTES = 7 * 24 * 60
+
+
+def _integral(value) -> int | None:
+    """Finite, non-bool, integral number -> int; else None (fail-soft)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value != int(value):
+        return None
+    return int(value)
+
+
+def _hhmm(value) -> int | None:
+    """Integer HHMM clock in 0..2359 with minutes < 60; else None."""
+    clock = _integral(value)
+    if clock is None or not 0 <= clock <= 2359 or clock % 100 > 59:
+        return None
+    return clock
+
+
+def _hhmm_minutes(clock: int) -> int:
+    return (clock // 100) * 60 + clock % 100
+
+
+def _window_minutes(start: int, end: int) -> int:
+    """Minutes a HHMM window covers per day (wrap-aware; whole day when equal)."""
+    span = _hhmm_minutes(end) - _hhmm_minutes(start)
+    if span == 0:
+        return 24 * 60
+    return span % (24 * 60)
+
+
+def _window_span(start: int, end: int):
+    """The per-day minute values a window matches (wrap-aware)."""
+    start_min = _hhmm_minutes(start)
+    end_min = _hhmm_minutes(end)
+    if start_min == end_min:
+        return range(24 * 60)
+    if start_min < end_min:
+        return range(start_min, end_min)
+    return list(range(start_min, 24 * 60)) + list(range(0, end_min))
+
+
+def _coverage(days_count: int, minutes: int) -> float:
+    """Fraction of the 7-day week a window covers, 4 decimals."""
+    return round(days_count * minutes / _WEEK_MINUTES, 4)
+
+
+def _entry_prices(entry):
+    """Parse an override entry's prompt/completion prices (spec rule 5).
+
+    Returns {"prompt": float|None, "completion": float|None} where None means
+    the key is absent (inheritance), or None when a present price is
+    malformed, negative or non-finite (the entry is skipped whole).
+    """
+    values = {}
+    for key in ("prompt", "completion"):
+        if key not in entry:
+            values[key] = None
+            continue
+        value = parse_price(entry[key])
+        if value is None or not math.isfinite(value) or value < 0:
+            return None
+        values[key] = value
+    return values
+
+
+def _schedule_windows(window_entries):
+    """Normalize validated time-window entries (spec rules 6, 9, 10).
+
+    Returns the window list (API order, days-only windows normalized to 0/0,
+    utc_days deduplicated in week order, per-window coverage), or None when
+    the windows do not tile the 7-day week exactly (gaps or overlaps), or a
+    window is missing prompt/completion (rule 7: no top-level inheritance --
+    the top level is fetch-time dependent).
+    """
+    windows = []
+    covered = set()
+    matched = 0
+    for entry in window_entries:
+        start, end = entry["start"], entry["end"]
+        days = entry["days"]  # None, or a list of weekday indices
+        if start is None:  # days-only window: the whole UTC day
+            start, end = 0, 0
+        price_in, price_out = entry["price_in"], entry["price_out"]
+        if price_in is None or price_out is None:
+            return None
+        day_indices = list(range(len(WEEKDAYS))) if days is None else sorted(set(days))
+        span = _window_span(start, end)
+        for day in day_indices:
+            for minute in span:
+                covered.add((day, minute))
+            matched += len(span)
+        windows.append(
+            {
+                "utc_days": None
+                if days is None
+                else [WEEKDAYS[i] for i in day_indices],
+                "utc_start": start,
+                "utc_end": end,
+                "coverage": _coverage(len(day_indices), len(span)),
+                "price_in": price_in,
+                "price_out": price_out,
+            }
+        )
+    if matched != _WEEK_MINUTES or len(covered) != _WEEK_MINUTES:
+        return None  # gaps or overlaps: the schedule does not tile the week
+    return windows
+
+
+def effective_pricing(pricing, prompt_tokens, input_share):
+    """Resolve pricing.overrides into one effective price (spec section 5.1).
+
+    Prices are USD per token. Returns a dict with the effective and base
+    prices (per token), the applied tier threshold, the cumulative tier list,
+    the normalized schedule (or None), whether the schedule is invalid, the
+    rounded maximum off-peak discount, and the peak window's blended price.
+    """
+    source = pricing if isinstance(pricing, dict) else {}
+    base_in = parse_price(source.get("prompt"))
+    base_out = parse_price(source.get("completion"))
+    overrides = source.get("overrides")
+
+    tier_entries = []  # (threshold, price_in|None, price_out|None), API order
+    window_entries = []  # validated time-window pre-windows, API order
+    time_touched = False
+    schedule_broken = False
+
+    if isinstance(overrides, list):
+        for entry in overrides:
+            if not isinstance(entry, dict):
+                continue
+            time_keys = [
+                key for key in ("utc_start", "utc_end", "utc_days") if key in entry
+            ]
+            if any(
+                key not in TIER_CONDITION_KEYS and key not in TIER_PRICE_KEYS
+                for key in entry
+            ):
+                if time_keys:
+                    schedule_broken = True  # skipped time window: tiling gap
+                continue
+            has_threshold = "min_prompt_tokens" in entry
+            threshold = _integral(entry["min_prompt_tokens"]) if has_threshold else None
+            if has_threshold and (threshold is None or threshold < 0):
+                if time_keys:
+                    schedule_broken = True
+                continue
+            if ("utc_start" in entry) != ("utc_end" in entry):
+                schedule_broken = True  # exactly one of the pair
+                continue
+            start = end = None
+            if "utc_start" in entry:
+                start = _hhmm(entry["utc_start"])
+                end = _hhmm(entry["utc_end"])
+                if start is None or end is None:
+                    schedule_broken = True
+                    continue
+            days = None
+            if "utc_days" in entry:
+                names = entry["utc_days"]
+                if (
+                    not isinstance(names, list)
+                    or not names
+                    or any(day not in WEEKDAYS for day in names)
+                ):
+                    schedule_broken = True
+                    continue
+                days = sorted({WEEKDAYS.index(day) for day in names})
+            prices = _entry_prices(entry)
+            if prices is None:
+                if time_keys:
+                    schedule_broken = True
+                continue
+            if time_keys:
+                time_touched = True
+                if has_threshold:
+                    # combined token+time entry: invalid time window (rule 9)
+                    schedule_broken = True
+                    continue
+                window_entries.append(
+                    {
+                        "start": start,
+                        "end": end,
+                        "days": days,
+                        "price_in": prices["prompt"],
+                        "price_out": prices["completion"],
+                    }
+                )
+            elif has_threshold:
+                tier_entries.append((threshold, prices["prompt"], prices["completion"]))
+            # else: conditionless entry (price keys only) -- ignored (plan
+            # Review Focus; none live, and honoring an unconditional price
+            # swap would be dangerous)
+
+    schedule = None
+    peak_blended = None
+    max_discount = None
+    schedule_error = False
+
+    if time_touched or schedule_broken:
+        if schedule_broken:
+            schedule_error = True
+        else:
+            schedule = _schedule_windows(window_entries)
+            if schedule is None:
+                schedule_error = True
+                schedule = None
+    if schedule is not None and not schedule_error:
+        for window in schedule:
+            window["blended"] = (
+                input_share * window["price_in"]
+                + (1 - input_share) * window["price_out"]
+            )
+        peak = max(schedule, key=lambda window: window["blended"])
+        peak_blended = peak["blended"]  # ties: first in API order
+        # Deterministic base (rule 7): freeze at the peak window's prices.
+        base_in, base_out = peak["price_in"], peak["price_out"]
+        if peak_blended == 0:
+            max_discount = 0.0
+        else:
+            max_discount = round(
+                max(1 - window["blended"] / peak_blended for window in schedule), 4
+            )
+
+    # Token tiers (rule 8) over the (possibly frozen) base: later entries win
+    # per key in array order; a threshold equal to prompt_tokens never applies.
+    applied = None
+    current_in, current_out = base_in, base_out
+    by_threshold = {}
+    for threshold, tier_in, tier_out in tier_entries:
+        if prompt_tokens > threshold:
+            if tier_in is not None:
+                current_in = tier_in
+            if tier_out is not None:
+                current_out = tier_out
+            applied = threshold
+        slot = by_threshold.setdefault(threshold, {"price_in": None, "price_out": None})
+        if tier_in is not None:
+            slot["price_in"] = tier_in
+        if tier_out is not None:
+            slot["price_out"] = tier_out
+    tiers = []
+    running_in, running_out = base_in, base_out
+    for threshold in sorted(by_threshold):
+        slot = by_threshold[threshold]
+        if slot["price_in"] is not None:
+            running_in = slot["price_in"]
+        if slot["price_out"] is not None:
+            running_out = slot["price_out"]
+        tiers.append(
+            {
+                "min_prompt_tokens": threshold,
+                "price_in": running_in,
+                "price_out": running_out,
+            }
+        )
+
+    return {
+        "price_in": current_in,
+        "price_out": current_out,
+        "base_price_in": base_in,
+        "base_price_out": base_out,
+        "tier_prompt_tokens": applied,
+        "tiers": tiers,
+        "schedule": schedule,
+        "schedule_error": schedule_error,
+        "max_discount": max_discount,
+        "peak_blended": peak_blended,
+    }
+
+
+def fmt_tier_note(threshold):
+    """>100k-style marker for the applied token tier; None passes through."""
+    if threshold is None:
+        return None
+    value = int(threshold)
+    if value >= 1000:
+        return f">{value // 1000}k"
+    return f">{value}"
+
+
+def fmt_sched_note(max_discount):
+    """-38%-style marker for a schedule's max off-peak discount."""
+    if max_discount is None:
+        return None
+    formatted = f"{max_discount:.0%}"
+    if formatted == "0%":
+        return "SCHED"
+    return f"-{formatted}"
+
+
+def fmt_sched_detail(schedule, peak_blended):
+    """Human-readable off-peak schedule summary (spec section 5.6 grammar).
+
+    Off-peak windows are those whose blended price is strictly below the
+    peak's; schedule windows carry their parser-computed "blended" price.
+    """
+    if not schedule or peak_blended is None:
+        return None
+    offpeak = [window for window in schedule if window["blended"] < peak_blended]
+    if not offpeak:
+        return None
+
+    def _clock(clock):
+        return f"{clock // 100:02d}:{clock % 100:02d}"
+
+    groups = {}
+    for window in offpeak:
+        days = window["utc_days"]
+        if days is None:
+            key = (0, -1, ())
+            label = "daily"
+        else:
+            indices = [WEEKDAYS.index(day) for day in days]
+            key = (1, min(indices), tuple(days))
+            exact = {WEEKDAYS[i] for i in range(5)}
+            if set(days) == exact:
+                label = "weekdays"
+            elif set(days) == {"saturday", "sunday"}:
+                label = "weekends"
+            else:
+                label = ",".join(day[:3] for day in days)  # week order
+        group = groups.setdefault(key, {"label": label, "windows": []})
+        group["windows"].append(window)
+    parts = []
+    for key in sorted(groups):
+        group = groups[key]
+        bits = []
+        for window in sorted(group["windows"], key=lambda w: w["utc_start"]):
+            if window["utc_start"] == window["utc_end"]:
+                bits.append("all day")
+            else:
+                bits.append(
+                    f"{_clock(window['utc_start'])}-{_clock(window['utc_end'])}"
+                )
+        parts.append(f"{group['label']} {', '.join(bits)}")
+    return "; ".join(parts) + " UTC"
+
+
 def coerce_int(value, default: int = 0) -> int:
     """Best-effort int coercion for external fields that may be str/float/None."""
     try:
