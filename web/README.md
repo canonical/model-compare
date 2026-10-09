@@ -58,8 +58,8 @@ highlights.
   week of data collection — also deliberately true for one week after the
   catalog-v2 deploy, which reset history so base-tier baselines could not be
   diffed against effective-tier prices.
-- **Off-peak deals** — the second table lists every model with scheduled
-  discount windows, ranked by discount size; prices shown are the discounted
+- **Off-peak deals** — the second table lists the top 10 models with
+  scheduled discount windows (sub-1% discounts excluded), ranked by discount size; prices shown are the discounted
   off-peak rates. It is built from the catalog's `schedules` index, which is
   deliberately unfiltered (it may list non-ZDR or sub-floor-context models
   that the ranked pool excludes).

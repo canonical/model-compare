@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Models with OpenRouter `pricing.overrides` are now ranked and displayed at
   the tier in effect at a prompt size of `--min-context` tokens (default 1M:
-  the worst case a long session pays) instead of their base-tier price — 85
-  of ~460 catalog models were previously listed up to 6.7x too cheap. The
+  the worst case a long session pays) instead of their base-tier price — ~80
+  of ~460 models carry price overrides; candidates among them were
+  previously listed up to 6.7x too cheap. The
   table gains a TIER column (`>100k`, `-38%`, sub-1% `SCHED`), `--json`
   gains tier/schedule fields, and time-windowed models are ranked at their
   deterministic peak window with a fail-closed `schedule` drop reason.

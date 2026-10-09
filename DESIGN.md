@@ -209,8 +209,8 @@ Each `models` entry carries: `id` (bare `provider/model`), `name`,
 effect at a prompt size of `min_context` tokens** — plus `base` (the base
 tier; for time-windowed models the deterministic peak window, not
 OpenRouter's fetch-time-dependent top level), `tiers` (ascending cumulative
-long-context tiers) and `schedule` (off-peak windows with per-window
-`coverage`)), `context`,
+long-context tiers) and `schedule` (all windows, peak included, with
+per-window `coverage`)), `context`,
 `listed_at`, `age_days`, `tool_calling`, `zdr`, `discount`, `expired`,
 `quality` (AA intelligence index or `null`), `aa` (the OpenRouter-published
 trio `intelligence_index`/`coding_index`/`agentic_index`, each possibly
