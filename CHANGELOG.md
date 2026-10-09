@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.7] - 2026-10-09
 
 ### Removed
 
@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sources.aa.fallback` and `quality_match` enums narrow: `scrape` can no
   longer occur and `build_site_data.py` rejects it. An AA cache entry left
   by the scrape is ignored.
+
+### Fixed
+
+- The test suite no longer writes fixture AA entries into the real user
+  cache (`~/.cache/model-compare`): an un-isolated test wrote them there,
+  and a publish on the same machine loaded them on a silent cache hit and
+  published them as `sources.aa.fallback` `scrape`.
 
 ## [0.2.6] - 2026-10-09
 

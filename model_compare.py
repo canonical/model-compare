@@ -67,7 +67,7 @@ OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
 # (legacy endpoints 410 after 2026-11-04; see
 # https://artificialanalysis.ai/data-api/migrate-v2-data).
 AA_API_URL = "https://artificialanalysis.ai/api/v2/language/models/free"
-VERSION = "0.2.6"
+VERSION = "0.2.7"
 USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 
 # opencode expects provider-qualified model ids: openrouter/<provider/model>.
