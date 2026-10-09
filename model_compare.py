@@ -68,7 +68,7 @@ AA_MODELS_PAGE_URL = "https://artificialanalysis.ai/models"
 # (legacy endpoints 410 after 2026-11-04; see
 # https://artificialanalysis.ai/data-api/migrate-v2-data).
 AA_API_URL = "https://artificialanalysis.ai/api/v2/language/models/free"
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 
 # opencode expects provider-qualified model ids: openrouter/<provider/model>.
