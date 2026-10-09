@@ -63,9 +63,29 @@ def _write_artifacts(out_dir, overrides=None, best_id="z-ai/glm-5.3-flash"):
         (out_dir / name).write_text(json.dumps(doc) if text is None else text)
 
 
-def _fake_run(calls, simulate_build_site_data=True, overrides=None, best=BEST):
+# What the stubbed `model_compare.py --catalog` run prints: the AA gate
+# reads it from scratch before any other step runs.
+HEALTHY_AA = {"mode": "openrouter", "fallback": "api"}
+
+
+@pytest.fixture(autouse=True)
+def _no_aa_key(monkeypatch):
+    # The AA gate depends on AA_API_KEY; keep the suite hermetic. Gate tests
+    # set the key explicitly.
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+
+
+def _is_catalog_run(cmd):
+    return Path(cmd[1]).name == "model_compare.py" and "--catalog" in cmd
+
+
+def _fake_run(
+    calls, simulate_build_site_data=True, overrides=None, best=BEST, aa=HEALTHY_AA
+):
     def fake_run(cmd, cwd=None, stdout=None, check=True):
         calls.append(cmd)
+        if _is_catalog_run(cmd):
+            stdout.write(json.dumps({"generated_at": STAMP, "sources": {"aa": aa}}))
         if "--best" in cmd:
             stdout.write(best + "\n")
         if simulate_build_site_data and Path(cmd[1]).name == "build_site_data.py":
@@ -340,24 +360,42 @@ def test_best_gate_rejects_unusable_rankings(tmp_path, monkeypatch, catalog_text
         publish.build_site(tmp_path / "site")
 
 
-def _catalog_run(mode, calls):
-    """Stub the pipeline with a valid catalog that carries the given AA mode."""
-    catalog = {
-        "generated_at": STAMP,
-        "models": [],
-        "rankings": {"balanced": ["z-ai/glm-5.3-flash"]},
-        "sources": {"aa": {"mode": mode}},
-    }
-    return _fake_run(calls, overrides={"catalog.json": json.dumps(catalog)})
+_ABSENT = object()
 
 
-@pytest.mark.parametrize("mode", ["api", "scrape", "openrouter"])
-def test_build_site_aa_gate_passes_live_modes(tmp_path, monkeypatch, mode):
-    # "openrouter" is what healthy runs publish whenever OpenRouter
-    # benchmarks cover a matched model, key or no key -- the gate must not
-    # false-positive on it.
+def _catalog_run(mode, calls, fallback=_ABSENT):
+    """Stub the pipeline; the --catalog run prints the given AA sources."""
+    aa = {"mode": mode}
+    if fallback is not _ABSENT:
+        aa["fallback"] = fallback
+    return _fake_run(calls, aa=aa)
+
+
+PUBLISH_ARTIFACTS = (
+    "data.json",
+    "catalog.json",
+    "history.json",
+    "highlights.json",
+    "best.txt",
+    "index.html",
+)
+
+
+@pytest.mark.parametrize(
+    "mode, fallback",
+    [
+        ("api", "api"),
+        ("scrape", "scrape"),
+        # "openrouter" is what healthy runs publish whenever OpenRouter
+        # benchmarks cover a matched model -- the gate must not
+        # false-positive on it while the AA fallback works.
+        ("openrouter", "api"),
+        ("openrouter", "scrape"),
+    ],
+)
+def test_build_site_aa_gate_passes_live_fallback(tmp_path, monkeypatch, mode, fallback):
     calls = []
-    monkeypatch.setattr(publish.subprocess, "run", _catalog_run(mode, calls))
+    monkeypatch.setattr(publish.subprocess, "run", _catalog_run(mode, calls, fallback))
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
     monkeypatch.setenv("AA_API_KEY", "dummy-key")
     publish.build_site(tmp_path / "site")
@@ -365,19 +403,76 @@ def test_build_site_aa_gate_passes_live_modes(tmp_path, monkeypatch, mode):
 
 def test_build_site_aa_gate_fails_when_aa_absent_despite_key(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr(publish.subprocess, "run", _catalog_run("none", calls))
+    monkeypatch.setattr(publish.subprocess, "run", _catalog_run("none", calls, "none"))
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
     monkeypatch.setenv("AA_API_KEY", "dummy-key")
     with pytest.raises(RuntimeError, match="AA_API_KEY is set"):
         publish.build_site(tmp_path / "site")
 
 
-def test_build_site_aa_gate_inactive_without_key(tmp_path, monkeypatch):
+def test_build_site_aa_gate_fails_when_openrouter_masks_failed_fallback(
+    tmp_path, monkeypatch
+):
+    # Regression: mode "openrouter" says only that some candidate's AA data
+    # came from OpenRouter. A rejected key plus a failed scrape used to pass.
     calls = []
-    monkeypatch.setattr(publish.subprocess, "run", _catalog_run("none", calls))
+    monkeypatch.setattr(
+        publish.subprocess, "run", _catalog_run("openrouter", calls, "none")
+    )
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
-    monkeypatch.delenv("AA_API_KEY", raising=False)
+    monkeypatch.setenv("AA_API_KEY", "dummy-key")
+    with pytest.raises(RuntimeError, match="AA_API_KEY is set") as exc:
+        publish.build_site(tmp_path / "site")
+    assert "'none'" in str(exc.value)
+    assert "sources.aa.fallback" in str(exc.value)
+
+
+@pytest.mark.parametrize("fallback", [_ABSENT, None, "psychic", "openrouter"])
+def test_build_site_aa_gate_fails_closed_on_unknown_fallback(
+    tmp_path, monkeypatch, fallback
+):
+    calls = []
+    monkeypatch.setattr(
+        publish.subprocess, "run", _catalog_run("openrouter", calls, fallback)
+    )
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    monkeypatch.setenv("AA_API_KEY", "dummy-key")
+    with pytest.raises(RuntimeError, match="AA_API_KEY is set"):
+        publish.build_site(tmp_path / "site")
+
+
+@pytest.mark.parametrize("key", [None, ""])
+def test_build_site_aa_gate_inactive_without_key(tmp_path, monkeypatch, key):
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _catalog_run("none", calls, "none"))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    if key is not None:
+        monkeypatch.setenv("AA_API_KEY", key)
     publish.build_site(tmp_path / "site")
+
+
+def test_build_site_aa_gate_inactive_without_key_even_if_fallback_missing(
+    tmp_path, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _catalog_run("openrouter", calls))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    publish.build_site(tmp_path / "site")
+
+
+def test_build_site_aa_gate_runs_before_any_artifact_is_written(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        publish.subprocess, "run", _catalog_run("openrouter", calls, "none")
+    )
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    monkeypatch.setenv("AA_API_KEY", "dummy-key")
+    out = tmp_path / "site"
+    with pytest.raises(RuntimeError, match="AA_API_KEY is set"):
+        publish.build_site(out)
+    assert [name for name in PUBLISH_ARTIFACTS if (out / name).exists()] == []
+    # nothing after the --catalog run may have started
+    assert len(calls) == 1 and _is_catalog_run(calls[0])
 
 
 def test_main_output_dir(monkeypatch, tmp_path):

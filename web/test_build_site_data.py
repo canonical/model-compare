@@ -339,7 +339,12 @@ def make_catalog():
         },
         "sources": {
             "openrouter": "ok",
-            "aa": {"mode": "openrouter", "matched": 1, "matched_openrouter": 1},
+            "aa": {
+                "mode": "openrouter",
+                "fallback": "api",
+                "matched": 1,
+                "matched_openrouter": 1,
+            },
             "zdr": "ok",
             "discounts": "ok",
         },
@@ -375,6 +380,31 @@ def test_validate_catalog_happy_path():
     bsd.validate_catalog(make_catalog())  # must not raise
 
 
+@pytest.mark.parametrize("fallback", ["api", "scrape", "none"])
+def test_validate_catalog_accepts_aa_fallback(fallback):
+    doc = make_catalog()
+    doc["sources"]["aa"]["fallback"] = fallback
+    bsd.validate_catalog(doc)  # must not raise
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda aa: aa.pop("fallback"),
+        lambda aa: aa.update(fallback="psychic"),
+        # "openrouter" is a mode, never a fallback
+        lambda aa: aa.update(fallback="openrouter"),
+        lambda aa: aa.update(fallback=None),
+        lambda aa: aa.update(fallback=["api"]),
+    ],
+)
+def test_validate_catalog_rejects_bad_aa_fallback(mutate):
+    doc = make_catalog()
+    mutate(doc["sources"]["aa"])
+    with pytest.raises(ValueError, match="sources.aa.fallback"):
+        bsd.validate_catalog(doc)
+
+
 def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
     doc = make_catalog()
     doc["models"][0]["aa"] = {
@@ -383,11 +413,18 @@ def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
         "agentic_index": None,
     }
     doc["models"][0]["quality_match"] = None
-    doc["sources"]["aa"] = {"mode": "none", "matched": 0, "matched_openrouter": 0}
+    doc["sources"]["aa"] = {
+        "mode": "none",
+        "fallback": "none",
+        "matched": 0,
+        "matched_openrouter": 0,
+    }
     bsd.validate_catalog(doc)  # must not raise
     for provenance, mode in (("api", "api"), ("scrape", "scrape")):
         doc["models"][0]["quality_match"] = provenance
-        doc["sources"]["aa"].update(mode=mode, matched=1, matched_openrouter=0)
+        doc["sources"]["aa"].update(
+            mode=mode, fallback=mode, matched=1, matched_openrouter=0
+        )
         bsd.validate_catalog(doc)  # must not raise
 
 
@@ -1096,7 +1133,12 @@ def _invariant_catalog():
     doc = make_catalog()
     doc["models"] = models
     doc["pool"] = {"listed": 6, "candidates": 5, "dropped": {"context": 1}}
-    doc["sources"]["aa"] = {"mode": "openrouter", "matched": 3, "matched_openrouter": 3}
+    doc["sources"]["aa"] = {
+        "mode": "openrouter",
+        "fallback": "api",
+        "matched": 3,
+        "matched_openrouter": 3,
+    }
     doc["rankings"] = {
         "balanced": ["acme/a", "acme/b", "acme/c", "acme/e", "acme/d"],
         "price": ["acme/c", "acme/b", "acme/a", "acme/d", "acme/e"],

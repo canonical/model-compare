@@ -52,6 +52,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -59,7 +60,8 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_DISCOUNTS_URL = (
     "https://openrouter.ai/api/frontend/v1/models/find?output_modalities=text"
 )
-# Public (undocumented) per-endpoint list of zero-data-retention endpoints.
+# Public per-endpoint list of zero-data-retention endpoints; DESIGN.md
+# ("Zero data retention") describes how its entries are interpreted.
 OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
 AA_MODELS_PAGE_URL = "https://artificialanalysis.ai/models"
 # Supported V2 free-tier replacement for the retired /api/v2/data/llms/models
@@ -121,6 +123,32 @@ def norm_key(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+class StripApiKeyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Drop the AA API key when a redirect leaves the original origin.
+
+    urllib copies custom request headers onto the redirected request even
+    across hosts. The key is kept only when scheme, host and port all match,
+    so a cross-host redirect or an https->http downgrade never carries it.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            old, dest = (
+                urllib.parse.urlsplit(req.full_url),
+                urllib.parse.urlsplit(new.full_url),
+            )
+            same_origin = (old.scheme, old.hostname, old.port) == (
+                dest.scheme,
+                dest.hostname,
+                dest.port,
+            )
+            if not same_origin:
+                # Request stores header names capitalize()d: "X-api-key".
+                new.remove_header("X-api-key")
+        return new
+
+
 def http_get(url: str, headers: dict | None = None, timeout: int = 30) -> bytes:
     req = urllib.request.Request(
         url,
@@ -130,7 +158,8 @@ def http_get(url: str, headers: dict | None = None, timeout: int = 30) -> bytes:
             **(headers or {}),
         },
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    opener = urllib.request.build_opener(StripApiKeyRedirectHandler)
+    with opener.open(req, timeout=timeout) as resp:
         data = resp.read()
     if data[:2] == b"\x1f\x8b":
         data = gzip.decompress(data)
@@ -144,6 +173,15 @@ def fetch_json(
     for attempt in range(retries + 1):
         try:
             return json.loads(http_get(url, headers, timeout))
+        except urllib.error.HTTPError as exc:
+            # HTTPError is a URLError, so this clause must come first. A
+            # 4xx (bad key, forbidden, rate limited) will not change on an
+            # immediate retry; raise it at once. 5xx falls through to retry.
+            if 400 <= exc.code < 500:
+                raise
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(1)
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             last_exc = exc
             if attempt < retries:
@@ -306,10 +344,18 @@ def fetch_openrouter_frontend(args):
     # :free endpoints) too. No "~" router aliases occur in this list, so
     # unlike the find parsing there is no "~" skip; any stray id is
     # harmless because build_candidates only matches real model ids.
+    # An endpoint counts only when its status is exactly the integer 0.
+    # OpenRouter's OpenAPI schema (EndpointStatus) lists 0, -1, -2, -3, -5
+    # and -10 without describing them, so the meaning of the non-zero values
+    # is unverified; treat anything other than 0, including a missing
+    # status, as not serving (fail closed).
     entries = payload.get("data") if isinstance(payload, dict) else None
     ids = set()
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict):
+            continue
+        status = entry.get("status")
+        if type(status) is not int or status != 0:
             continue
         model_id = entry.get("model_id")
         if isinstance(model_id, str) and model_id:
@@ -468,7 +514,9 @@ def aa_scrape_entries() -> list:
 
 def fetch_aa_entries(args):
     if not args.no_cache:
-        cached = load_cache("aa-intelligence", args.cache_ttl)
+        # v2: entries cached under the old key predate the V2 endpoint
+        # migration and must never be read.
+        cached = load_cache("aa-intelligence-v2", args.cache_ttl)
         if isinstance(cached, dict):
             return cached.get("entries", []), cached.get("source"), True
     api_key = args.aa_api_key or os.environ.get("AA_API_KEY")
@@ -477,7 +525,7 @@ def fetch_aa_entries(args):
             entries = aa_api_entries(api_key)
             if entries:
                 save_cache(
-                    "aa-intelligence", {"entries": entries, "source": "AA API v2"}
+                    "aa-intelligence-v2", {"entries": entries, "source": "AA API v2"}
                 )
                 return entries, "AA API v2", False
             warn("AA API returned no intelligence scores; falling back to page scrape")
@@ -491,7 +539,7 @@ def fetch_aa_entries(args):
     if not entries:
         warn("no intelligence scores found on the AA page")
         return [], None, False
-    save_cache("aa-intelligence", {"entries": entries, "source": "AA page scrape"})
+    save_cache("aa-intelligence-v2", {"entries": entries, "source": "AA page scrape"})
     return entries, "AA page scrape", False
 
 
@@ -1020,7 +1068,10 @@ def build_catalog(
     matched_openrouter = sum(
         1 for s in quality_source_by_id.values() if s == "openrouter"
     )
-    aa_mode = "openrouter" if matched_openrouter else aa_modes.get(aa_source, "none")
+    # fallback is what the AA API / page scrape yielded on its own; mode
+    # hides it behind "openrouter" as soon as one OpenRouter match exists.
+    aa_fallback = aa_modes.get(aa_source, "none")
+    aa_mode = "openrouter" if matched_openrouter else aa_fallback
 
     entries = []
     for cand in candidates:
@@ -1106,6 +1157,7 @@ def build_catalog(
             "openrouter": "ok",
             "aa": {
                 "mode": aa_mode,
+                "fallback": aa_fallback,
                 "matched": len(quality_by_id),
                 "matched_openrouter": matched_openrouter,
             },

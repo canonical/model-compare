@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/api/v2/data/llms/models`, which Artificial Analysis retires on
   2026-11-04. Failure behavior is unchanged: page-1 errors still fall back to
   the page scrape, later-page errors keep the pages already fetched.
+- `publish.py` fails when `AA_API_KEY` is set but neither the AA API nor the
+  page scrape yielded data. The catalog gains an additive
+  `sources.aa.fallback` field (`api`, `scrape` or `none`) that records what
+  the AA fallback yielded, independently of `sources.aa.mode`; `mode` reads
+  `openrouter` as soon as one candidate's AA data came from OpenRouter, so it
+  hid a failed fallback. The gate reads `fallback`, fails closed when it
+  is missing or unknown, and runs straight after the `--catalog` step, so a
+  failed gate writes no publish artifacts to the output directory.
+  `build_site_data.py` rejects a catalog without a valid `fallback`.
 
 ### Fixed
 
@@ -25,7 +34,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `:free` endpoints — which retain prompts and train on them — were published
   with `zdr: true` (e.g. `nvidia/nemotron-3-ultra-550b-a55b:free`). The ZDR
   cache key moved to `openrouter-zdr-v3`, so cached id sets from the old
-  source are never read.
+  source are never read. An endpoint counts only when its `status` is the
+  integer `0`; OpenRouter's API schema lists `0`, `-1`, `-2`, `-3`, `-5` and
+  `-10` without saying what they mean, so any other or missing status is
+  treated as not ZDR (fail closed). The default ZDR filter also
+  excludes `:free` variants without a ZDR endpoint of their own and `:batch`
+  variants: the list currently has no `:batch` ids, so `--include-batch` has
+  no effect unless `--no-zdr` is also given. Compared on 2026-10-08, the
+  two sources also differ in other ids, in both directions: the new list has
+  91 ids the old source did not list, none of them a text-output model, and
+  lacks 74 text-output ids the old source listed, 72 of them `:batch` or
+  `:free` variants.
+- HTTP 4xx responses (such as 401, 403 or 429) are no longer retried; other
+  network errors, timeouts and 5xx responses are still retried once.
+- The AA intelligence cache key moved to `aa-intelligence-v2`, so entries
+  cached before the V2 endpoint migration are never read.
+- The AA API key is no longer forwarded when a redirect changes the scheme,
+  host or port; urllib copied it onto the redirected request.
 
 ## [0.2.5] - 2026-09-28
 

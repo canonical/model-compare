@@ -1698,7 +1698,12 @@ def test_catalog_envelope():
     assert p["weights"]["balanced"] == mc.PRIORITY_WEIGHTS["balanced"]
     assert doc["sources"] == {
         "openrouter": "ok",
-        "aa": {"mode": "openrouter", "matched": 1, "matched_openrouter": 1},
+        "aa": {
+            "mode": "openrouter",
+            "fallback": "api",
+            "matched": 1,
+            "matched_openrouter": 1,
+        },
         "zdr": "ok",
         "discounts": "ok",
     }
@@ -2026,6 +2031,7 @@ def test_catalog_document_passes_site_validator():
     assert {e["quality_match"] for e in doc["models"]} == {"openrouter", "api"}
     assert doc["sources"]["aa"] == {
         "mode": "openrouter",
+        "fallback": "api",
         "matched": 2,
         "matched_openrouter": 1,
     }
@@ -2058,6 +2064,7 @@ def test_catalog_quality_match_and_sources_counts():
     assert a["quality_match"] is None
     assert doc["sources"]["aa"] == {
         "mode": "openrouter",
+        "fallback": "api",
         "matched": 1,
         "matched_openrouter": 1,
     }
@@ -2075,6 +2082,7 @@ def test_catalog_aa_mode_reflects_fallback_when_or_empty():
     doc = build_doc(aa_source="AA page scrape", aa_by_id={})
     assert doc["sources"]["aa"] == {
         "mode": "scrape",
+        "fallback": "scrape",
         "matched": 0,
         "matched_openrouter": 0,
     }
@@ -2160,3 +2168,239 @@ def test_version_flag():
     )
     # Literal pin: a release that forgets to bump VERSION fails here.
     assert proc.stdout.strip() == "model-compare 0.2.5"
+
+
+# ---------------------------------------------------------------------------
+# fetch_json retry policy
+# ---------------------------------------------------------------------------
+
+
+def _counting_http_get(monkeypatch, exc):
+    attempts = []
+
+    def fake_http_get(url, headers=None, timeout=30):
+        attempts.append(url)
+        raise exc
+
+    monkeypatch.setattr(mc, "http_get", fake_http_get)
+    monkeypatch.setattr(mc.time, "sleep", lambda s: None)
+    return attempts
+
+
+def _http_error(code):
+    import urllib.error
+
+    return urllib.error.HTTPError("https://example.test/", code, "x", {}, None)
+
+
+def test_fetch_json_does_not_retry_4xx(monkeypatch):
+    import urllib.error
+
+    attempts = _counting_http_get(monkeypatch, _http_error(401))
+    with pytest.raises(urllib.error.HTTPError):
+        mc.fetch_json("https://example.test/")
+    assert len(attempts) == 1
+
+
+def test_fetch_json_retries_5xx_once(monkeypatch):
+    import urllib.error
+
+    attempts = _counting_http_get(monkeypatch, _http_error(503))
+    with pytest.raises(urllib.error.HTTPError):
+        mc.fetch_json("https://example.test/")
+    assert len(attempts) == 2
+
+
+def test_fetch_json_retries_urlerror_once(monkeypatch):
+    import urllib.error
+
+    attempts = _counting_http_get(monkeypatch, urllib.error.URLError("down"))
+    with pytest.raises(urllib.error.URLError):
+        mc.fetch_json("https://example.test/")
+    assert len(attempts) == 2
+
+
+# ---------------------------------------------------------------------------
+# AA cache key versioning
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_aa_entries_ignores_legacy_cache(monkeypatch, tmp_path):
+    # Entries cached under the pre-V2 key came from the retired endpoint
+    # and must never be read.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    legacy = tmp_path / "model-compare" / "aa-intelligence.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {
+                    "entries": [{"key": "legacy", "name": "L", "index": 1.0}],
+                    "source": "AA API v2",
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(mc, "aa_scrape_entries", lambda: [])
+    entries, source, cached = mc.fetch_aa_entries(
+        make_args(no_cache=False, cache_ttl=3600)
+    )
+    assert (entries, source, cached) == ([], None, False)
+
+
+def test_fetch_aa_entries_writes_v2_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    scraped = [{"key": "s", "name": "S", "index": 1.0, "estimated": False}]
+    monkeypatch.setattr(mc, "aa_scrape_entries", lambda: scraped)
+    mc.fetch_aa_entries(make_args(no_cache=False, cache_ttl=3600))
+    cache_dir = tmp_path / "model-compare"
+    assert (cache_dir / "aa-intelligence-v2.json").exists()
+    assert not (cache_dir / "aa-intelligence.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# redirect handling: the AA key never leaves its origin
+# ---------------------------------------------------------------------------
+
+
+def _redirect(old_url, new_url):
+    import urllib.request
+
+    req = urllib.request.Request(old_url, headers={"x-api-key": "secret"})
+    handler = mc.StripApiKeyRedirectHandler()
+    return handler.redirect_request(req, None, 302, "Found", {}, new_url)
+
+
+def test_redirect_same_host_keeps_api_key():
+    new = _redirect("https://api.example.test/a", "https://api.example.test/b")
+    assert new.get_header("X-api-key") == "secret"
+
+
+def test_redirect_cross_host_strips_api_key():
+    new = _redirect("https://api.example.test/a", "https://evil.example.test/b")
+    assert new is not None
+    assert not new.has_header("X-api-key")
+    assert new.full_url == "https://evil.example.test/b"
+
+
+def test_redirect_scheme_downgrade_strips_api_key():
+    new = _redirect("https://api.example.test/a", "http://api.example.test/b")
+    assert not new.has_header("X-api-key")
+
+
+def test_http_get_uses_redirect_stripping_opener(monkeypatch):
+    seen = {}
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            seen["req"] = req
+            seen["timeout"] = timeout
+            return FakeResp()
+
+    def fake_build_opener(*handlers):
+        seen["handlers"] = handlers
+        return FakeOpener()
+
+    monkeypatch.setattr(mc.urllib.request, "build_opener", fake_build_opener)
+    assert mc.http_get("https://x.test/", {"x-api-key": "k"}, timeout=7) == b"{}"
+    assert any(
+        isinstance(h, mc.StripApiKeyRedirectHandler)
+        or h is mc.StripApiKeyRedirectHandler
+        for h in seen["handlers"]
+    )
+    assert seen["timeout"] == 7
+    assert seen["req"].get_header("X-api-key") == "k"
+
+
+# ---------------------------------------------------------------------------
+# ZDR endpoint status: only status == 0 counts (fail closed)
+# ---------------------------------------------------------------------------
+
+
+def _zdr_ids_for(monkeypatch, tmp_path, entries):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    stub_frontend(monkeypatch, [], frontend_payload(), {"data": entries})
+    return mc.fetch_openrouter_frontend(make_args(no_cache=True))[1]
+
+
+def _with_status(model_id, status):
+    entry = zdr_endpoint(model_id)
+    if status is _MISSING:
+        del entry["status"]
+    else:
+        entry["status"] = status
+    return entry
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize("status", [-2, -5, _MISSING, False, None, "0", 0.0])
+def test_fetch_openrouter_frontend_zdr_skips_non_zero_status(
+    monkeypatch, tmp_path, status
+):
+    ids = _zdr_ids_for(
+        monkeypatch,
+        tmp_path,
+        [zdr_endpoint("acme/ok"), _with_status("acme/down", status)],
+    )
+    assert ids == {"acme/ok"}
+
+
+def test_fetch_openrouter_frontend_zdr_counts_status_zero(monkeypatch, tmp_path):
+    ids = _zdr_ids_for(monkeypatch, tmp_path, [_with_status("acme/ok", 0)])
+    assert ids == {"acme/ok"}
+
+
+def test_fetch_openrouter_frontend_zdr_one_live_endpoint_suffices(
+    monkeypatch, tmp_path
+):
+    ids = _zdr_ids_for(
+        monkeypatch,
+        tmp_path,
+        [_with_status("acme/a", 0), _with_status("acme/a", -5)],
+    )
+    assert ids == {"acme/a"}
+
+
+# ---------------------------------------------------------------------------
+# sources.aa.fallback: what the AA API / scrape fallback yielded, unmasked
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "aa_source, fallback",
+    [("AA API v2", "api"), ("AA page scrape", "scrape"), (None, "none")],
+)
+def test_catalog_aa_fallback_tracks_aa_source(aa_source, fallback):
+    # with OpenRouter benchmarks matched, mode stays "openrouter"
+    doc = build_doc(aa_source=aa_source)
+    assert doc["sources"]["aa"]["mode"] == "openrouter"
+    assert doc["sources"]["aa"]["fallback"] == fallback
+    # without them, mode and fallback agree
+    doc = build_doc(aa_source=aa_source, aa_by_id={})
+    assert doc["sources"]["aa"]["mode"] == fallback
+    assert doc["sources"]["aa"]["fallback"] == fallback
+
+
+def test_catalog_aa_fallback_not_masked_by_openrouter_matches():
+    # Regression: the publish gate read mode alone, and any OpenRouter
+    # match turned a failed AA API and scrape into mode "openrouter".
+    doc = build_doc(aa_source=None)
+    assert doc["sources"]["aa"]["matched_openrouter"] > 0
+    assert doc["sources"]["aa"]["mode"] == "openrouter"
+    assert doc["sources"]["aa"]["fallback"] == "none"
+    bsd.validate_catalog(doc)  # must not raise

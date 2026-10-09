@@ -44,7 +44,7 @@ No dependencies beyond Python 3.10+ (stdlib only). Exit codes: `0` success,
 | `--quality-ref N` | 70 | index counting as full quality score |
 | `--aa-api-key KEY` | `$AA_API_KEY` | Artificial Analysis API key |
 | `--exclude-free` | off | drop `:free` variants |
-| `--include-batch` | off | keep `:batch` (async completion) variants |
+| `--include-batch` | off | keep `:batch` (async completion) variants; no effect without `--no-zdr`, as the ZDR list has no `:batch` ids today |
 | `--discount` | off | only models with an active discount |
 | `--no-zdr` | off | rank all models, not just zero-data-retention ones |
 | `--no-require-tools` | off | allow models without tool calling |

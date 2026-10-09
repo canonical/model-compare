@@ -113,15 +113,28 @@ discounted.
 By default, only models with zero-data-retention (ZDR) endpoints are ranked —
 providers that do not retain prompts or outputs. The ZDR set comes from
 OpenRouter's public per-endpoint ZDR list
-(`https://openrouter.ai/api/v1/endpoints/zdr`, public but undocumented): one
-entry per ZDR endpoint, keyed by the exact model id. A model id counts as ZDR
-if and only if it has at least one entry in that list. The website's
-`zdr=true` model filter matches this at the model level, but the list is
-per variant, so non-ZDR variants of a ZDR model are excluded — NVIDIA's
-`:free` endpoints, for example, train on prompts and are not listed, while
-their paid twins are. If the list cannot be fetched or yields no entries, the
-tool refuses to rank rather than silently considering non-ZDR models; pass
-`--no-zdr` to explicitly consider everything.
+(`https://openrouter.ai/api/v1/endpoints/zdr`, public; its OpenAPI entry gives
+the response shape but little semantics): one entry per ZDR endpoint, keyed by
+the exact model id. A model id counts as ZDR if and only if it has at least
+one entry in that list whose `status` is the integer `0`. OpenRouter's API
+schema (`EndpointStatus` in `https://openrouter.ai/openapi.json`) lists the
+values `0`, `-1`, `-2`, `-3`, `-5` and `-10` without describing them, so the
+meaning of the non-zero values is unverified; any status other than `0`,
+including a missing one, does not count (fail closed). The website's
+`zdr=true` model filter matches this at the model level, but the list is per
+variant, so non-ZDR variants of a ZDR model are excluded — NVIDIA's `:free`
+endpoints, for example, train on prompts and are not listed, while their paid
+twins are. The default filter therefore excludes `:free` variants without a
+ZDR endpoint of their own, and `:batch` variants as well: the list currently
+has no `:batch` ids, so `--include-batch` keeps nothing unless `--no-zdr` is
+also given (by default `:batch` ids are dropped as `batch`; with
+`--include-batch` they are dropped as `not ZDR` instead). The list and the
+previous source (the `models/find?zdr=true` frontend filter) also differ in
+other ids, in both directions; in a comparison on 2026-10-08, none of the ids
+only the list had was a text-output model, and almost all of the text-output
+ids it lacked were `:batch` or `:free` variants. If the list cannot be fetched
+or yields no entries, the tool refuses to rank rather than silently
+considering non-ZDR models; pass `--no-zdr` to explicitly consider everything.
 
 ## Catalog output contract
 
@@ -147,11 +160,20 @@ one bumps the version.
 Top level: `schema_version`, `tool`, `generated_at`, `parameters` (all knobs
 plus the **effective** per-priority `weights` — reproducing `scores.overall`
 needs nothing else), `sources` (`openrouter`, `aa` with `mode`
-`openrouter`/`api`/`scrape`/`none` plus the `matched` and
-`matched_openrouter` counts, `zdr` `ok`/`skipped`, `discounts`
+`openrouter`/`api`/`scrape`/`none`, `fallback` `api`/`scrape`/`none`, plus
+the `matched` and `matched_openrouter` counts, `zdr` `ok`/`skipped`, `discounts`
 `ok`/`unavailable` — where `unavailable` covers both a failed discount fetch
 and a live pool with zero discounts), `pool` (`listed`, `candidates`,
 `dropped`), `models`, `rankings`, `filtered`.
+
+`sources.aa.mode` is `openrouter` whenever at least one candidate's AA data
+came from OpenRouter, and otherwise names the fallback. It says nothing about
+whether the AA API or the page scrape worked. `sources.aa.fallback` records
+that on its own: `api` or `scrape` when that path yielded entries, `none` when
+both failed or no key was set and the scrape failed. It is an additive field,
+so it arrived without a `schema_version` bump. With `AA_API_KEY` set,
+`web/publish.py` fails the run unless `fallback` is `api` or `scrape`, and
+checks this right after the `--catalog` step, before any artifact is written.
 
 `rankings` maps each priority (`balanced`, `price`, `quality`) to the full
 ordered list of candidate ids for that priority (every `models` id exactly
