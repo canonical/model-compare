@@ -2573,7 +2573,7 @@ def build_doc(**overrides):
 
 def test_catalog_envelope():
     doc = build_doc()
-    assert doc["schema_version"] == 1
+    assert doc["schema_version"] == 2
     assert doc["tool"] == "model-compare"
     datetime.fromisoformat(doc["generated_at"])  # ISO with offset, raises if not
     p = doc["parameters"]
@@ -2615,6 +2615,14 @@ def test_catalog_entry_shape():
             "input_per_1m",
             "output_per_1m",
             "blended_per_1m",
+            "base",
+            "tiers",
+            "schedule",
+        }
+        assert set(entry["pricing"]["base"]) == {
+            "input_per_1m",
+            "output_per_1m",
+            "blended_per_1m",
         }
         assert set(entry["scores"]) == {"price", "quality", "context", "age", "overall"}
         assert set(entry["scores"]["overall"]) == {"balanced", "price", "quality"}
@@ -2626,6 +2634,13 @@ def test_catalog_entry_shape():
         "input_per_1m": 1.0,
         "output_per_1m": 2.0,
         "blended_per_1m": 1.25,
+        "base": {
+            "input_per_1m": 1.0,
+            "output_per_1m": 2.0,
+            "blended_per_1m": 1.25,
+        },
+        "tiers": [],
+        "schedule": None,
     }
     assert a["listed_at"] == "2023-11-14"  # utc date of 1_700_000_000
     assert isinstance(a["age_days"], int) and a["age_days"] >= 0
@@ -2639,6 +2654,131 @@ def test_catalog_entry_shape():
     assert b["quality"] == 68.4
     assert b["quality_match"] == "openrouter"
     assert b["discount"] is None
+
+
+def _doc_with(models, min_context=1_000_000, zdr_ids=None, aa_by_id=None):
+    args = make_args(min_context=min_context)
+    filtered = []
+    zdr = {m["id"] for m in models} if zdr_ids is None else zdr_ids
+    candidates, dropped = mc.build_candidates(models, args, {}, zdr, filtered)
+    mc.compute_scores(candidates, args, {})
+    return mc.build_catalog(
+        args, models, candidates, dropped, filtered, {}, {}, None, aa_by_id or {}, {}
+    )
+
+
+def test_catalog_tiered_pricing_block():
+    doc = _doc_with([make_model(id="acme/haiku", pricing=haiku_pricing())])
+    (entry,) = doc["models"]
+    pricing = entry["pricing"]
+    assert pricing["input_per_1m"] == 0.5
+    assert pricing["output_per_1m"] == 2.5
+    assert pricing["base"] == {
+        "input_per_1m": pytest.approx(0.1),
+        "output_per_1m": pytest.approx(0.5),
+        "blended_per_1m": pytest.approx(0.2),
+    }
+    assert pricing["tiers"] == [
+        {
+            "min_prompt_tokens": 100000,
+            "input_per_1m": 0.5,
+            "output_per_1m": 2.5,
+            "blended_per_1m": 1.0,
+        }
+    ]
+    assert pricing["schedule"] is None
+
+
+def test_catalog_schedule_pricing_block():
+    doc = _doc_with([make_model(id="acme/hy4", pricing=hy4_pricing())])
+    (entry,) = doc["models"]
+    pricing = entry["pricing"]
+    assert pricing["input_per_1m"] == pytest.approx(0.834)
+    assert pricing["output_per_1m"] == pytest.approx(2.501)
+    assert pricing["base"]["input_per_1m"] == pytest.approx(0.834)  # frozen peak
+    assert pricing["base"]["output_per_1m"] == pytest.approx(2.501)
+    schedule = pricing["schedule"]
+    assert [(w["utc_start"], w["utc_end"], w["coverage"]) for w in schedule] == [
+        (0, 1600, 0.6667),
+        (1600, 0, 0.3333),
+    ]
+    assert schedule[0]["input_per_1m"] == pytest.approx(0.834)
+    assert schedule[0]["blended_per_1m"] == pytest.approx(1.25075)
+    assert pricing["tiers"] == []
+
+
+def test_catalog_schedules_top_level():
+    models = [
+        make_model(id="acme/hy3", pricing=deepseek_pricing(), context_length=262144),
+        make_model(id="acme/candidate-hy4", pricing=hy4_pricing()),
+        make_model(id="~acme/alias", pricing=hy4_pricing()),
+        make_model(id="acme/batch-hy4:batch", pricing=hy4_pricing()),
+        make_model(id="acme/nonzdr-hy4", pricing=hy4_pricing()),
+        make_model(id="acme/plain"),
+    ]
+    zdr = {m["id"] for m in models} - {"acme/nonzdr-hy4"}
+    doc = _doc_with(models, zdr_ids=zdr)
+    ids = [s["id"] for s in doc["schedules"]]
+    assert ids == sorted(ids)
+    assert "acme/hy3" in ids  # sub-floor context: schedules are unfiltered
+    assert "acme/batch-hy4:batch" in ids  # :batch variants are distinct deals
+    assert "acme/nonzdr-hy4" in ids  # non-ZDR: schedules stay unfiltered
+    assert "~acme/alias" not in ids  # router aliases excluded
+    assert "acme/plain" not in ids  # no schedule
+    by_id = {s["id"]: s for s in doc["schedules"]}
+    candidate = by_id["acme/candidate-hy4"]
+    assert candidate["score"] is not None  # balanced overall for candidates
+    assert candidate["quality"] is None  # no AA data in this document
+    noncand = by_id["acme/hy3"]
+    assert noncand["score"] is None
+    assert noncand["quality"] is None
+    assert noncand["max_discount"] == 0.5
+    assert noncand["sched_note"] == "-50%"
+    assert noncand["sched_detail"] == (
+        "weekdays 00:00-01:00, 04:00-06:00, 10:00-00:00; weekends all day UTC"
+    )
+    assert noncand["context"] == 262144
+    assert noncand["offpeak"]["input_per_1m"] == pytest.approx(0.66)
+    assert noncand["peak"]["input_per_1m"] == pytest.approx(1.32)
+
+
+def test_catalog_schedules_quality_from_openrouter_aa():
+    doc = _doc_with(
+        [
+            make_model(id="acme/model-a"),  # keeps the candidate pool non-empty
+            make_model(
+                id="acme/hy3", pricing=deepseek_pricing(), context_length=262144
+            ),
+        ],
+        aa_by_id={"acme/hy3": {"intelligence_index": 40.0}},
+    )
+    by_id = {entry["id"]: entry for entry in doc["schedules"]}
+    assert by_id["acme/hy3"]["quality"] == 40.0  # OR-published AA for non-candidates
+    assert by_id["acme/hy3"]["score"] is None
+
+
+def test_catalog_determinism_with_frozen_clock(monkeypatch):
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 9, 6, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(mc, "datetime", FrozenDatetime)
+    monkeypatch.setattr(mc.time, "time", lambda: 1_700_000_000.0)
+
+    def build(top_in, top_out):
+        pricing = dict(hy4_pricing())
+        pricing["prompt"] = top_in
+        pricing["completion"] = top_out
+        doc = _doc_with([make_model(id="acme/hy4", pricing=pricing)])
+        return json.dumps(doc, sort_keys=True)
+
+    # Two fetch times differ only in the windowed model's top-level prices
+    # (each equals one of its windows); the frozen peak base must make the
+    # documents byte-identical.
+    first = build("0.000000834", "0.000002501")
+    second = build("0.0000007506", "0.0000022509")
+    assert first == second
 
 
 def test_catalog_future_created_age_days_clamped():

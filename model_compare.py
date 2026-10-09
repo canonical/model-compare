@@ -86,7 +86,7 @@ PRIORITY_WEIGHTS = {
     "quality": {"quality": 0.60, "price": 0.20, "context": 0.10, "age": 0.10},
 }
 
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
 
 # The drop-reason keys build_candidates counts, verbatim -- keep in sync with
 # its drop() call sites. pool.dropped lists all of them zero-filled so the
@@ -1039,6 +1039,76 @@ def model_family(model_id: str) -> str | None:
     return token or None
 
 
+def _per_1m(price_per_token: float) -> float:
+    """USD per token -> USD per 1M tokens, 6 decimals."""
+    return round(price_per_token * 1_000_000.0, 6)
+
+
+def build_schedules(models, args, quality_by_id, aa_by_id, balanced_by_id):
+    """Catalog-wide off-peak index built from the RAW model list (spec 5.4).
+
+    Deliberately unfiltered by the candidate pool: sub-floor-context and
+    non-ZDR schedule models are listed (that is the point -- today's live
+    schedule models mostly sit below the 1M context floor). Router aliases
+    (~ids) and malformed ids are excluded; :batch variants are included as
+    distinct deals. Sorted by id.
+    """
+    entries = []
+    for model in models:
+        model_id = model.get("id") or ""
+        if not model_id or model_id.startswith("~") or "/" not in model_id:
+            continue
+        eff = effective_pricing(
+            model.get("pricing") or {}, args.min_context, args.input_share
+        )
+        windows = eff["schedule"]
+        if eff["schedule_error"] or not windows:
+            continue
+        peak = max(windows, key=lambda window: window["blended"])
+        offpeak = min(windows, key=lambda window: window["blended"])
+        quality = quality_by_id.get(model_id)
+        if quality is None:
+            benchmark = aa_by_id.get(base_model_id(model_id)) or {}
+            quality = benchmark.get("intelligence_index")
+        name = model.get("name") or model_id
+        entries.append(
+            {
+                "id": model_id,
+                "name": PROVIDER_PREFIX_RE.sub("", name).strip() or name,
+                "context": coerce_int(model.get("context_length"), 0),
+                "quality": quality,
+                "score": balanced_by_id.get(model_id),
+                "max_discount": eff["max_discount"],
+                "sched_note": fmt_sched_note(eff["max_discount"]),
+                "sched_detail": fmt_sched_detail(windows, eff["peak_blended"]),
+                "peak": {
+                    "input_per_1m": _per_1m(peak["price_in"]),
+                    "output_per_1m": _per_1m(peak["price_out"]),
+                    "blended_per_1m": _per_1m(peak["blended"]),
+                },
+                "offpeak": {
+                    "input_per_1m": _per_1m(offpeak["price_in"]),
+                    "output_per_1m": _per_1m(offpeak["price_out"]),
+                    "blended_per_1m": _per_1m(offpeak["blended"]),
+                },
+                "schedule": [
+                    {
+                        "utc_days": window["utc_days"],
+                        "utc_start": window["utc_start"],
+                        "utc_end": window["utc_end"],
+                        "coverage": window["coverage"],
+                        "input_per_1m": _per_1m(window["price_in"]),
+                        "output_per_1m": _per_1m(window["price_out"]),
+                        "blended_per_1m": _per_1m(window["blended"]),
+                    }
+                    for window in windows
+                ],
+            }
+        )
+    entries.sort(key=lambda entry: entry["id"])
+    return entries
+
+
 def catalog_weights(candidates, quality_by_id):
     """Effective per-priority weights for the catalog document.
 
@@ -1499,6 +1569,43 @@ def build_catalog(
                     "input_per_1m": round(cand["price_in"], 6),
                     "output_per_1m": round(cand["price_out"], 6),
                     "blended_per_1m": round(cand["blended"], 6),
+                    "base": {
+                        "input_per_1m": round(cand["base_price_in"], 6),
+                        "output_per_1m": round(cand["base_price_out"], 6),
+                        "blended_per_1m": round(
+                            args.input_share * cand["base_price_in"]
+                            + (1 - args.input_share) * cand["base_price_out"],
+                            6,
+                        ),
+                    },
+                    "tiers": [
+                        {
+                            "min_prompt_tokens": tier["min_prompt_tokens"],
+                            "input_per_1m": _per_1m(tier["price_in"]),
+                            "output_per_1m": _per_1m(tier["price_out"]),
+                            "blended_per_1m": _per_1m(
+                                args.input_share * tier["price_in"]
+                                + (1 - args.input_share) * tier["price_out"]
+                            ),
+                        }
+                        for tier in cand["tiers"]
+                    ],
+                    "schedule": (
+                        [
+                            {
+                                "utc_days": window["utc_days"],
+                                "utc_start": window["utc_start"],
+                                "utc_end": window["utc_end"],
+                                "coverage": window["coverage"],
+                                "input_per_1m": _per_1m(window["price_in"]),
+                                "output_per_1m": _per_1m(window["price_out"]),
+                                "blended_per_1m": _per_1m(window["blended"]),
+                            }
+                            for window in cand["schedule"]
+                        ]
+                        if cand["schedule"]
+                        else None
+                    ),
                 },
                 "context": cand["context"],
                 "listed_at": listed_date.isoformat() if listed_date else None,
@@ -1523,7 +1630,14 @@ def build_catalog(
         )
     entries.sort(key=lambda e: (-e["scores"]["overall"]["balanced"], e["id"]))
 
+    balanced_by_id = {
+        entry["id"]: entry["scores"]["overall"]["balanced"] for entry in entries
+    }
+
     return {
+        "schedules": build_schedules(
+            models, args, quality_by_id, aa_by_id, balanced_by_id
+        ),
         "schema_version": CATALOG_SCHEMA_VERSION,
         "tool": "model-compare",
         "generated_at": now.isoformat(timespec="seconds"),
