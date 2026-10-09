@@ -852,6 +852,89 @@ def test_catalog_drop_reasons_constant():
     assert reasons.index("schedule") == reasons.index("pricing") + 1
 
 
+# ---------------------------------------------------------------------------
+# Tiered pricing: CLI display (TIER column, legend, --json keys)
+# ---------------------------------------------------------------------------
+
+
+def _scored_candidates():
+    models = [
+        make_model(id="acme/tiered", pricing=haiku_pricing()),
+        make_model(id="acme/plain"),
+    ]
+    args = make_args(min_context=1_000_000)
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/tiered", "acme/plain"}, []
+    )
+    mc.compute_scores(candidates, args, {})
+    return candidates
+
+
+def test_json_additive_tier_keys(capsys):
+    mc.print_json(_scored_candidates())
+    by_model = {row["model"]: row for row in json.loads(capsys.readouterr().out)}
+    tiered = by_model["acme/tiered"]
+    assert tiered["pricing_tier_prompt_tokens"] == 100000
+    assert tiered["base_input_usd_per_m"] == pytest.approx(0.1)
+    assert tiered["base_output_usd_per_m"] == pytest.approx(0.5)
+    assert tiered["tier_note"] == ">100k"
+    assert tiered["sched_note"] is None
+    assert tiered["sched_detail"] is None
+    assert tiered["time_schedule"] is None
+    plain = by_model["acme/plain"]
+    assert plain["pricing_tier_prompt_tokens"] is None
+    assert plain["tier_note"] is None
+    assert plain["time_schedule"] is None
+
+
+def test_json_time_schedule_string(capsys):
+    models = [make_model(id="acme/hy4", pricing=hy4_pricing())]
+    args = make_args(min_context=1_000_000)
+    candidates, _ = mc.build_candidates(models, args, {}, {"acme/hy4"}, [])
+    mc.compute_scores(candidates, args, {})
+    mc.print_json(candidates)
+    (row,) = json.loads(capsys.readouterr().out)
+    assert row["sched_note"] == "-10%"
+    assert row["sched_detail"] == "daily 16:00-00:00 UTC"
+    assert row["time_schedule"] == "-10% daily 16:00-00:00 UTC"
+    assert row["pricing_tier_prompt_tokens"] is None
+
+
+def test_table_has_tier_column(capsys):
+    mc.print_table(_scored_candidates(), 2, mc.PRIORITY_WEIGHTS["balanced"], "note")
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    header = lines[0]
+    assert "DISC" in header and "TIER" in header and "CTX" in header
+    assert header.index("DISC") < header.index("TIER") < header.index("CTX")
+    tiered_row = next(line for line in lines if "acme/tiered" in line)
+    assert ">100k" in tiered_row
+    plain_row = next(line for line in lines if "acme/plain" in line)
+    assert ">100k" not in plain_row
+
+
+def test_footer_legend_lines(capsys):
+    mc.print_table(_scored_candidates(), 2, mc.PRIORITY_WEIGHTS["balanced"], "note")
+    out = capsys.readouterr().out
+    assert (
+        "Prices shown are what a long session pays: several models bill at a "
+        "higher rate once the prompt outgrows their cheap short-context tier."
+    ) in out
+    assert (
+        "TIER marks how prices vary: a token threshold is the prompt size "
+        "above which the higher rate applies; a percentage is a scheduled "
+        "off-peak discount (price shown: the standard rate); SCHED marks a "
+        "schedule whose discount is under 1%. --json lists each model's "
+        "schedule."
+    ) in out
+    legend_lines = [
+        line
+        for line in out.splitlines()
+        if line.startswith(("Prices shown", "TIER marks"))
+    ]
+    assert legend_lines and all(line.isascii() for line in legend_lines)
+
+
 def test_build_candidates_survives_string_context_length():
     # Regression: string context_length must not raise a TypeError.
     models = [make_model(context_length="2000000")]
@@ -1680,6 +1763,15 @@ def _cand(model_id, blended, context=2_000_000, age_days: float | None = 0.0):
         "price_in": blended,
         "price_out": blended,
         "blended": blended,
+        "base_price_in": blended,
+        "base_price_out": blended,
+        "tier_prompt_tokens": None,
+        "tiers": [],
+        "schedule": None,
+        "max_discount": None,
+        "tier_note": None,
+        "sched_note": None,
+        "sched_detail": None,
         "age_days": age_days,
         "quality": None,
         "discount": None,

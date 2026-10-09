@@ -1322,6 +1322,7 @@ def print_table(top, total_candidates, weights, quality_note):
         "$IN/M",
         "$OUT/M",
         "DISC",
+        "TIER",
         "CTX",
         "AGE",
         "SCORE",
@@ -1336,6 +1337,7 @@ def print_table(top, total_candidates, weights, quality_note):
                 fmt_price(cand["price_in"]),
                 fmt_price(cand["price_out"]),
                 fmt_discount(cand["discount"]),
+                cand["tier_note"] or cand["sched_note"] or "--",
                 fmt_context(cand["context"]),
                 fmt_age(cand["age_days"]),
                 f"{cand['score']:.3f}",
@@ -1370,6 +1372,17 @@ def print_table(top, total_candidates, weights, quality_note):
         "quality: Artificial Analysis intelligence index (- = unknown); prices in USD per 1M tokens; "
         "DISC = active discount; AGE = time since listed on OpenRouter"
     )
+    print(
+        "Prices shown are what a long session pays: several models bill at a "
+        "higher rate once the prompt outgrows their cheap short-context tier."
+    )
+    print(
+        "TIER marks how prices vary: a token threshold is the prompt size "
+        "above which the higher rate applies; a percentage is a scheduled "
+        "off-peak discount (price shown: the standard rate); SCHED marks a "
+        "schedule whose discount is under 1%. --json lists each model's "
+        "schedule."
+    )
 
 
 def print_json(top):
@@ -1389,6 +1402,19 @@ def print_json(top):
             # Display string from the DISC column's formatter, so the site
             # shows exactly what the CLI prints instead of re-rounding.
             "discount_pct": fmt_discount(cand["discount"]),
+            # Tier/schedule fields follow the same precedent: the strings the
+            # site shows are these, never re-formatted downstream.
+            "pricing_tier_prompt_tokens": cand["tier_prompt_tokens"],
+            "base_input_usd_per_m": round(cand["base_price_in"], 6),
+            "base_output_usd_per_m": round(cand["base_price_out"], 6),
+            "tier_note": cand["tier_note"],
+            "sched_note": cand["sched_note"],
+            "sched_detail": cand["sched_detail"],
+            "time_schedule": (
+                cand["sched_note"] + " " + cand["sched_detail"]
+                if cand["sched_detail"]
+                else cand["sched_note"]
+            ),
             "context_tokens": cand["context"],
             "age_days": round(cand["age_days"], 1)
             if cand["age_days"] is not None
