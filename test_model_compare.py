@@ -8,6 +8,7 @@ These cover pure functions only -- no network access is performed. Run with:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -20,6 +21,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent / "web"))
 import build_site_data as bsd  # noqa: E402  (web/ module, contract validator)
 import model_compare as mc
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_cache(monkeypatch, tmp_path):
+    """Point XDG_CACHE_HOME at a per-test directory for every test.
+
+    Tests must never read or write the real user cache
+    (~/.cache/model-compare). A test once saved fixture AA entries there,
+    and a CI publish then loaded them on a silent cache hit and published
+    them. Tests that set XDG_CACHE_HOME themselves still win (same
+    tmp_path, later setenv).
+    """
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    return tmp_path
 
 
 def make_args(**overrides):
@@ -2259,6 +2274,29 @@ def test_fetch_aa_entries_writes_v2_cache(monkeypatch, tmp_path):
     cache_dir = tmp_path / "model-compare"
     assert (cache_dir / "aa-intelligence-v2.json").exists()
     assert not (cache_dir / "aa-intelligence.json").exists()
+
+
+def _dir_snapshot(path):
+    if not path.is_dir():
+        return None
+    return {p.name: (p.stat().st_mtime_ns, p.stat().st_size) for p in path.iterdir()}
+
+
+def test_cache_writes_land_in_isolated_dir_not_real_cache(monkeypatch, tmp_path):
+    # No explicit XDG_CACHE_HOME here: the autouse isolation fixture alone
+    # must redirect the save that fetch_aa_entries makes on success.
+    real = Path(os.path.expanduser("~")) / ".cache" / "model-compare"
+    before = _dir_snapshot(real)
+    path = Path(mc.cache_path("aa-intelligence-v2"))
+    # checked before any write, so a missing fixture fails without polluting
+    assert path.is_relative_to(tmp_path), path
+    assert not path.is_relative_to(real), path
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    scraped = [{"key": "s", "name": "S", "index": 1.0, "estimated": False}]
+    monkeypatch.setattr(mc, "aa_scrape_entries", lambda: scraped)
+    mc.fetch_aa_entries(make_args())
+    assert path.exists()
+    assert _dir_snapshot(real) == before
 
 
 # ---------------------------------------------------------------------------
