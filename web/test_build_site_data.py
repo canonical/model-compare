@@ -1448,6 +1448,33 @@ def test_validate_catalog_schedule_coverage_sum_tolerance():
     bsd.validate_catalog(doc)  # 1.0004 - 1 = 4e-4 < 1e-3
 
 
+def test_validate_catalog_accepts_48_window_schedule_drift():
+    # Producer coverages are rounded per window to 4 decimals (up to 5e-5
+    # each): 48 half-hour windows sum to 0.9984 yet tile the week exactly.
+    coverage = round(7 * 30 / 10080, 4)
+    windows = []
+    for i in range(48):
+        start = (i // 2) * 100 + (i % 2) * 30
+        end = ((i + 1) // 2) * 100 + ((i + 1) % 2) * 30
+        windows.append(
+            {
+                "utc_days": None,
+                "utc_start": start,
+                "utc_end": 0 if end == 2400 else end,
+                "coverage": coverage,
+                "input_per_1m": 1.0 if i % 2 else 2.0,
+                "output_per_1m": 4.0,
+                "blended_per_1m": 1.75 if i % 2 else 2.5,
+            }
+        )
+    assert abs(sum(w["coverage"] for w in windows) - 1.0) > 1e-3
+    doc = _pricing_doc(schedule=windows)
+    entry = _schedule_entry("acme/half-hourly", 0.3)
+    entry["schedule"] = windows
+    doc["schedules"] = [entry]
+    bsd.validate_catalog(doc)  # must not raise
+
+
 def test_validate_catalog_schedules_entries():
     doc = make_catalog()
     schedules = make_schedules()

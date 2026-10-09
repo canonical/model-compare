@@ -444,6 +444,35 @@ def test_days_only_window_is_whole_day():
     assert eff["schedule_error"] is True
 
 
+def half_hour_pricing():
+    """48 half-hour windows tiling the day (utc_days absent), alternating
+    peak/off-peak -- a valid schedule whose 4-decimal-rounded coverages
+    drift past 1e-3 (each 7*30/10080 = 0.020833.. rounds to 0.0208)."""
+    overrides = []
+    for i in range(48):
+        start = (i // 2) * 100 + (i % 2) * 30
+        end = ((i + 1) // 2) * 100 + ((i + 1) % 2) * 30
+        overrides.append(
+            {
+                "utc_start": start,
+                "utc_end": 0 if end == 2400 else end,
+                "prompt": "0.000001" if i % 2 else "0.000002",
+                "completion": "0.000004",
+            }
+        )
+    return {"prompt": "0.000002", "completion": "0.000004", "overrides": overrides}
+
+
+def test_half_hour_schedule_is_valid_despite_coverage_drift():
+    eff = mc.effective_pricing(half_hour_pricing(), 1_000_000, 0.75)
+    assert eff["schedule_error"] is False
+    assert len(eff["schedule"]) == 48
+    expected = sum(round(7 * 30 / 10080, 4) for _ in range(48))
+    total = sum(w["coverage"] for w in eff["schedule"])
+    assert total == pytest.approx(expected)
+    assert abs(total - 1.0) > 1e-3  # the drift the site validator must tolerate
+
+
 def test_deepseek_fixture_tiling_and_coverage():
     eff = mc.effective_pricing(deepseek_pricing(), 1_000_000, 0.75)
     assert eff["schedule_error"] is False

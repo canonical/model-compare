@@ -170,7 +170,11 @@ def _validate_window(window, label) -> None:
 
 
 def _validate_schedule_list(schedule, label) -> None:
-    """Null, or a non-empty window list whose coverages sum to 1 (1e-3)."""
+    """Null, or a non-empty window list whose coverages sum to 1.
+
+    Tolerance: max(1e-3, n * 5e-5) for n windows (per-window 4-decimal
+    rounding in the producer).
+    """
     if schedule is None:
         return
     if not isinstance(schedule, list) or not schedule:
@@ -179,7 +183,11 @@ def _validate_schedule_list(schedule, label) -> None:
     for i, window in enumerate(schedule):
         _validate_window(window, f"{label}[{i}]")
         total += window["coverage"]
-    if abs(total - 1.0) > 1e-3:
+    # The producer rounds each window's coverage to 4 decimals (up to 5e-5
+    # error per window), so the tolerance grows with the window count; the
+    # 1e-3 floor keeps short schedules strict.
+    tolerance = max(1e-3, len(schedule) * 5e-5 + 1e-9)
+    if abs(total - 1.0) > tolerance:
         raise ValueError(f"{label} coverages must sum to 1 (got {total})")
 
 
