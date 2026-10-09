@@ -132,6 +132,37 @@ def check_best(output_dir: Path, catalog: dict) -> None:
         )
 
 
+AA_FALLBACKS_LIVE = ("api", "scrape")
+
+
+def check_aa_fallback(catalog_path: Path) -> None:
+    """With AA_API_KEY set, fail unless the AA API or the page scrape worked.
+
+    sources.aa.mode "openrouter" means at least one candidate's AA data came
+    from OpenRouter; it says nothing about whether the AA API or the scrape
+    worked. sources.aa.fallback records that ("api", "scrape" or "none"), so
+    the gate reads fallback, and a missing or unknown value fails closed.
+    Without a key the scrape is the only source and its absence is not
+    checked here, so the gate never raises.
+    """
+    if not os.environ.get("AA_API_KEY"):
+        return
+    catalog = _load_artifact(catalog_path, ())
+    sources = catalog.get("sources")
+    aa_sources = sources.get("aa") if isinstance(sources, dict) else None
+    if not isinstance(aa_sources, dict):
+        aa_sources = {}
+    fallback = aa_sources.get("fallback")
+    if fallback not in AA_FALLBACKS_LIVE:
+        raise RuntimeError(
+            "publish: AA_API_KEY is set but catalog sources.aa.fallback is "
+            f"{fallback!r} (mode {aa_sources.get('mode')!r}): the AA API and "
+            "the page scrape did not yield data. Check the key and "
+            "artificialanalysis.ai, or unset AA_API_KEY, before deploying."
+        )
+    print(f"publish: AA source mode {aa_sources.get('mode')}, fallback {fallback}")
+
+
 def build_site(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="mc-build-") as tmp:
@@ -144,6 +175,9 @@ def build_site(output_dir: Path) -> None:
         # are never cached, so a later run may fetch different data. That
         # fails loudly (order_rows, check_best) and the next run self-heals.
         run_script(model_compare, ["--catalog"], out=scratch / "catalog.json")
+        # Gate before anything else runs, so a failed AA fallback writes no
+        # publish artifacts to output_dir.
+        check_aa_fallback(scratch / "catalog.json")
         run_script(model_compare, ["--best"], out=output_dir / "best.txt")
         for priority in PRIORITIES:
             run_script(
@@ -212,23 +246,6 @@ def build_site(output_dir: Path) -> None:
     check_best(output_dir, check_stamps(output_dir))
     for name in artifacts:
         print(f"publish: wrote {output_dir / name}")
-
-    # With an AA key configured, a catalog whose AA mode is "none" means the
-    # keyed API and the page scrape both yielded nothing -- a silent auth or
-    # coverage failure the site would otherwise deploy without a peep. Other
-    # modes are live data ("api"/"scrape") or a full OpenRouter-benchmark
-    # takeover ("openrouter"), so only "none" fails the publish.
-    if os.environ.get("AA_API_KEY"):
-        with open(output_dir / "catalog.json", encoding="utf-8") as fh:
-            aa_sources = (json.load(fh).get("sources") or {}).get("aa") or {}
-        aa_mode = aa_sources.get("mode")
-        if aa_mode == "none":
-            raise RuntimeError(
-                "publish: AA_API_KEY is set but catalog sources.aa.mode is "
-                "'none': the AA API and the page scrape both failed. Check "
-                "the key and artificialanalysis.ai before deploying."
-            )
-        print(f"publish: AA source mode {aa_mode}")
 
 
 def main(argv: list[str] | None = None) -> int:

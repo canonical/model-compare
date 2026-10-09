@@ -65,6 +65,7 @@ CATALOG_OVERALL_KEYS = ("balanced", "price", "quality")
 CATALOG_AA_KEYS = ("intelligence_index", "coding_index", "agentic_index")
 CATALOG_QUALITY_MATCH_VALUES = ("openrouter", "api", "scrape")
 CATALOG_AA_MODES = ("openrouter", "api", "scrape", "none")
+CATALOG_AA_FALLBACKS = ("api", "scrape", "none")
 
 
 def _is_score(value) -> bool:
@@ -202,6 +203,8 @@ def validate_catalog(document) -> None:
         or aa_sources.get("mode") not in CATALOG_AA_MODES
     ):
         raise ValueError("catalog sources.aa.mode is unknown")
+    if aa_sources.get("fallback") not in CATALOG_AA_FALLBACKS:
+        raise ValueError("catalog sources.aa.fallback is unknown")
     for key in ("matched", "matched_openrouter"):
         value = aa_sources.get(key)
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
