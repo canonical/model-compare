@@ -85,6 +85,8 @@ def test_preview_sh_serves_synthetic_fallback(tmp_path):
             _get(f"http://127.0.0.1:{port}/best.txt").strip() == data["best"].encode()
         )
         assert b"generated-top" in _get(f"http://127.0.0.1:{port}/index.html")
+        served_html = _get(f"http://127.0.0.1:{port}/index.html")
+        assert b'id="deals"' in served_html and b"TIER" in served_html
     finally:
         os.killpg(proc.pid, signal.SIGTERM)
         proc.wait(timeout=10)

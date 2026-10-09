@@ -23,6 +23,7 @@
         --up: #7BB98C;
         --down: #DE8482;
         --flat: #7FA6D9;
+        --tier: #D8A657;
       }
       @media (prefers-color-scheme: light) {
         :root {
@@ -34,6 +35,7 @@
           --up: #2E7D4F;
           --down: #B0392B;
           --flat: #3A6EA5;
+          --tier: #8A5A00;
         }
       }
       * {
@@ -117,7 +119,8 @@
         color: var(--status);
         margin: 0.75rem 0;
       }
-      #table {
+      #table,
+      #deals {
         border-collapse: collapse;
         width: 100%;
         margin-top: 1rem;
@@ -125,7 +128,9 @@
         font-size: 0.9rem;
       }
       #table th,
-      #table td {
+      #table td,
+      #deals th,
+      #deals td {
         padding: 0.3rem 0.6rem;
         text-align: right;
         border-bottom: 1px solid var(--row-border);
@@ -135,11 +140,48 @@
       #table td:nth-child(3) {
         text-align: left;
       }
-      #table thead th {
+      #deals th:nth-child(1),
+      #deals td:nth-child(1) {
+        text-align: left;
+      }
+      #table thead th,
+      #deals thead th {
         border-bottom: 2px solid var(--thead-border);
       }
       #table .movement {
         text-align: center;
+      }
+      #table .tier,
+      #deals .offpeak {
+        color: var(--tier);
+        font-weight: 600;
+      }
+      #table [title],
+      #deals [title] {
+        cursor: help;
+        text-decoration: underline dotted;
+        text-underline-offset: 3px;
+      }
+      #deals td:nth-child(3) {
+        max-width: 25ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #deals-section h2 {
+        font-size: 1.05rem;
+        margin: 1rem 0 0.25rem;
+      }
+      .main-actions button {
+        float: right;
+        margin: 0.9rem 0 0.7rem 1rem;
+      }
+      .deals-actions button {
+        float: right;
+        margin: 0.9rem 0 0.7rem;
+      }
+      #deals-section,
+      .actions {
+        clear: both;
       }
       .movement.up {
         color: var(--up);
@@ -203,6 +245,7 @@
       of the tab shown here.
     </p>
 
+    <h2>Ranked picks</h2>
     <div class="tabs" id="tabs">
       <button type="button" data-priority="balanced" class="active">
         balanced
@@ -223,6 +266,12 @@
           <th title="Input price, USD per 1M tokens">$IN/M</th>
           <th title="Output price, USD per 1M tokens">$OUT/M</th>
           <th title="Current discount percentage">DISC</th>
+          <th
+            title="How this model's pricing varies: a token threshold means a higher rate above it; a percentage means cheaper off-peak hours. Hover a cell for details."
+            class="tier"
+          >
+            TIER
+          </th>
           <th title="Context window in tokens">CTX</th>
           <th title="Days since listing">AGE</th>
           <th title="Composite score for the selected priority">SCORE</th>
@@ -230,6 +279,69 @@
       </thead>
       <tbody id="tbody"></tbody>
     </table>
+
+    <div class="actions main-actions">
+      <button type="button" id="expand-main" hidden>Show more</button>
+    </div>
+
+    <p class="hint">
+      Prices shown are what a long session pays: several models bill at a
+      higher rate once the prompt outgrows their cheap short-context tier.
+    </p>
+    <p class="hint">
+      <span class="tier">TIER</span> marks how prices vary: a token threshold
+      is the prompt size above which the higher rate applies; a percentage is
+      a scheduled off-peak discount (price shown: the standard rate); SCHED
+      marks a schedule whose discount is under 1%. Hover a cell for details.
+    </p>
+
+    <div id="deals-section">
+      <h2>Off-peak deals</h2>
+      <p class="hint" id="deals-intro" hidden>
+        Models with scheduled discount windows, ranked by the size of the
+        discount.
+      </p>
+      <table id="deals" hidden>
+        <thead>
+          <tr>
+            <th title="Provider-qualified model id">MODEL</th>
+            <th
+              title="Largest scheduled off-peak discount vs the standard rate"
+              class="offpeak"
+            >
+              OFF-PEAK
+            </th>
+            <th title="When the discounted rate applies (UTC)">SCHEDULE</th>
+            <th title="Intelligence index (Artificial Analysis)">QUAL</th>
+            <th
+              title="Discounted input price during the listed windows, USD per 1M tokens"
+            >
+              $IN/M
+            </th>
+            <th
+              title="Discounted output price during the listed windows, USD per 1M tokens"
+            >
+              $OUT/M
+            </th>
+            <th title="Context window in tokens">CTX</th>
+            <th title="Balanced composite score">SCORE</th>
+          </tr>
+        </thead>
+        <tbody id="deals-tbody"></tbody>
+      </table>
+      <div class="actions deals-actions">
+        <button type="button" id="expand-deals" hidden>Show more</button>
+      </div>
+      <p class="hint" id="deals-legend" hidden>
+        <span class="offpeak">SCHEDULE</span> shows when the discounted rate
+        applies — long windows are clipped, hover for the full text.
+        $IN/$OUT are the discounted prices during those windows; the
+        standard rate applies at all other times.
+      </p>
+      <p class="hint" id="deals-empty" hidden>
+        No scheduled off-peak discounts in the current data.
+      </p>
+    </div>
 
     <div class="actions">
       <p class="hint">Copy to clipboard:</p>
@@ -379,8 +491,54 @@
         });
       }
 
+      var DEFAULT_MAIN_ROWS = 10;
+      var DEFAULT_DEAL_ROWS = 5;
+      var FULL_DEAL_ROWS = 10;
+      var mainExpanded = false;
+      var dealsExpanded = false;
+
+      // Display-only transform: the page shows the typographic glyph; the
+      // data strings stay ASCII (CLI parity).
+      function displayTier(ascii) {
+        return ascii.replace(">=", "≥");
+      }
+
+      function tierCellData(row) {
+        var note = row.tier_note || row.sched_note || "--";
+        var hovers = [];
+        if (row.tier_note) {
+          var endsK = row.tier_note.charAt(row.tier_note.length - 1) === "k";
+          var size = parseInt(row.tier_note.slice(1), 10);
+          hovers.push(
+            "Charges a higher rate once the prompt exceeds " + size +
+            (endsK ? "k" : "") + " tokens; price shown: that long-context rate."
+          );
+        }
+        if (row.sched_note === "SCHED") {
+          hovers.push(
+            "Price varies on a schedule by less than 1%; price shown: the " +
+            "standard rate."
+          );
+        } else if (row.sched_note) {
+          hovers.push(
+            "Runs up to " + row.sched_note.slice(1) +
+            " cheaper during scheduled off-peak hours" +
+            (row.sched_detail ? " (" + row.sched_detail + ")" : "") +
+            "; price shown: the standard rate."
+          );
+        }
+        return {
+          text: displayTier(note),
+          hover: hovers.length ? hovers.join(" ") : null,
+        };
+      }
+
       function render() {
         var rows = (data && data.priorities[current]) || [];
+        var shown = mainExpanded ? rows : rows.slice(0, DEFAULT_MAIN_ROWS);
+        var expandMain = document.getElementById("expand-main");
+        expandMain.hidden = rows.length <= DEFAULT_MAIN_ROWS;
+        expandMain.textContent = mainExpanded ? "Show fewer" : "Show more";
         els.tbody.textContent = "";
         var baseline = null;
         if (historyData && historyData.snapshots) {
@@ -391,7 +549,7 @@
           d.setUTCDate(d.getUTCDate() - 7);
           baseline = historyData.snapshots[d.toISOString().slice(0, 10)] || null;
         }
-        rows.forEach(function (row, i) {
+        shown.forEach(function (row, i) {
           var tr = document.createElement("tr");
           var movement = { cls: "", text: "" };
           if (baseline) {
@@ -406,6 +564,7 @@
               movement = { cls: "down", text: "▾" + (i + 1 - prevRank) };
             else movement = { cls: "flat", text: "•" };
           }
+          var tier = tierCellData(row);
           var cells = [
             String(i + 1),
             row.model,
@@ -413,6 +572,7 @@
             fmtPrice(row.input_usd_per_m),
             fmtPrice(row.output_usd_per_m),
             row.discount_pct || "--",
+            tier.text,
             fmtContext(row.context_tokens),
             fmtAge(row.age_days),
             row.score.toFixed(3),
@@ -426,6 +586,10 @@
             }
             var td = document.createElement("td");
             td.textContent = cell;
+            if (idx === 6) {
+              td.className = "tier";
+              if (tier.hover) td.title = tier.hover;
+            }
             tr.appendChild(td);
           });
           els.tbody.appendChild(tr);
@@ -437,6 +601,85 @@
         els.modelValue.textContent = model === null ? "—" : model;
         els.commandValue.textContent =
           model === null ? "—" : OPENCODE_PREFIX + model;
+        renderDeals();
+      }
+
+      function renderDeals() {
+        var deals = (data && data.schedules) || [];
+        var empty = document.getElementById("deals-empty");
+        var intro = document.getElementById("deals-intro");
+        var table = document.getElementById("deals");
+        var legend = document.getElementById("deals-legend");
+        var button = document.getElementById("expand-deals");
+        var tbody = document.getElementById("deals-tbody");
+        if (!deals.length) {
+          intro.hidden = true;
+          table.hidden = true;
+          legend.hidden = true;
+          button.hidden = true;
+          empty.hidden = false;
+          return;
+        }
+        empty.hidden = true;
+        intro.hidden = false;
+        table.hidden = false;
+        legend.hidden = false;
+        var shown = dealsExpanded
+          ? deals.slice(0, FULL_DEAL_ROWS)
+          : deals.slice(0, DEFAULT_DEAL_ROWS);
+        tbody.textContent = "";
+        shown.forEach(function (deal) {
+          var tr = document.createElement("tr");
+          var cells = [
+            deal.model,
+            deal.sched_note,
+            deal.sched_detail || "",
+            deal.quality === null || deal.quality === undefined
+              ? "-"
+              : deal.quality.toFixed(1),
+            fmtPrice(deal.input_per_1m),
+            fmtPrice(deal.output_per_1m),
+            fmtContext(deal.context),
+            deal.score === null || deal.score === undefined
+              ? "-"
+              : deal.score.toFixed(3),
+          ];
+          cells.forEach(function (cell, idx) {
+            var td = document.createElement("td");
+            td.textContent = cell;
+            if (idx === 1) {
+              td.className = "offpeak";
+              var pct =
+                deal.sched_note === "SCHED"
+                  ? "less than 1%"
+                  : deal.sched_note.slice(1);
+              td.title =
+                "Cheapest scheduled rates: up to " + pct +
+                " below the standard price during the listed windows.";
+            }
+            if (idx === 2) {
+              td.className = "schedule-cell";
+              td.dataset.full = deal.sched_detail || "";
+            }
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+        button.hidden = deals.length <= DEFAULT_DEAL_ROWS;
+        button.textContent = dealsExpanded ? "Show fewer" : "Show more";
+        // Tooltip only when actually clipped; length fallback when the
+        // layout metrics are unavailable (spec section 5.5).
+        Array.prototype.forEach.call(
+          tbody.querySelectorAll("td.schedule-cell"),
+          function (cell) {
+            if (
+              cell.scrollWidth > cell.clientWidth ||
+              (cell.clientWidth === 0 && cell.dataset.full.length > 25)
+            ) {
+              cell.title = cell.dataset.full;
+            }
+          }
+        );
       }
 
       function renderHighlights(sections) {
@@ -485,6 +728,19 @@
             });
           },
         );
+
+        document
+          .getElementById("expand-main")
+          .addEventListener("click", function () {
+            mainExpanded = !mainExpanded;
+            if (data) render();
+          });
+        document
+          .getElementById("expand-deals")
+          .addEventListener("click", function () {
+            dealsExpanded = !dealsExpanded;
+            renderDeals();
+          });
 
         fetch("data.json", { cache: "no-cache" })
           .then(function (r) {
