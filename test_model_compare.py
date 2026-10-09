@@ -748,6 +748,110 @@ def test_fmt_sched_detail_none_cases():
     assert mc.fmt_sched_detail(same, 1e-6) is None
 
 
+# ---------------------------------------------------------------------------
+# Tiered pricing: build_candidates integration
+# ---------------------------------------------------------------------------
+
+
+def test_candidates_carry_effective_and_base_prices():
+    models = [make_model(id="acme/model-a", pricing=haiku_pricing())]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, []
+    )
+    (cand,) = candidates
+    assert cand["price_in"] == 0.5  # effective, USD per 1M
+    assert cand["price_out"] == 2.5
+    assert cand["blended"] == pytest.approx(0.75 * 0.5 + 0.25 * 2.5)
+    assert cand["base_price_in"] == pytest.approx(0.1)  # base tier, USD per 1M
+    assert cand["base_price_out"] == pytest.approx(0.5)
+    assert cand["tier_prompt_tokens"] == 100000
+    assert cand["tier_note"] == ">100k"
+    assert cand["sched_note"] is None
+    assert cand["sched_detail"] is None
+
+
+def test_schedule_drop_reason():
+    broken = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [{"utc_start": 0, "utc_end": 1200, "prompt": "0.000001"}],
+    }
+    models = [make_model(id="acme/model-a", pricing=broken)]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=0), {}, {"acme/model-a"}, []
+    )
+    assert candidates == []
+    assert dropped["schedule"] == 1
+    # mixed model with an invalid schedule: no top-level-base fallback
+    mixed = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {"min_prompt_tokens": 100000, "prompt": "0.000002"},
+            {"utc_start": 0, "utc_end": 1200, "prompt": "0.000001"},
+        ],
+    }
+    models = [make_model(id="acme/model-b", pricing=mixed)]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=0), {}, {"acme/model-b"}, []
+    )
+    assert candidates == []
+    assert dropped["schedule"] == 1
+
+
+def test_free_drop_runs_on_effective_prices():
+    tiered_free = {
+        "prompt": "0",
+        "completion": "0",
+        "overrides": [
+            {
+                "min_prompt_tokens": 100000,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            }
+        ],
+    }
+    models = [
+        make_model(id="acme/tiered-free", pricing=tiered_free),
+        make_model(id="acme/plain-free", pricing={"prompt": "0", "completion": "0"}),
+    ]
+    candidates, dropped = mc.build_candidates(
+        models,
+        make_args(min_context=1_000_000, exclude_free=True),
+        {},
+        {"acme/tiered-free", "acme/plain-free"},
+        [],
+    )
+    assert [cand["id"] for cand in candidates] == ["acme/tiered-free"]
+    assert dropped["free"] == 1
+
+
+def test_base_validity_uses_base_prices():
+    pricing = {
+        "prompt": "nan",
+        "completion": "0.000002",
+        "overrides": [
+            {
+                "min_prompt_tokens": 100000,
+                "prompt": "0.000002",
+                "completion": "0.000004",
+            }
+        ],
+    }
+    models = [make_model(id="acme/model-a", pricing=pricing)]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, []
+    )
+    assert candidates == []
+    assert dropped["pricing"] == 1
+
+
+def test_catalog_drop_reasons_constant():
+    reasons = mc.CATALOG_DROP_REASONS
+    assert "schedule" in reasons
+    assert reasons.index("schedule") == reasons.index("pricing") + 1
+
+
 def test_build_candidates_survives_string_context_length():
     # Regression: string context_length must not raise a TypeError.
     models = [make_model(context_length="2000000")]

@@ -95,6 +95,7 @@ CATALOG_DROP_REASONS = (
     "malformed id",
     "context",
     "pricing",
+    "schedule",
     "free",
     "batch",
     "no discount",
@@ -1090,11 +1091,27 @@ def build_candidates(models, args, discounts, zdr_ids, filtered_out=None):
             drop("context", model_id, model.get("name"))
             continue
         pricing = model.get("pricing") or {}
-        price_in = parse_price(pricing.get("prompt"))
-        price_out = parse_price(pricing.get("completion"))
-        if price_in is None or price_out is None or price_in < 0 or price_out < 0:
+        eff = effective_pricing(pricing, args.min_context, args.input_share)
+        base_in, base_out = eff["base_price_in"], eff["base_price_out"]
+        # Base prices carry the validity drop (spec 5.2): a bad override must
+        # never drop a model, and effective prices inherit validity from the
+        # validated base and override prices.
+        if (
+            base_in is None
+            or base_out is None
+            or base_in < 0
+            or base_out < 0
+            or not math.isfinite(base_in)
+            or not math.isfinite(base_out)
+        ):
             drop("pricing", model_id, model.get("name"))
             continue
+        if eff["schedule_error"]:
+            # No valid peak window means no deterministic base (spec rule 9):
+            # schedule-only AND mixed models fail closed here.
+            drop("schedule", model_id, model.get("name"))
+            continue
+        price_in, price_out = eff["price_in"], eff["price_out"]
         if args.exclude_free and price_in == 0 and price_out == 0:
             drop("free", model_id, model.get("name"))
             continue
@@ -1147,6 +1164,15 @@ def build_candidates(models, args, discounts, zdr_ids, filtered_out=None):
                 "price_in": price_in_m,
                 "price_out": price_out_m,
                 "blended": blended_m,
+                "base_price_in": base_in * 1_000_000.0,
+                "base_price_out": base_out * 1_000_000.0,
+                "tier_prompt_tokens": eff["tier_prompt_tokens"],
+                "tiers": eff["tiers"],
+                "schedule": eff["schedule"],
+                "max_discount": eff["max_discount"],
+                "tier_note": fmt_tier_note(eff["tier_prompt_tokens"]),
+                "sched_note": fmt_sched_note(eff["max_discount"]),
+                "sched_detail": fmt_sched_detail(eff["schedule"], eff["peak_blended"]),
                 "age_days": age_days,
                 "discount": discount,
                 "created": created,
