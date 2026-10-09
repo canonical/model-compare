@@ -79,7 +79,7 @@ def test_preview_sh_serves_synthetic_fallback(tmp_path):
         assert data is not None, "preview.sh never served data.json"
 
         assert set(data["priorities"]) == {"balanced", "price", "quality"}
-        assert all(len(rows) == 10 for rows in data["priorities"].values())
+        assert all(len(rows) == 20 for rows in data["priorities"].values())
         assert data["best"].startswith("openrouter/")
         assert (
             _get(f"http://127.0.0.1:{port}/best.txt").strip() == data["best"].encode()

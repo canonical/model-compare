@@ -17,6 +17,10 @@ import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 
+# The history document version this script diffs against -- shared with
+# build_site_data.py so the catalog-v2 history restart changes both at once.
+from build_site_data import HISTORY_SCHEMA_VERSION
+
 HIGHLIGHTS_SCHEMA_VERSION = 1
 SECTION_KEYS = ("week", "intelligence", "prices")
 DIFF_PRIORITY_KEYS = ("balanced", "price", "quality")
@@ -82,7 +86,7 @@ def build_diff(catalog, history) -> dict:
     """Numeric-only diff of today's catalog vs the snapshot 7 days ago.
 
     Deterministic ordering everywhere; all mover lists are bounded by
-    top-10 history membership (see the design spec).
+    top-20 history membership (see the design spec).
     """
     today = catalog["generated_at"][:10]
     snapshots = history.get("snapshots") if isinstance(history, dict) else None
@@ -477,6 +481,22 @@ def _validate_catalog_for_diff(catalog) -> None:
                 )
 
 
+def usable_history(history):
+    """Gate a --history document on its schema version (spec section 5.7).
+
+    A document whose explicit schema_version is not the current one is
+    treated as absent -- the catalog v2 history restart must not diff
+    base-tier prices against effective-tier ones. A missing version is
+    tolerated (mirrors merge_history), so version-less fixtures keep working.
+    """
+    if not isinstance(history, dict):
+        return {}
+    version = history.get("schema_version")
+    if version is not None and version != HISTORY_SCHEMA_VERSION:
+        return {}
+    return history
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Generate highlight sections from weekly history data"
@@ -502,6 +522,7 @@ def main(argv=None) -> int:
             history = json.load(fh)
     except (OSError, ValueError):
         history = {}
+    history = usable_history(history)
     diff = build_diff(catalog, history)
 
     prev = None

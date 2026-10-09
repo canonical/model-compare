@@ -138,6 +138,16 @@ rows = [
     row("x-ai/grok-4-fast", 55.9, 0.2, 0.5, 0.75, 2000000, 120, 0.733),
     row("amazon/nova-pro-2", 53.1, 0.4, 1.6, 0.5, 300000, 240, 0.705),
     row("cohere/command-a-2", 50.4, 2.5, 10.0, None, 256000, 300, 0.682),
+    row("z-ai/glm-5.3-flash", 49.2, 0.14, 0.56, 0, 200000, 12, 0.669),
+    row("openai/gpt-6-mini", 48.1, 0.3, 1.2, 0, 400000, 60, 0.657),
+    row("google/gemini-3-flash-lite", 47.0, 0.1, 0.4, 0, 1048576, 33, 0.646),
+    row("nvidia/llama-4-nemotron-super", 45.8, 0.12, 0.48, 0, 128000, 74, 0.634),
+    row("microsoft/phi-5-mini", 44.7, 0.05, 0.25, 0, 128000, 21, 0.623),
+    row("bytedance-seed/doubao-2.0-lite", 43.5, 0.09, 0.36, 0, 256000, 40, 0.612),
+    row("amazon/nova-lite-3", 42.4, 0.08, 0.32, 0, 300000, 110, 0.601),
+    row("baidu/ernie-5.0", 41.2, 0.35, 1.4, 0, 128000, 15, 0.59),
+    row("tencent/hy3", 40.1, 0.132, 0.528, 0, 262144, 7, 0.579),
+    row("moonshotai/kimi-k2.5", 39.0, 0.6, 2.5, 0, 256000, 41, 0.568),
 ]
 data = {
     "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
