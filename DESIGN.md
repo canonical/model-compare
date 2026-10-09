@@ -154,7 +154,8 @@ the same output apart from `generated_at` and the age score (`age_days`/
 `listed_at` use UTC date precision, but `scores.age` decays continuously, so
 two runs on the same day differ slightly in `scores.age` and the deduplicator
 sees new content). `schema_version`
-starts at `1`: fields may be added without notice, but renaming or removing
+starts at `2` (v1 pinned the pricing scalars to the base tier): fields may be
+added without notice, but renaming, removing, **or changing the meaning of**
 one bumps the version.
 
 Top level: `schema_version`, `tool`, `generated_at`, `parameters` (all knobs
@@ -164,7 +165,20 @@ needs nothing else), `sources` (`openrouter`, `aa` with `mode`
 the `matched` and `matched_openrouter` counts, `zdr` `ok`/`skipped`, `discounts`
 `ok`/`unavailable` — where `unavailable` covers both a failed discount fetch
 and a live pool with zero discounts), `pool` (`listed`, `candidates`,
-`dropped`), `models`, `rankings`, `filtered`.
+`dropped`), `models`, `rankings`, `schedules`, `filtered`.
+
+`schedules` is a catalog-wide off-peak deals index built from the **raw**
+OpenRouter model list, deliberately **not** filtered by the candidate pool
+(ZDR, tool support, modality, expiry, context floor): today's live schedule
+models mostly sit below the 1M context floor, and filtering would shrink the
+deals table from three rows to two. Router aliases (`~` ids) and malformed
+ids are excluded; `:batch` variants are included as distinct deals. Each
+entry carries `id`, `name`, `context`, `quality` (the candidate's, else the
+OpenRouter-published AA index, else `null`), `score` (the balanced overall
+for candidates, else `null`), `max_discount` (4-decimal-rounded), `sched_note`,
+`sched_detail`, `peak`/`offpeak` price blocks (per-1M; `offpeak` is the
+cheapest window) and the full `schedule` window list. Downstream
+time-weighted price for a window list: `Σ coverage × price` (per key).
 
 `sources.aa.mode` is `openrouter` whenever at least one candidate's AA data
 came from OpenRouter, and otherwise names the fallback. It says nothing about
@@ -191,7 +205,12 @@ drift; the only intra-day variance remains the decaying age score.
 Each `models` entry carries: `id` (bare `provider/model`), `name`,
 `provider`, `family` (heuristic: leading token of the slug, e.g. `glm-5.3`
 → `glm`; `null` when there is none), `pricing` (`input_per_1m`,
-`output_per_1m`, `blended_per_1m` in USD per 1M tokens), `context`,
+`output_per_1m`, `blended_per_1m` in USD per 1M tokens — **the tier in
+effect at a prompt size of `min_context` tokens** — plus `base` (the base
+tier; for time-windowed models the deterministic peak window, not
+OpenRouter's fetch-time-dependent top level), `tiers` (ascending cumulative
+long-context tiers) and `schedule` (off-peak windows with per-window
+`coverage`)), `context`,
 `listed_at`, `age_days`, `tool_calling`, `zdr`, `discount`, `expired`,
 `quality` (AA intelligence index or `null`), `aa` (the OpenRouter-published
 trio `intelligence_index`/`coding_index`/`agentic_index`, each possibly
@@ -204,9 +223,14 @@ the scorer.
 same strings the tool counts internally:
 
 ```
-malformed id, context, pricing, free, batch, no discount, not ZDR,
+malformed id, context, pricing, schedule, free, batch, no discount, not ZDR,
 modality, tool calling, expired, age
 ```
+
+The `schedule` reason is fail-closed by design: a model whose
+`pricing.overrides` time windows do not tile the week exactly (or whose
+windows fail validation) has no deterministic price, so it is dropped
+entirely rather than ranked at a fetch-time-dependent top level.
 
 `pool.dropped` lists all of them zero-filled. `--top` and `--priority` are
 ignored with `--catalog` (the document always covers the full pool, sorted by
