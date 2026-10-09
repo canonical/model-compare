@@ -529,8 +529,9 @@ def effective_pricing(pricing, prompt_tokens, input_share):
     rounded maximum off-peak discount, and the peak window's blended price.
     """
     source = pricing if isinstance(pricing, dict) else {}
-    base_in = parse_price(source.get("prompt"))
-    base_out = parse_price(source.get("completion"))
+    top_in = parse_price(source.get("prompt"))
+    top_out = parse_price(source.get("completion"))
+    base_in, base_out = top_in, top_out
     overrides = source.get("overrides")
 
     tier_entries = []  # (threshold, price_in|None, price_out|None), API order
@@ -671,6 +672,11 @@ def effective_pricing(pricing, prompt_tokens, input_share):
     return {
         "price_in": current_in,
         "price_out": current_out,
+        # top_*: the RAW OpenRouter top-level prices (spec rule 1) -- the
+        # validity gate checks these even for windowed models, whose base_*
+        # fields are the frozen peak window (rule 7).
+        "top_price_in": top_in,
+        "top_price_out": top_out,
         "base_price_in": base_in,
         "base_price_out": base_out,
         "tier_prompt_tokens": applied,
@@ -1061,6 +1067,16 @@ def build_schedules(models, args, quality_by_id, aa_by_id, balanced_by_id):
         eff = effective_pricing(
             model.get("pricing") or {}, args.min_context, args.input_share
         )
+        top_in, top_out = eff["top_price_in"], eff["top_price_out"]
+        if (
+            top_in is None
+            or top_out is None
+            or top_in < 0
+            or top_out < 0
+            or not math.isfinite(top_in)
+            or not math.isfinite(top_out)
+        ):
+            continue  # invalid top level: not a deal worth listing
         windows = eff["schedule"]
         if eff["schedule_error"] or not windows:
             continue
@@ -1162,17 +1178,19 @@ def build_candidates(models, args, discounts, zdr_ids, filtered_out=None):
             continue
         pricing = model.get("pricing") or {}
         eff = effective_pricing(pricing, args.min_context, args.input_share)
-        base_in, base_out = eff["base_price_in"], eff["base_price_out"]
-        # Base prices carry the validity drop (spec 5.2): a bad override must
-        # never drop a model, and effective prices inherit validity from the
-        # validated base and override prices.
+        top_in, top_out = eff["top_price_in"], eff["top_price_out"]
+        # The RAW top-level prices carry the validity drop (spec rules 1+7):
+        # windowed models freeze their base at the peak window, so the gate
+        # must check the top level itself. A bad override must never drop a
+        # model, and effective prices inherit validity from the validated
+        # base and override prices.
         if (
-            base_in is None
-            or base_out is None
-            or base_in < 0
-            or base_out < 0
-            or not math.isfinite(base_in)
-            or not math.isfinite(base_out)
+            top_in is None
+            or top_out is None
+            or top_in < 0
+            or top_out < 0
+            or not math.isfinite(top_in)
+            or not math.isfinite(top_out)
         ):
             drop("pricing", model_id, model.get("name"))
             continue
@@ -1234,8 +1252,8 @@ def build_candidates(models, args, discounts, zdr_ids, filtered_out=None):
                 "price_in": price_in_m,
                 "price_out": price_out_m,
                 "blended": blended_m,
-                "base_price_in": base_in * 1_000_000.0,
-                "base_price_out": base_out * 1_000_000.0,
+                "base_price_in": eff["base_price_in"] * 1_000_000.0,
+                "base_price_out": eff["base_price_out"] * 1_000_000.0,
                 "tier_prompt_tokens": eff["tier_prompt_tokens"],
                 "tiers": eff["tiers"],
                 "schedule": eff["schedule"],

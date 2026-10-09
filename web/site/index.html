@@ -162,10 +162,14 @@
         text-decoration: underline dotted;
         text-underline-offset: 3px;
       }
-      #deals td:nth-child(3) {
+      /* max-width is ignored on <td> in auto table layout, so the SCHEDULE
+         text clips on an inner inline-block span instead (measured there). */
+      #deals .schedule-text {
+        display: inline-block;
         max-width: 25ch;
         overflow: hidden;
         text-overflow: ellipsis;
+        vertical-align: bottom;
       }
       #deals-section h2 {
         font-size: 1.05rem;
@@ -660,6 +664,11 @@
             if (idx === 2) {
               td.className = "schedule-cell";
               td.dataset.full = deal.sched_detail || "";
+              var span = document.createElement("span");
+              span.className = "schedule-text";
+              span.textContent = deal.sched_detail || "";
+              td.textContent = "";
+              td.appendChild(span);
             }
             tr.appendChild(td);
           });
@@ -667,17 +676,23 @@
         });
         button.hidden = deals.length <= DEFAULT_DEAL_ROWS;
         button.textContent = dealsExpanded ? "Show fewer" : "Show more";
-        // Tooltip only when actually clipped; length fallback when the
-        // layout metrics are unavailable (spec section 5.5).
+        // Tooltip only when actually clipped (the inner span is what
+        // clips); length fallback when the layout metrics are unavailable
+        // (spec section 5.5).
         Array.prototype.forEach.call(
           tbody.querySelectorAll("td.schedule-cell"),
           function (cell) {
+            var span = cell.querySelector(".schedule-text");
+            if (!span) return;
+            var clipped = span.scrollWidth > span.clientWidth;
             if (
-              cell.scrollWidth > cell.clientWidth ||
-              (cell.clientWidth === 0 && cell.dataset.full.length > 25)
+              !clipped &&
+              span.clientWidth === 0 &&
+              cell.dataset.full.length > 25
             ) {
-              cell.title = cell.dataset.full;
+              clipped = true;
             }
+            if (clipped) cell.title = cell.dataset.full;
           }
         );
       }

@@ -852,6 +852,92 @@ def test_catalog_drop_reasons_constant():
     assert reasons.index("schedule") == reasons.index("pricing") + 1
 
 
+def test_windowed_model_reports_raw_top_level_prices():
+    # Spec rules 1+7: a windowed model's top-level prices are parsed and
+    # validated, then discarded in favor of the frozen peak base. The parser
+    # must therefore expose the RAW top level for the validity gate.
+    pricing = {
+        "prompt": "garbage",
+        "completion": None,
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["schedule_error"] is False  # the windows themselves are valid
+    assert eff["top_price_in"] is None  # "garbage" does not parse
+    assert eff["top_price_out"] is None
+    assert eff["base_price_in"] == 1e-6  # frozen peak base still drives pricing
+    assert eff["price_in"] == 1e-6
+
+
+def test_windowed_model_with_invalid_top_level_dropped():
+    pricing = {
+        "prompt": "garbage",
+        "completion": None,
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+        ],
+    }
+    models = [make_model(id="acme/model-a", pricing=pricing)]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=0), {}, {"acme/model-a"}, []
+    )
+    assert candidates == []
+    assert dropped["pricing"] == 1
+
+
+def test_schedules_skip_invalid_top_level_models():
+    broken_top = {
+        "prompt": "garbage",
+        "completion": None,
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+        ],
+    }
+    doc = _doc_with(
+        [
+            make_model(id="acme/model-a"),
+            make_model(id="acme/hy4-ok", pricing=hy4_pricing()),
+            make_model(id="acme/hy4-broken", pricing=broken_top),
+        ]
+    )
+    assert [s["id"] for s in doc["schedules"]] == ["acme/hy4-ok"]
+
+
 # ---------------------------------------------------------------------------
 # Tiered pricing: CLI display (TIER column, legend, --json keys)
 # ---------------------------------------------------------------------------
