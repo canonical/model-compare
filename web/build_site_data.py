@@ -424,6 +424,20 @@ def validate_catalog(document) -> None:
         missing = [key for key in CATALOG_SCHEDULE_ENTRY_KEYS if key not in entry]
         if missing:
             raise ValueError(f"schedules[{i}] is missing keys: {', '.join(missing)}")
+        model_id = entry["id"]
+        if not isinstance(model_id, str) or not MODEL_ID_RE.fullmatch(model_id):
+            raise ValueError(f"schedules[{i}] id looks wrong: {model_id!r}")
+        if entry["name"] is not None and not isinstance(entry["name"], str):
+            raise ValueError(f"schedules[{i}] name must be a string or null")
+        context = entry["context"]
+        if context is not None and (not _is_number(context) or context < 0):
+            raise ValueError(
+                f"schedules[{i}] context must be a non-negative number or null"
+            )
+        # Every entry has a valid schedule, so its note is always computable;
+        # the site's deals table reads it unguarded.
+        if not isinstance(entry["sched_note"], str) or not entry["sched_note"]:
+            raise ValueError(f"schedules[{i}] sched_note must be a non-empty string")
         discount = entry["max_discount"]
         if not _is_number(discount) or not 0 <= discount <= 1:
             raise ValueError(f"schedules[{i}] max_discount must be in [0, 1]")
@@ -433,9 +447,10 @@ def validate_catalog(document) -> None:
             )
         if entry["score"] is not None and not _is_score(entry["score"]):
             raise ValueError(f"schedules[{i}] score must be a score in [0, 1] or null")
-        for key in ("sched_note", "sched_detail"):
-            if entry[key] is not None and not isinstance(entry[key], str):
-                raise ValueError(f"schedules[{i}] {key} must be a string or null")
+        if entry["sched_detail"] is not None and not isinstance(
+            entry["sched_detail"], str
+        ):
+            raise ValueError(f"schedules[{i}] sched_detail must be a string or null")
         _validate_price_block(entry["peak"], f"schedules[{i}] peak")
         _validate_price_block(entry["offpeak"], f"schedules[{i}] offpeak")
         _validate_schedule_list(entry["schedule"], f"schedules[{i}].schedule")

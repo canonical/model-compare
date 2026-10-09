@@ -1500,6 +1500,36 @@ def test_validate_catalog_schedules_entries():
     doc["schedules"] = schedules
     with pytest.raises(ValueError):
         bsd.validate_catalog(doc)
+    # identity and display fields the site consumes (BUG-04): a null or
+    # empty sched_note would throw in renderDeals; ids must be catalog ids.
+    for key, bad in (
+        ("sched_note", None),
+        ("sched_note", ""),
+        ("sched_note", 38),
+        ("id", None),
+        ("id", ""),
+        ("id", ["acme/x"]),
+        ("id", "no-slash"),
+        ("id", "acme/bad id"),
+        ("name", 42),
+        ("context", -1),
+        ("context", "262144"),
+        ("context", True),
+        ("context", float("nan")),
+    ):
+        doc = make_catalog()
+        schedules = make_schedules()
+        schedules[0][key] = bad
+        doc["schedules"] = schedules
+        with pytest.raises(ValueError):
+            bsd.validate_catalog(doc)
+    # name and context may be null
+    doc = make_catalog()
+    schedules = make_schedules()
+    schedules[0]["name"] = None
+    schedules[0]["context"] = None
+    doc["schedules"] = schedules
+    bsd.validate_catalog(doc)  # must not raise
 
 
 def test_project_schedules():

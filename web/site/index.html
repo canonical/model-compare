@@ -634,16 +634,21 @@
         tbody.textContent = "";
         shown.forEach(function (deal) {
           var tr = document.createElement("tr");
+          // Null-guarded: the validator requires sched_note, but a
+          // hand-edited catalog must not throw into the fetch .catch.
+          var note = deal.sched_note ? String(deal.sched_note) : "";
           var cells = [
             deal.model,
-            deal.sched_note,
+            note || "--",
             deal.sched_detail || "",
             deal.quality === null || deal.quality === undefined
               ? "-"
               : deal.quality.toFixed(1),
             fmtPrice(deal.input_per_1m),
             fmtPrice(deal.output_per_1m),
-            fmtContext(deal.context),
+            deal.context === null || deal.context === undefined
+              ? "-"
+              : fmtContext(deal.context),
             deal.score === null || deal.score === undefined
               ? "-"
               : deal.score.toFixed(3),
@@ -653,13 +658,12 @@
             td.textContent = cell;
             if (idx === 1) {
               td.className = "offpeak";
-              var pct =
-                deal.sched_note === "SCHED"
-                  ? "less than 1%"
-                  : deal.sched_note.slice(1);
-              td.title =
-                "Cheapest scheduled rates: up to " + pct +
-                " below the standard price during the listed windows.";
+              if (note) {
+                var pct = note === "SCHED" ? "less than 1%" : note.slice(1);
+                td.title =
+                  "Cheapest scheduled rates: up to " + pct +
+                  " below the standard price during the listed windows.";
+              }
             }
             if (idx === 2) {
               td.className = "schedule-cell";
