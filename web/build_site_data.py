@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build data.json for the published model-compare site.
 
-Reads the JSON output of `model_compare.py --priority P --json --top 10` for
+Reads the JSON output of `model_compare.py --priority P --json --top 20` for
 each priority plus the `--best` output, validates everything, and writes a
 single data.json consumed by site/index.html. Fails loudly on anything
 unexpected so a broken run never deploys a broken site.
@@ -39,7 +39,7 @@ MODEL_ID_RE = re.compile(
     r"(?::[a-zA-Z0-9_.-]+)?$"
 )
 
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
 
 CATALOG_ENTRY_KEYS = (
     "id",
@@ -60,6 +60,29 @@ CATALOG_ENTRY_KEYS = (
     "scores",
 )
 CATALOG_PRICING_KEYS = ("input_per_1m", "output_per_1m", "blended_per_1m")
+CATALOG_BASE_KEYS = ("input_per_1m", "output_per_1m", "blended_per_1m")
+CATALOG_WEEKDAYS = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+CATALOG_SCHEDULE_ENTRY_KEYS = (
+    "id",
+    "name",
+    "context",
+    "quality",
+    "score",
+    "max_discount",
+    "sched_note",
+    "sched_detail",
+    "peak",
+    "offpeak",
+    "schedule",
+)
 CATALOG_SCORE_KEYS = ("price", "quality", "context", "age")
 CATALOG_OVERALL_KEYS = ("balanced", "price", "quality")
 CATALOG_AA_KEYS = ("intelligence_index", "coding_index", "agentic_index")
@@ -115,6 +138,63 @@ def _validate_rankings(rankings, model_ids) -> None:
             )
 
 
+def _validate_window(window, label) -> None:
+    """One schedule window: HHMM clocks, weekday names, coverage, prices."""
+    if not isinstance(window, dict):
+        raise ValueError(f"{label} window is not an object")
+    for key in ("utc_start", "utc_end"):
+        value = window.get(key)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or not 0 <= value <= 2359
+            or value % 100 > 59
+        ):
+            raise ValueError(
+                f"{label} {key} must be an HHMM int in 0..2359 with minutes < 60"
+            )
+    days = window.get("utc_days")
+    if days is not None and (
+        not isinstance(days, list)
+        or not days
+        or any(day not in CATALOG_WEEKDAYS for day in days)
+    ):
+        raise ValueError(f"{label} utc_days must be null or weekday names")
+    coverage = window.get("coverage")
+    if not _is_number(coverage) or not 0 < coverage <= 1:
+        raise ValueError(f"{label} coverage must be a number in (0, 1]")
+    for key in ("input_per_1m", "output_per_1m", "blended_per_1m"):
+        value = window.get(key)
+        if not _is_number(value) or value < 0:
+            raise ValueError(f"{label} {key} must be a non-negative number")
+
+
+def _validate_schedule_list(schedule, label) -> None:
+    """Null, or a non-empty window list whose coverages sum to 1 (1e-3)."""
+    if schedule is None:
+        return
+    if not isinstance(schedule, list) or not schedule:
+        raise ValueError(f"{label} must be null or a non-empty list")
+    total = 0.0
+    for i, window in enumerate(schedule):
+        _validate_window(window, f"{label}[{i}]")
+        total += window["coverage"]
+    if abs(total - 1.0) > 1e-3:
+        raise ValueError(f"{label} coverages must sum to 1 (got {total})")
+
+
+def _validate_price_block(block, label) -> None:
+    if not isinstance(block, dict) or any(
+        key not in block for key in CATALOG_BASE_KEYS
+    ):
+        raise ValueError(f"{label} is incomplete")
+    bad = [
+        key for key in CATALOG_BASE_KEYS if not _is_number(block[key]) or block[key] < 0
+    ]
+    if bad:
+        raise ValueError(f"{label} must hold non-negative numbers: " + ", ".join(bad))
+
+
 def validate_catalog(document) -> None:
     """Validate a raw model_compare.py --catalog document.
 
@@ -137,6 +217,7 @@ def validate_catalog(document) -> None:
         "pool",
         "models",
         "rankings",
+        "schedules",
         "filtered",
     ):
         if key not in document:
@@ -239,6 +320,35 @@ def validate_catalog(document) -> None:
                 f"models[{i}] pricing must hold non-negative numbers: "
                 + ", ".join(bad_pricing)
             )
+        missing_tier_keys = [
+            key for key in ("base", "tiers", "schedule") if key not in pricing
+        ]
+        if missing_tier_keys:
+            raise ValueError(
+                f"models[{i}] pricing is missing keys: {', '.join(missing_tier_keys)}"
+            )
+        _validate_price_block(pricing["base"], f"models[{i}] pricing.base")
+        tiers = pricing["tiers"]
+        if not isinstance(tiers, list):
+            raise ValueError(f"models[{i}] pricing.tiers must be a list")
+        previous_threshold = None
+        for j, tier in enumerate(tiers):
+            if not isinstance(tier, dict) or "min_prompt_tokens" not in tier:
+                raise ValueError(f"models[{i}] pricing.tiers[{j}] is incomplete")
+            threshold = tier["min_prompt_tokens"]
+            if not _is_number(threshold) or threshold < 0:
+                raise ValueError(
+                    f"models[{i}] pricing.tiers[{j}] min_prompt_tokens must be "
+                    "a non-negative number"
+                )
+            _validate_price_block(tier, f"models[{i}] pricing.tiers[{j}]")
+            if previous_threshold is not None and threshold <= previous_threshold:
+                raise ValueError(
+                    f"models[{i}] pricing.tiers must be strictly ascending "
+                    f"(tiers[{j}] back at {threshold})"
+                )
+            previous_threshold = threshold
+        _validate_schedule_list(pricing["schedule"], f"models[{i}] pricing.schedule")
         if entry["discount"] is not None and not _is_number(entry["discount"]):
             raise ValueError(f"models[{i}] discount must be a number or null")
         if entry["context"] is not None and not _is_number(entry["context"]):
@@ -296,11 +406,39 @@ def validate_catalog(document) -> None:
         raise ValueError(
             f"catalog id in both models and filtered: {sorted(in_both)[0]}"
         )
+    schedules = document["schedules"]
+    if not isinstance(schedules, list):
+        raise ValueError("catalog schedules must be a list")
+    schedule_ids = []
+    for i, entry in enumerate(schedules):
+        if not isinstance(entry, dict):
+            raise ValueError(f"schedules[{i}] is not an object")
+        missing = [key for key in CATALOG_SCHEDULE_ENTRY_KEYS if key not in entry]
+        if missing:
+            raise ValueError(f"schedules[{i}] is missing keys: {', '.join(missing)}")
+        discount = entry["max_discount"]
+        if not _is_number(discount) or not 0 <= discount <= 1:
+            raise ValueError(f"schedules[{i}] max_discount must be in [0, 1]")
+        if entry["quality"] is not None and not _is_aa_value(entry["quality"]):
+            raise ValueError(
+                f"schedules[{i}] quality must be a number in 0..100 or null"
+            )
+        if entry["score"] is not None and not _is_score(entry["score"]):
+            raise ValueError(f"schedules[{i}] score must be a score in [0, 1] or null")
+        for key in ("sched_note", "sched_detail"):
+            if entry[key] is not None and not isinstance(entry[key], str):
+                raise ValueError(f"schedules[{i}] {key} must be a string or null")
+        _validate_price_block(entry["peak"], f"schedules[{i}] peak")
+        _validate_price_block(entry["offpeak"], f"schedules[{i}] offpeak")
+        _validate_schedule_list(entry["schedule"], f"schedules[{i}].schedule")
+        schedule_ids.append(entry["id"])
+    if len(set(schedule_ids)) != len(schedule_ids):
+        raise ValueError("catalog schedules contain duplicate ids")
 
 
-HISTORY_SCHEMA_VERSION = 1
+HISTORY_SCHEMA_VERSION = 2
 HISTORY_RETENTION = 10
-HISTORY_TOP_N = 10
+HISTORY_TOP_N = 20
 
 
 def _is_number(value) -> bool:
@@ -550,6 +688,37 @@ def order_rows(rows, ranking) -> list:
     return [by_id[model_id] for model_id in top]
 
 
+def project_schedules(catalog) -> list:
+    """data.json projection of catalog.schedules: the Off-peak deals rows.
+
+    Excludes schedules whose (already 4-decimal-rounded) max_discount formats
+    as 0% -- the SCHED rule; sorted by discount descending then id; capped at
+    10. Prices are the cheapest off-peak window's: the table sells the deal.
+    """
+    decorated = []
+    for entry in catalog.get("schedules") or []:
+        if f"{entry['max_discount']:.0%}" == "0%":
+            continue
+        decorated.append(
+            (
+                -entry["max_discount"],
+                entry["id"],
+                {
+                    "model": entry["id"],
+                    "sched_note": entry["sched_note"],
+                    "sched_detail": entry["sched_detail"],
+                    "quality": entry["quality"],
+                    "score": entry["score"],
+                    "input_per_1m": entry["offpeak"]["input_per_1m"],
+                    "output_per_1m": entry["offpeak"]["output_per_1m"],
+                    "context": entry["context"],
+                },
+            )
+        )
+    decorated.sort(key=lambda item: (item[0], item[1]))
+    return [item[2] for item in decorated[:10]]
+
+
 def build_data(best, priorities, now=None, generated_at=None, catalog=None) -> dict:
     """Validate the rows and wrap them into the data.json document.
 
@@ -599,6 +768,7 @@ def build_data(best, priorities, now=None, generated_at=None, catalog=None) -> d
         "generated_at": generated_at,
         "best": best,
         "priorities": rows_by_priority,
+        "schedules": project_schedules(catalog) if catalog is not None else [],
     }
 
 
