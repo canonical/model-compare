@@ -49,7 +49,7 @@ def _write_artifacts(out_dir, overrides=None, best_id="z-ai/glm-5.3-flash"):
     must match what the stubbed `--best` run wrote to best.txt.
     """
     docs = {
-        "data.json": {"generated_at": STAMP},
+        "data.json": {"schema_version": 1, "generated_at": STAMP},
         "catalog.json": {
             "generated_at": STAMP,
             "models": [],
@@ -257,7 +257,7 @@ def test_build_site_fails_when_expected_artifacts_missing(tmp_path, monkeypatch)
 @pytest.mark.parametrize(
     "name, doc",
     [
-        ("data.json", {"generated_at": "2026-09-27T06:00:00Z"}),
+        ("data.json", {"schema_version": 1, "generated_at": "2026-09-27T06:00:00Z"}),
         ("history.json", {"updated_at": "2026-09-27T06:00:00Z", "snapshots": {}}),
     ],
 )
@@ -293,6 +293,7 @@ def test_build_site_fails_on_malformed_artifact(tmp_path, monkeypatch, name):
         ("history.json", {"snapshots": {}}),
         ("history.json", {"updated_at": STAMP}),
         ("data.json", {}),
+        ("data.json", {"schema_version": 2, "generated_at": STAMP}),
         ("catalog.json", []),
         # the best.txt gate reads rankings; a catalog without them is broken
         ("catalog.json", {"generated_at": STAMP, "models": []}),

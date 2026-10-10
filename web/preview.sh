@@ -150,6 +150,7 @@ rows = [
     row("moonshotai/kimi-k2.5", 39.0, 0.6, 2.5, 0, 256000, 41, 0.568),
 ]
 data = {
+    "schema_version": 1,
     "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     "best": "openrouter/google/gemini-2.5-pro",
     "priorities": {

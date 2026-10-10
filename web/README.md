@@ -12,7 +12,7 @@ subprocess.
 | file | what it is |
 |------|------------|
 | `index.html` | the picks page: top-20 table per priority tab (10 shown, "Show more" expands) with copy buttons, a 7-day movement column, the TIER column and the Off-peak deals table (dark theme by default, light when the system or browser reports light) |
-| `data.json` | the rendered rows: per-priority top 20 plus the current best id and the off-peak `schedules` rows |
+| `data.json` | the rendered rows: per-priority top 20 plus the current best id and the off-peak `schedules` rows; schema-versioned (`schema_version`, currently 1) |
 | `best.txt` | the current *balanced* #1 as a plain `opencode --model`-ready id |
 | `catalog.json` | the full `--catalog` document (stable contract, see [DESIGN.md](../DESIGN.md)) |
 | `history.json` | rolling 10-day snapshot history feeding the 7-day column |
