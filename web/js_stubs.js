@@ -5,6 +5,12 @@
 // Only what the script touches at evaluation time: element lookups,
 // tab/expander wiring, and the three fetch() calls (rejected, so the
 // page ends in its error path and pure helpers stay callable).
+//
+// Limitation: these shims only support evaluating the script's pure
+// helpers (tooltip sentence construction, formatters, guards). Tooltip
+// delivery (the td.title assignment inside render) and DOM wiring are
+// not exercised: fetch() rejects so render() never runs, getElementById
+// hands out a fresh stub per call, and there is no querySelector.
 
 function stubElement() {
   return {

@@ -418,25 +418,48 @@
 
       // NOTE: fmtPrice/fmtContext/fmtAge mirror the fmt_* helpers in
       // model_compare.py -- display-only duplication, keep them in sync.
+      // Tie rounding is half-to-even, like Python's f-strings (toFixed
+      // rounds exact ties half-away-from-zero; pyFixed corrects that).
+      function pyFixed(v, n) {
+        // Python's f"{v:.Nf}" rounds exact decimal ties to even; toFixed
+        // rounds them half-away. The CLI's fmt_* helpers are the reference,
+        // so match Python: when v sits exactly on an N-digit tie, step the
+        // last formatted digit down to the even neighbour. Data arrives
+        // rounded to <= 6 decimals, which is always >= 1e-6 away from a
+        // non-exact tie, so a 1e-9 absolute tie tolerance cannot misfire.
+        var s = v.toFixed(n);
+        var tie = Math.abs(v - (Number(s) - Math.pow(10, -n) / 2)) < 1e-9;
+        if (tie) {
+          var last = parseInt(s.charAt(s.length - 1), 10);
+          if (last % 2 === 1) {
+            // No borrow is possible: a tie's rounded-up last digit steps
+            // down to the even neighbour below ("10.3"->"10.2",
+            // "0.063"->"0.062", "101"->"100").
+            s = s.slice(0, -1) + (last - 1);
+          }
+        }
+        return s;
+      }
+
       function fmtPrice(v) {
         if (v === 0) return "0";
-        if (v >= 100) return v.toFixed(0);
-        if (v >= 10) return v.toFixed(1);
-        if (v >= 1) return v.toFixed(2);
-        return v.toFixed(3);
+        if (v >= 100) return pyFixed(v, 0);
+        if (v >= 10) return pyFixed(v, 1);
+        if (v >= 1) return pyFixed(v, 2);
+        return pyFixed(v, 3);
       }
 
       function fmtContext(v) {
-        if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
-        if (v >= 1e3) return Math.round(v / 1e3) + "K";
+        if (v >= 1e6) return pyFixed(v / 1e6, 2) + "M";
+        if (v >= 1e3) return pyFixed(v / 1e3, 0) + "K";
         return String(v);
       }
 
       function fmtAge(d) {
         if (d === null || d === undefined) return "-";
-        if (d >= 365) return (d / 365).toFixed(1) + "y";
-        if (d >= 60) return Math.round(d / 30.44) + "mo";
-        return Math.round(d) + "d";
+        if (d >= 365) return pyFixed(d / 365, 1) + "y";
+        if (d >= 60) return pyFixed(d / 30.44, 0) + "mo";
+        return pyFixed(d, 0) + "d";
       }
 
       function topModel() {
@@ -518,9 +541,14 @@
             (endsK ? "k" : "") + " tokens; price shown: that long-context rate.";
           // Below-threshold (base) prices ride along when the row carries
           // them: formatted by the same fmtPrice as the table columns.
+          // Finite and non-negative: strings, NaN, +/-Infinity, negatives
+          // and half-present pairs must drop the sentence, not leak
+          // "NaN"/"Infinity" into the tooltip.
           if (
-            typeof row.base_input_usd_per_m === "number" &&
-            typeof row.base_output_usd_per_m === "number"
+            Number.isFinite(row.base_input_usd_per_m) &&
+            row.base_input_usd_per_m >= 0 &&
+            Number.isFinite(row.base_output_usd_per_m) &&
+            row.base_output_usd_per_m >= 0
           ) {
             hover +=
               " The short-context rate is $" +

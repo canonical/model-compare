@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The TIER tooltip shows the below-threshold (short-context) prices when a
+  row carries them.
+- Node-backed JS test harness pinning the site's inline formatters to the
+  CLI's `fmt_*` helpers, including half-to-even tie rounding (the site no
+  longer rounds exact ties half-away like `toFixed`).
+
+### Changed
+
+- The TIER and OFF-PEAK columns use the default text color and weight like
+  the rest of the table.
+- Clipped SCHEDULE values regained the dotted hover underline.
+
 ## [0.3.1] - 2026-10-10
 
 ### Added
