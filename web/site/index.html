@@ -513,10 +513,21 @@
         if (row.tier_note) {
           var endsK = row.tier_note.charAt(row.tier_note.length - 1) === "k";
           var size = parseInt(row.tier_note.slice(1), 10);
-          hovers.push(
+          var hover =
             "Charges a higher rate once the prompt exceeds " + size +
-            (endsK ? "k" : "") + " tokens; price shown: that long-context rate."
-          );
+            (endsK ? "k" : "") + " tokens; price shown: that long-context rate.";
+          // Below-threshold (base) prices ride along when the row carries
+          // them: formatted by the same fmtPrice as the table columns.
+          if (
+            typeof row.base_input_usd_per_m === "number" &&
+            typeof row.base_output_usd_per_m === "number"
+          ) {
+            hover +=
+              " The short-context rate is $" +
+              fmtPrice(row.base_input_usd_per_m) + " in / $" +
+              fmtPrice(row.base_output_usd_per_m) + " out per 1M tokens.";
+          }
+          hovers.push(hover);
         }
         if (row.sched_note === "SCHED") {
           hovers.push(
