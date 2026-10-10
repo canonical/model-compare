@@ -23,7 +23,6 @@
         --up: #7BB98C;
         --down: #DE8482;
         --flat: #7FA6D9;
-        --tier: #D8A657;
       }
       @media (prefers-color-scheme: light) {
         :root {
@@ -35,7 +34,6 @@
           --up: #2E7D4F;
           --down: #B0392B;
           --flat: #3A6EA5;
-          --tier: #8A5A00;
         }
       }
       * {
@@ -151,11 +149,6 @@
       #table .movement {
         text-align: center;
       }
-      #table .tier,
-      #deals .offpeak {
-        color: var(--tier);
-        font-weight: 600;
-      }
       #table [title],
       #deals [title] {
         cursor: help;
@@ -170,6 +163,13 @@
         overflow: hidden;
         text-overflow: ellipsis;
         vertical-align: bottom;
+      }
+      /* text-decoration does not propagate into the inline-block clip
+         wrapper, so underline it directly when the cell is clipped (the
+         cell then carries the title). */
+      #deals td[title] .schedule-text {
+        text-decoration: underline dotted;
+        text-underline-offset: 3px;
       }
       #deals-section h2 {
         font-size: 1.05rem;
