@@ -90,13 +90,16 @@ def check_stamps(output_dir: Path) -> dict:
     """
     catalog = _load_artifact(output_dir / "catalog.json", ("generated_at", "rankings"))
     data = _load_artifact(output_dir / "data.json", ("schema_version", "generated_at"))
-    if data["schema_version"] != 1:
+    # .get: fail closed with the clean RuntimeError below even if the
+    # required tuple above ever stops listing schema_version.
+    version = data.get("schema_version")
+    if version != 1:
         # publish imports nothing from build_site_data (subprocess-only by
         # design); the expected data.json version is pinned here, like the
         # opencode id prefix in check_best.
         raise RuntimeError(
             f"publish: data.json schema_version must be 1, got "
-            f"{data['schema_version']!r}"
+            f"{version!r}"
         )
     history = _load_artifact(output_dir / "history.json", ("updated_at", "snapshots"))
     stamp = catalog["generated_at"]
