@@ -810,3 +810,25 @@ def _write_empty_history(tmp_path):
     f = tmp_path / "history.json"
     f.write_text(json.dumps({"snapshots": {}}))
     return f
+
+
+# ---------------------------------------------------------------------------
+# History-version gate (catalog v2 transition)
+# ---------------------------------------------------------------------------
+
+
+def test_v1_history_treated_as_absent():
+    history = make_diff_history()
+    history["schema_version"] = 1
+    assert gh.usable_history(history) == {}
+    diff = gh.build_diff(make_diff_catalog(), gh.usable_history(history))
+    assert diff["baseline_present"] is False
+
+
+def test_v2_and_versionless_histories_are_usable():
+    history = make_diff_history()
+    history["schema_version"] = gh.HISTORY_SCHEMA_VERSION
+    assert gh.usable_history(history) is history
+    versionless = make_diff_history()
+    assert gh.usable_history(versionless) is versionless
+    assert gh.usable_history("garbage") == {}

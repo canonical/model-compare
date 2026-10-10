@@ -283,13 +283,38 @@ def test_main_rejects_duplicate_priority(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 
+def with_tier_keys(pricing):
+    """Expand a plain 3-scalar pricing dict into the v2 shape."""
+    return {
+        **pricing,
+        "base": {
+            "input_per_1m": pricing["input_per_1m"],
+            "output_per_1m": pricing["output_per_1m"],
+            "blended_per_1m": pricing["blended_per_1m"],
+        },
+        "tiers": [],
+        "schedule": None,
+    }
+
+
 def make_catalog_entry(**overrides):
     entry = {
         "id": "acme/model-a",
         "name": "Model A",
         "provider": "acme",
         "family": "model",
-        "pricing": {"input_per_1m": 1.0, "output_per_1m": 2.0, "blended_per_1m": 1.25},
+        "pricing": {
+            "input_per_1m": 1.0,
+            "output_per_1m": 2.0,
+            "blended_per_1m": 1.25,
+            "base": {
+                "input_per_1m": 1.0,
+                "output_per_1m": 2.0,
+                "blended_per_1m": 1.25,
+            },
+            "tiers": [],
+            "schedule": None,
+        },
         "context": 2_000_000,
         "listed_at": "2026-01-15",
         "age_days": 10,
@@ -318,7 +343,7 @@ def make_catalog_entry(**overrides):
 
 def make_catalog():
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "tool": "model-compare",
         "generated_at": "2026-09-02T09:15:00+00:00",
         "parameters": {
@@ -351,6 +376,7 @@ def make_catalog():
         "pool": {"listed": 2, "candidates": 1, "dropped": {"context": 1}},
         "models": [make_catalog_entry()],
         "rankings": {p: ["acme/model-a"] for p in ("balanced", "price", "quality")},
+        "schedules": [],
         "filtered": [{"id": "acme/small", "name": "Small", "reasons": ["context"]}],
     }
 
@@ -571,7 +597,7 @@ def test_main_writes_catalog_next_to_data_json(tmp_path):
     assert bsd.main(argv) == 0
     catalog_path = out.parent / "catalog.json"
     written = json.loads(catalog_path.read_text())
-    assert written["schema_version"] == 1
+    assert written["schema_version"] == 2
     assert written["models"][0]["id"] == "acme/model-a"
     assert out.exists()  # data.json still written
 
@@ -634,7 +660,7 @@ def make_history_snapshot(date, generated_at, **overrides):
 
 def make_history(**overrides):
     doc = {
-        "schema_version": 1,
+        "schema_version": 2,
         "updated_at": "2026-08-26T09:15:00+00:00",
         "snapshots": {
             "2026-08-26": make_history_snapshot(
@@ -662,7 +688,7 @@ def test_build_snapshot_projects_catalog():
     assert snap["prices"]["acme/model-a"] == [1.0, 2.0, 1.25, None]
 
 
-def test_build_snapshot_ranks_per_priority_top10():
+def test_build_snapshot_ranks_per_priority_top20():
     doc = make_catalog()
     for i in range(12):
         doc["models"].append(
@@ -688,10 +714,10 @@ def test_build_snapshot_ranks_per_priority_top10():
     doc["rankings"]["quality"] = ids[1:] + ids[:1]
     snap = bsd.build_snapshot(doc)
     for priority in ("balanced", "price", "quality"):
-        assert len(snap["tabs"][priority]) == 10
-        assert [row["rank"] for row in snap["tabs"][priority]] == list(range(1, 11))
+        assert len(snap["tabs"][priority]) == 13
+        assert [row["rank"] for row in snap["tabs"][priority]] == list(range(1, 14))
         assert [row["id"] for row in snap["tabs"][priority]] == (
-            doc["rankings"][priority][:10]
+            doc["rankings"][priority][:13]
         )
 
 
@@ -702,11 +728,13 @@ def test_build_snapshot_projects_rankings_not_a_sort():
         return make_catalog_entry(
             id=model_id,
             quality=quality,
-            pricing={
-                "input_per_1m": 1.0,
-                "output_per_1m": 2.0,
-                "blended_per_1m": blended,
-            },
+            pricing=with_tier_keys(
+                {
+                    "input_per_1m": 1.0,
+                    "output_per_1m": 2.0,
+                    "blended_per_1m": blended,
+                }
+            ),
             scores={
                 "price": 0.5,
                 "quality": 0.5,
@@ -763,7 +791,7 @@ def test_merge_history_upserts_and_prunes():
     assert len(merged["snapshots"]) == 10
     assert merged["snapshots"][today] == snap
     assert merged["updated_at"] == "2026-09-02T09:15:00+00:00"
-    assert merged["schema_version"] == 1
+    assert merged["schema_version"] == 2
 
 
 def test_merge_history_same_day_last_write_wins():
@@ -830,12 +858,12 @@ def test_merge_history_drops_prev_snapshot_with_corrupt_ranks():
 
 def test_merge_history_rejects_unknown_schema_version():
     prev = make_history()
-    prev["schema_version"] = 2
+    prev["schema_version"] = 3
     merged = bsd.merge_history(
         prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
     )
     assert list(merged["snapshots"]) == ["2026-09-02"]
-    assert merged["schema_version"] == 1
+    assert merged["schema_version"] == 2
 
 
 def test_merge_history_tolerates_prev_without_schema_version():
@@ -931,7 +959,7 @@ def test_validate_history_happy_and_rejections():
     doc["updated_at"] = "2026-09-02T09:15:00+00:00"
     bsd.validate_history(doc)  # must not raise
     with pytest.raises(ValueError):
-        bsd.validate_history({"schema_version": 2})
+        bsd.validate_history({"schema_version": 3})
     bad = make_history()
     bad["snapshots"]["2026-08-26"]["tabs"]["balanced"][0]["rank"] = 5
     with pytest.raises(ValueError):
@@ -1137,11 +1165,13 @@ def _invariant_catalog():
     models = []
     for model_id, (bal, price, qual), quality, blended in spec:
         entry = make_catalog_entry(id=model_id, quality=quality)
-        entry["pricing"] = {
-            "input_per_1m": blended,
-            "output_per_1m": blended,
-            "blended_per_1m": blended,
-        }
+        entry["pricing"] = with_tier_keys(
+            {
+                "input_per_1m": blended,
+                "output_per_1m": blended,
+                "blended_per_1m": blended,
+            }
+        )
         entry["scores"]["overall"] = {"balanced": bal, "price": price, "quality": qual}
         if quality is None:
             entry["aa"] = {
@@ -1209,3 +1239,354 @@ def test_table_and_history_rank_from_one_catalog():
         tab = [row["id"] for row in tabs[priority]]
         assert table == tab == catalog["rankings"][priority][:10], priority
     assert data["generated_at"] == history["updated_at"] == catalog["generated_at"]
+
+
+# ---------------------------------------------------------------------------
+# Catalog v2: tiered-pricing validation and the schedules projection
+# ---------------------------------------------------------------------------
+
+
+def _tiered_pricing():
+    return {
+        "input_per_1m": 1.32,
+        "output_per_1m": 3.96,
+        "blended_per_1m": 1.98,
+        "base": {
+            "input_per_1m": 1.32,
+            "output_per_1m": 3.96,
+            "blended_per_1m": 1.98,
+        },
+        "tiers": [],
+        "schedule": [
+            {
+                "utc_days": None,
+                "utc_start": 0,
+                "utc_end": 1200,
+                "coverage": 0.5,
+                "input_per_1m": 1.32,
+                "output_per_1m": 3.96,
+                "blended_per_1m": 1.98,
+            },
+            {
+                "utc_days": None,
+                "utc_start": 1200,
+                "utc_end": 0,
+                "coverage": 0.5,
+                "input_per_1m": 0.66,
+                "output_per_1m": 1.98,
+                "blended_per_1m": 0.99,
+            },
+        ],
+    }
+
+
+def _schedule_entry(model_id, discount, off_in=0.66, off_out=1.98):
+    return {
+        "id": model_id,
+        "name": model_id.split("/")[1],
+        "context": 262144,
+        "quality": None,
+        "score": None,
+        "max_discount": discount,
+        "sched_note": f"-{discount:.0%}",
+        "sched_detail": "daily 16:00-00:00 UTC",
+        "peak": {
+            "input_per_1m": 1.32,
+            "output_per_1m": 3.96,
+            "blended_per_1m": 1.98,
+        },
+        "offpeak": {
+            "input_per_1m": off_in,
+            "output_per_1m": off_out,
+            "blended_per_1m": 0.99,
+        },
+        "schedule": [
+            {
+                "utc_days": None,
+                "utc_start": 0,
+                "utc_end": 1600,
+                "coverage": 0.6667,
+                "input_per_1m": 1.32,
+                "output_per_1m": 3.96,
+                "blended_per_1m": 1.98,
+            },
+            {
+                "utc_days": None,
+                "utc_start": 1600,
+                "utc_end": 0,
+                "coverage": 0.3333,
+                "input_per_1m": off_in,
+                "output_per_1m": off_out,
+                "blended_per_1m": 0.99,
+            },
+        ],
+    }
+
+
+def make_schedules():
+    return [
+        _schedule_entry("acme/big-deal", 0.5),
+        _schedule_entry("acme/small-deal", 0.1, off_in=0.7506, off_out=2.2509),
+        _schedule_entry("acme/negligible", 0.004),  # formats 0% -> excluded
+    ]
+
+
+def test_validate_catalog_accepts_v2_with_subkeys():
+    doc = make_catalog()
+    pricing = _tiered_pricing()
+    pricing["tiers"] = [
+        {
+            "min_prompt_tokens": 100000,
+            "input_per_1m": 2.0,
+            "output_per_1m": 4.0,
+            "blended_per_1m": 2.5,
+        },
+        {
+            "min_prompt_tokens": 200000,
+            "input_per_1m": 3.0,
+            "output_per_1m": 6.0,
+            "blended_per_1m": 3.75,
+        },
+    ]
+    doc["models"][0]["pricing"] = pricing
+    doc["schedules"] = make_schedules()
+    bsd.validate_catalog(doc)  # must not raise
+
+
+def test_validate_catalog_rejects_v1():
+    doc = make_catalog()
+    doc["schema_version"] = 1
+    with pytest.raises(ValueError, match="schema_version"):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_requires_schedules_key():
+    doc = make_catalog()
+    del doc["schedules"]
+    with pytest.raises(ValueError, match="schedules"):
+        bsd.validate_catalog(doc)
+
+
+def _pricing_doc(**pricing_overrides):
+    doc = make_catalog()
+    pricing = dict(_tiered_pricing())
+    pricing.update(pricing_overrides)
+    doc["models"][0]["pricing"] = pricing
+    return doc
+
+
+def test_validate_catalog_pricing_subkeys():
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(_pricing_doc(base={"input_per_1m": 1.0}))
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(
+            _pricing_doc(
+                base={
+                    "input_per_1m": -1.0,
+                    "output_per_1m": 2.0,
+                    "blended_per_1m": 1.0,
+                }
+            )
+        )
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(
+            _pricing_doc(
+                tiers=[
+                    {
+                        "min_prompt_tokens": 200000,
+                        "input_per_1m": 1.0,
+                        "output_per_1m": 2.0,
+                        "blended_per_1m": 1.5,
+                    },
+                    {
+                        "min_prompt_tokens": 100000,
+                        "input_per_1m": 1.0,
+                        "output_per_1m": 2.0,
+                        "blended_per_1m": 1.2,
+                    },
+                ]
+            )
+        )
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(
+            _pricing_doc(
+                schedule=[dict(_tiered_pricing()["schedule"][0], utc_end=2400)]
+            )
+        )
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(
+            _pricing_doc(
+                schedule=[dict(_tiered_pricing()["schedule"][0], utc_start=1075)]
+            )
+        )
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(
+            _pricing_doc(
+                schedule=[dict(_tiered_pricing()["schedule"][0], utc_days=["funday"])]
+            )
+        )
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(
+            _pricing_doc(
+                schedule=[dict(_tiered_pricing()["schedule"][0], coverage=0.0)]
+            )
+        )
+    # coverages far from 1 (outside the 1e-3 tolerance)
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(
+            _pricing_doc(
+                schedule=[dict(_tiered_pricing()["schedule"][0], coverage=0.4)]
+            )
+        )
+
+
+def test_validate_catalog_schedule_coverage_sum_tolerance():
+    # rounded coverages may drift slightly; within 1e-3 of 1 must pass
+    windows = _tiered_pricing()["schedule"]
+    drifted = [dict(windows[0], coverage=0.5004), windows[1]]
+    doc = _pricing_doc(schedule=drifted)
+    bsd.validate_catalog(doc)  # 1.0004 - 1 = 4e-4 < 1e-3
+
+
+def test_validate_catalog_accepts_48_window_schedule_drift():
+    # Producer coverages are rounded per window to 4 decimals (up to 5e-5
+    # each): 48 half-hour windows sum to 0.9984 yet tile the week exactly.
+    coverage = round(7 * 30 / 10080, 4)
+    windows = []
+    for i in range(48):
+        start = (i // 2) * 100 + (i % 2) * 30
+        end = ((i + 1) // 2) * 100 + ((i + 1) % 2) * 30
+        windows.append(
+            {
+                "utc_days": None,
+                "utc_start": start,
+                "utc_end": 0 if end == 2400 else end,
+                "coverage": coverage,
+                "input_per_1m": 1.0 if i % 2 else 2.0,
+                "output_per_1m": 4.0,
+                "blended_per_1m": 1.75 if i % 2 else 2.5,
+            }
+        )
+    assert abs(sum(w["coverage"] for w in windows) - 1.0) > 1e-3
+    doc = _pricing_doc(schedule=windows)
+    entry = _schedule_entry("acme/half-hourly", 0.3)
+    entry["schedule"] = windows
+    doc["schedules"] = [entry]
+    bsd.validate_catalog(doc)  # must not raise
+
+
+def test_validate_catalog_schedules_entries():
+    doc = make_catalog()
+    schedules = make_schedules()
+    schedules[0]["max_discount"] = 1.5
+    doc["schedules"] = schedules
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+    doc = make_catalog()
+    schedules = make_schedules()
+    schedules[0]["quality"] = 200.0
+    doc["schedules"] = schedules
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+    doc = make_catalog()
+    schedules = make_schedules()
+    schedules[0]["score"] = 1.5
+    doc["schedules"] = schedules
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+    doc = make_catalog()
+    schedules = make_schedules()
+    del schedules[0]["offpeak"]
+    doc["schedules"] = schedules
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+    # identity and display fields the site consumes (BUG-04): a null or
+    # empty sched_note would throw in renderDeals; ids must be catalog ids.
+    for key, bad in (
+        ("sched_note", None),
+        ("sched_note", ""),
+        ("sched_note", 38),
+        ("id", None),
+        ("id", ""),
+        ("id", ["acme/x"]),
+        ("id", "no-slash"),
+        ("id", "acme/bad id"),
+        ("name", 42),
+        ("context", -1),
+        ("context", "262144"),
+        ("context", True),
+        ("context", float("nan")),
+    ):
+        doc = make_catalog()
+        schedules = make_schedules()
+        schedules[0][key] = bad
+        doc["schedules"] = schedules
+        with pytest.raises(ValueError):
+            bsd.validate_catalog(doc)
+    # name and context may be null
+    doc = make_catalog()
+    schedules = make_schedules()
+    schedules[0]["name"] = None
+    schedules[0]["context"] = None
+    doc["schedules"] = schedules
+    bsd.validate_catalog(doc)  # must not raise
+
+
+def test_project_schedules():
+    catalog = make_catalog()
+    catalog["schedules"] = make_schedules()
+    projected = bsd.project_schedules(catalog)
+    assert [row["model"] for row in projected] == [
+        "acme/big-deal",
+        "acme/small-deal",
+    ]
+    big = projected[0]
+    assert big["sched_note"] == "-50%"
+    assert big["input_per_1m"] == 0.66  # cheapest off-peak prices
+    assert big["output_per_1m"] == 1.98
+    assert big["quality"] is None and big["score"] is None
+    assert big["context"] == 262144
+
+
+def test_project_schedules_top10_cap():
+    catalog = make_catalog()
+    catalog["schedules"] = [
+        _schedule_entry(f"acme/d{i:02d}", 0.9 - i * 0.01) for i in range(12)
+    ]
+    projected = bsd.project_schedules(catalog)
+    assert len(projected) == 10
+    assert projected[0]["model"] == "acme/d00"  # highest discount first
+    assert projected[-1]["model"] == "acme/d09"
+
+
+def test_build_data_schedules_key():
+    catalog = make_catalog()
+    catalog["schedules"] = make_schedules()
+    data = bsd.build_data("openrouter/acme/model-a", make_priorities(), catalog=catalog)
+    assert [row["model"] for row in data["schedules"]] == [
+        "acme/big-deal",
+        "acme/small-deal",
+    ]
+    bare = bsd.build_data("openrouter/acme/model-a", make_priorities())
+    assert bare["schedules"] == []
+
+
+def test_row_keys_optional_passthrough():
+    rows = make_priorities()
+    rows["balanced"][0]["tier_note"] = ">100k"
+    rows["balanced"][0]["sched_note"] = None
+    rows["balanced"][0]["sched_detail"] = None
+    data = bsd.build_data("openrouter/acme/model-a", rows)
+    assert data["priorities"]["balanced"][0]["tier_note"] == ">100k"
+    # rows without the new keys validate fine (make_priorities default)
+    bsd.build_data("openrouter/acme/model-a", make_priorities())
+
+
+def test_merge_history_resets_v1():
+    prev = make_history()
+    prev["schema_version"] = 1
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
+    )
+    assert list(merged["snapshots"]) == ["2026-09-02"]
+    assert merged["schema_version"] == 2

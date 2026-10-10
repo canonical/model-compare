@@ -8,6 +8,7 @@ These cover pure functions only -- no network access is performed. Run with:
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -100,6 +101,1015 @@ def test_coerce_int(value, expected):
 
 def test_coerce_int_custom_default():
     assert mc.coerce_int(None, default=-1) == -1
+
+
+# ---------------------------------------------------------------------------
+# Tiered pricing: effective_pricing + display-string formatters
+# ---------------------------------------------------------------------------
+
+
+def haiku_pricing():
+    """Verbatim live anthropic/claude-haiku-5.5 pricing shape (2026-10-09)."""
+    return {
+        "prompt": "0.0000001",
+        "completion": "0.0000005",
+        "overrides": [
+            {
+                "min_prompt_tokens": 100000,
+                "prompt": "0.0000005",
+                "completion": "0.0000025",
+                "input_cache_read": "0.00000005",
+                "input_cache_write": "0.000000625",
+            }
+        ],
+    }
+
+
+def deepseek_pricing():
+    """Verbatim live deepseek/deepseek-v4-pro-0813 overrides (2026-10-09).
+
+    Weekday peak windows tile 01:00-10:00 UTC at 2x; the rest of the week
+    is off-peak, including the days-only weekend window.
+    """
+    return {
+        "prompt": "0.00000066",
+        "completion": "0.00000198",
+        "input_cache_read": "0.000000022",
+        "overrides": [
+            {
+                "utc_days": ["saturday", "sunday"],
+                "prompt": "0.00000066",
+                "completion": "0.00000198",
+                "input_cache_read": "0.000000022",
+            },
+            {
+                "utc_days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+                "utc_start": 0,
+                "utc_end": 100,
+                "prompt": "0.00000066",
+                "completion": "0.00000198",
+                "input_cache_read": "0.000000022",
+            },
+            {
+                "utc_days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+                "utc_start": 100,
+                "utc_end": 400,
+                "prompt": "0.00000132",
+                "completion": "0.00000396",
+                "input_cache_read": "0.000000044",
+            },
+            {
+                "utc_days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+                "utc_start": 400,
+                "utc_end": 600,
+                "prompt": "0.00000066",
+                "completion": "0.00000198",
+                "input_cache_read": "0.000000022",
+            },
+            {
+                "utc_days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+                "utc_start": 600,
+                "utc_end": 1000,
+                "prompt": "0.00000132",
+                "completion": "0.00000396",
+                "input_cache_read": "0.000000044",
+            },
+            {
+                "utc_days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+                "utc_start": 1000,
+                "utc_end": 0,
+                "prompt": "0.00000066",
+                "completion": "0.00000198",
+                "input_cache_read": "0.000000022",
+            },
+        ],
+    }
+
+
+def hy4_pricing():
+    """tencent/hy4-preview shape: two wrap windows tiling the day."""
+    return {
+        "prompt": "0.000000834",
+        "completion": "0.000002501",
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1600,
+                "prompt": "0.000000834",
+                "completion": "0.000002501",
+            },
+            {
+                "utc_start": 1600,
+                "utc_end": 0,
+                "prompt": "0.0000007506",
+                "completion": "0.0000022509",
+            },
+        ],
+    }
+
+
+def test_no_overrides_passthrough():
+    eff = mc.effective_pricing(make_model()["pricing"], 1_000_000, 0.75)
+    assert eff["price_in"] == eff["base_price_in"] == 1e-6
+    assert eff["price_out"] == eff["base_price_out"] == 2e-6
+    assert eff["tier_prompt_tokens"] is None
+    assert eff["tiers"] == []
+    assert eff["schedule"] is None
+    assert eff["schedule_error"] is False
+    assert eff["max_discount"] is None
+    assert eff["peak_blended"] is None
+
+
+def test_haiku_single_tier_at_min_context():
+    eff = mc.effective_pricing(haiku_pricing(), 1_000_000, 0.75)
+    assert eff["price_in"] == 5e-7
+    assert eff["price_out"] == 2.5e-6
+    assert eff["tier_prompt_tokens"] == 100000
+    assert eff["tiers"] == [
+        {"min_prompt_tokens": 100000, "price_in": 5e-7, "price_out": 2.5e-6}
+    ]
+    assert eff["base_price_in"] == 1e-7
+    assert eff["base_price_out"] == 5e-7
+    assert eff["schedule"] is None
+    assert eff["schedule_error"] is False
+
+
+def test_tier_below_prompt_size_not_applied():
+    eff = mc.effective_pricing(haiku_pricing(), 50000, 0.75)
+    assert eff["price_in"] == 1e-7
+    assert eff["price_out"] == 5e-7
+    assert eff["tier_prompt_tokens"] is None
+
+
+def test_threshold_equal_to_prompt_size_not_applied():
+    eff = mc.effective_pricing(haiku_pricing(), 100000, 0.75)
+    assert eff["price_in"] == 1e-7
+    assert eff["tier_prompt_tokens"] is None
+
+
+def test_multi_tier_later_wins():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {"min_prompt_tokens": 100000, "prompt": "0.000002"},
+            {
+                "min_prompt_tokens": 200000,
+                "prompt": "0.000003",
+                "completion": "0.000006",
+            },
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["price_in"] == 3e-6
+    assert eff["price_out"] == 6e-6
+    assert eff["tier_prompt_tokens"] == 200000
+    assert [
+        (t["min_prompt_tokens"], t["price_in"], t["price_out"]) for t in eff["tiers"]
+    ] == [
+        (100000, 2e-6, 2e-6),
+        (200000, 3e-6, 6e-6),
+    ]
+    at_150k = mc.effective_pricing(pricing, 150000, 0.75)
+    assert at_150k["price_in"] == 2e-6
+    assert at_150k["price_out"] == 2e-6  # per-key inheritance: base completion
+    assert at_150k["tier_prompt_tokens"] == 100000
+
+
+def test_duplicate_thresholds_deduped_later_wins_per_key():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {"min_prompt_tokens": 100000, "prompt": "0.000002"},
+            {"min_prompt_tokens": 100000, "completion": "0.000004"},
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["tiers"] == [
+        {"min_prompt_tokens": 100000, "price_in": 2e-6, "price_out": 4e-6}
+    ]
+    assert eff["price_in"] == 2e-6
+    assert eff["price_out"] == 4e-6
+
+
+def test_per_key_inheritance_from_base():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [{"min_prompt_tokens": 100000, "prompt": "0.000003"}],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["price_in"] == 3e-6
+    assert eff["price_out"] == 2e-6
+
+
+def test_key_whitelist_audio_price_keys_apply():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {
+                "min_prompt_tokens": 100000,
+                "prompt": "0.000002",
+                "audio": "0.00003",
+                "input_audio_cache": "0.000001",
+            }
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["price_in"] == 2e-6
+
+
+def test_key_whitelist_unknown_key_skips_entry():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {
+                "min_prompt_tokens": 100000,
+                "prompt": "0.000002",
+                "quantum_flavor": "high",
+            }
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["price_in"] == 1e-6
+    assert eff["tiers"] == []
+
+
+def test_conditionless_entry_is_ignored():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [{"prompt": "0.000009", "completion": "0.000009"}],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["price_in"] == 1e-6
+    assert eff["tiers"] == []
+    assert eff["schedule_error"] is False
+
+
+@pytest.mark.parametrize(
+    "bad_threshold",
+    [None, "100000", True, -1, 100000.5],
+)
+def test_fail_soft_bad_thresholds(bad_threshold):
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [{"min_prompt_tokens": bad_threshold, "prompt": "0.000002"}],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["price_in"] == 1e-6
+    assert eff["tiers"] == []
+    assert eff["schedule_error"] is False
+
+
+@pytest.mark.parametrize(
+    "bad_entry",
+    [
+        {"utc_start": 2400, "utc_end": 0},
+        {"utc_start": 1075, "utc_end": 0},  # minutes 75
+        {"utc_start": 1630.5, "utc_end": 0},
+        {"utc_start": True, "utc_end": 0},
+        {"utc_start": 100},  # one-sided
+        {"utc_end": 100},
+        {"utc_days": []},
+        {"utc_days": "saturday"},
+        {"utc_days": ["funday"]},
+    ],
+)
+def test_fail_soft_bad_time_conditions_cascade(bad_entry):
+    # A skipped TIME window always breaks the tiling invariant (spec rule 9),
+    # so the schedule is invalid even though the entry itself is merely skipped.
+    entry = {"prompt": "0.000001", "completion": "0.000002"}
+    entry.update(bad_entry)
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [entry],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["schedule_error"] is True
+    assert eff["schedule"] is None
+
+
+@pytest.mark.parametrize("bad_overrides", [None, "x", {"a": 1}, []])
+def test_overrides_not_a_list_treated_as_none(bad_overrides):
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": bad_overrides,
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["price_in"] == 1e-6
+    assert eff["schedule_error"] is False
+
+
+@pytest.mark.parametrize("bad_price", ["-1", "nan", "inf", "x"])
+def test_fail_soft_prices(bad_price):
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [{"min_prompt_tokens": 100000, "prompt": bad_price}],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["price_in"] == 1e-6
+    assert eff["tiers"] == []
+
+
+def test_non_finite_base_passes_through_for_upstream_drop():
+    # Base validity belongs to build_candidates; the parser must not crash
+    # and must pass the parsed (possibly non-finite) values through.
+    eff = mc.effective_pricing({"prompt": "nan", "completion": "0.000002"}, 0, 0.75)
+    assert math.isnan(eff["base_price_in"])
+    assert eff["price_out"] == 2e-6
+
+
+HUGE_INT = 10**400  # what json.loads yields for a 401-digit integer literal
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"min_prompt_tokens": HUGE_INT, "prompt": "0.000005"},
+        {"min_prompt_tokens": 1000, "prompt": HUGE_INT},
+        {"min_prompt_tokens": 1000, "completion": HUGE_INT},
+        {"min_prompt_tokens": 1000, "prompt": True},
+    ],
+    ids=["huge-threshold", "huge-prompt", "huge-completion", "bool-prompt"],
+)
+def test_overflowing_or_bool_tier_entry_skipped(entry):
+    pricing = {"prompt": "0.000001", "completion": "0.000002", "overrides": [entry]}
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)  # must not raise
+    assert eff["price_in"] == 1e-6
+    assert eff["price_out"] == 2e-6
+    assert eff["tier_prompt_tokens"] is None
+    assert eff["tiers"] == []
+    assert eff["schedule_error"] is False
+
+
+@pytest.mark.parametrize("key", ["utc_start", "utc_end"])
+def test_overflowing_clock_cascades_to_schedule_error(key):
+    pricing = hy4_pricing()
+    pricing["overrides"][0][key] = HUGE_INT
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)  # must not raise
+    assert eff["schedule_error"] is True
+    assert eff["schedule"] is None
+
+
+def test_parse_price_rejects_overflow_and_bool():
+    assert mc.parse_price(HUGE_INT) is None
+    assert mc.parse_price(True) is None
+    assert mc.parse_price(False) is None
+    assert mc.parse_price("0.000001") == 1e-6
+    assert mc.parse_price(0) == 0.0
+
+
+def test_days_only_window_is_whole_day():
+    pricing = {
+        "prompt": "0.00000099",
+        "completion": "0.00000198",
+        "overrides": [
+            {
+                "utc_days": ["saturday", "sunday"],
+                "prompt": "0.00000066",
+                "completion": "0.00000198",
+            }
+        ],
+    }
+    # Days-only windows cannot tile the week alone: schedule_error is set.
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["schedule_error"] is True
+
+
+def half_hour_pricing():
+    """48 half-hour windows tiling the day (utc_days absent), alternating
+    peak/off-peak -- a valid schedule whose 4-decimal-rounded coverages
+    drift past 1e-3 (each 7*30/10080 = 0.020833.. rounds to 0.0208)."""
+    overrides = []
+    for i in range(48):
+        start = (i // 2) * 100 + (i % 2) * 30
+        end = ((i + 1) // 2) * 100 + ((i + 1) % 2) * 30
+        overrides.append(
+            {
+                "utc_start": start,
+                "utc_end": 0 if end == 2400 else end,
+                "prompt": "0.000001" if i % 2 else "0.000002",
+                "completion": "0.000004",
+            }
+        )
+    return {"prompt": "0.000002", "completion": "0.000004", "overrides": overrides}
+
+
+def test_half_hour_schedule_is_valid_despite_coverage_drift():
+    eff = mc.effective_pricing(half_hour_pricing(), 1_000_000, 0.75)
+    assert eff["schedule_error"] is False
+    assert len(eff["schedule"]) == 48
+    expected = sum(round(7 * 30 / 10080, 4) for _ in range(48))
+    total = sum(w["coverage"] for w in eff["schedule"])
+    assert total == pytest.approx(expected)
+    assert abs(total - 1.0) > 1e-3  # the drift the site validator must tolerate
+
+
+def test_deepseek_fixture_tiling_and_coverage():
+    eff = mc.effective_pricing(deepseek_pricing(), 1_000_000, 0.75)
+    assert eff["schedule_error"] is False
+    schedule = eff["schedule"]
+    assert len(schedule) == 6
+    assert sorted(w["coverage"] for w in schedule) == [
+        0.0298,
+        0.0595,
+        0.0893,
+        0.1190,
+        0.2857,
+        0.4167,
+    ]
+    # unrounded coverages must sum to exactly 1 week (10080 minutes)
+    minutes = sum(
+        1440 * len(w["utc_days"])
+        if w["utc_start"] == w["utc_end"]
+        else len(w["utc_days"]) * mc._window_minutes(w["utc_start"], w["utc_end"])
+        for w in schedule
+    )
+    assert minutes == 10080
+    # frozen base = peak window prices (1.32e-6 / 3.96e-6)
+    assert eff["base_price_in"] == 1.32e-6
+    assert eff["base_price_out"] == 3.96e-6
+    assert eff["price_in"] == 1.32e-6  # schedule-only: effective == peak
+    assert eff["peak_blended"] == pytest.approx(0.75 * 1.32e-6 + 0.25 * 3.96e-6)
+    assert eff["max_discount"] == 0.5
+
+
+def test_hy4_preview_wrapping_windows():
+    eff = mc.effective_pricing(hy4_pricing(), 1_000_000, 0.75)
+    assert eff["schedule_error"] is False
+    schedule = eff["schedule"]
+    assert [(w["utc_start"], w["utc_end"], w["coverage"]) for w in schedule] == [
+        (0, 1600, 0.6667),
+        (1600, 0, 0.3333),
+    ]
+    assert eff["base_price_in"] == 8.34e-7  # peak = the 00:00-16:00 window
+    assert eff["price_in"] == 8.34e-7
+    assert eff["max_discount"] == 0.1
+
+
+def test_invalid_schedule_fail_closed():
+    # a window missing completion
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [{"utc_start": 0, "utc_end": 1200, "prompt": "0.000001"}],
+    }
+    assert mc.effective_pricing(pricing, 1_000_000, 0.75)["schedule_error"] is True
+    # a skipped (unknown-key) window leaves a tiling gap -> same cascade
+    pricing2 = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {"utc_start": 0, "utc_end": 1200, "prompt": "0.000001", "weird": 1},
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+        ],
+    }
+    assert mc.effective_pricing(pricing2, 1_000_000, 0.75)["schedule_error"] is True
+    # a combined token+time entry invalidates the schedule
+    pricing3 = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {
+                "min_prompt_tokens": 100000,
+                "utc_start": 0,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            }
+        ],
+    }
+    assert mc.effective_pricing(pricing3, 1_000_000, 0.75)["schedule_error"] is True
+
+
+def test_mixed_model_uses_frozen_base():
+    pricing = {
+        "prompt": "0.0000001",
+        "completion": "0.0000002",
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000002",
+                "completion": "0.000004",
+            },
+            {"min_prompt_tokens": 100000, "prompt": "0.00001"},
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["schedule_error"] is False
+    # frozen base = peak window (12:00-00:00: blended 0.75*2e-6+0.25*4e-6 = 2e-6
+    # beats 00:00-12:00's 1.25e-6)
+    assert eff["base_price_in"] == 2e-6
+    assert eff["base_price_out"] == 4e-6
+    # tier applies over the frozen base: prompt replaced, completion inherited
+    assert eff["price_in"] == 1e-5
+    assert eff["price_out"] == 4e-6
+    assert eff["tier_prompt_tokens"] == 100000
+    # schedule annotation carries base-layer window prices, not tier-adjusted
+    assert eff["schedule"][0]["price_in"] == 1e-6
+    assert eff["schedule"][1]["price_in"] == 2e-6
+
+
+def test_schedule_only_effective_is_peak():
+    eff = mc.effective_pricing(hy4_pricing(), 1_000_000, 0.75)
+    assert eff["price_in"] == eff["base_price_in"] == 8.34e-7
+    assert eff["price_out"] == eff["base_price_out"] == 2.501e-6
+
+
+def test_peak_tie_breaks_to_first_in_api_order():
+    # Two windows with equal blended price (0.75*in + 0.25*out == 1e-6):
+    # A(1e-6, 1e-6) vs B(1.2e-6, 4e-7). First in API order wins the freeze.
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000001",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.0000012",
+                "completion": "0.0000004",
+            },
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["base_price_in"] == 1e-6
+    assert eff["base_price_out"] == 1e-6
+
+
+def test_input_share_extremes_select_peak():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000001",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000002",
+                "completion": "0.0000005",
+            },
+        ],
+    }
+    # input_share=1.0: blended == input price -> window B (2e-6) is peak
+    eff_in = mc.effective_pricing(pricing, 1_000_000, 1.0)
+    assert eff_in["base_price_in"] == 2e-6
+    assert eff_in["base_price_out"] == 5e-7
+    # input_share=0.0: blended == output price -> window A (1e-6) is peak
+    eff_out = mc.effective_pricing(pricing, 1_000_000, 0.0)
+    assert eff_out["base_price_in"] == 1e-6
+    assert eff_out["base_price_out"] == 1e-6
+
+
+def test_max_discount_rounded_once_before_formatting():
+    # off-peak at 0.6250001x of peak -> raw discount 0.3749999 -> rounds to 0.375
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000001",
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000001",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.0000006250001",
+                "completion": "0.0000006250001",
+            },
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["max_discount"] == 0.375
+    assert mc.fmt_sched_note(eff["max_discount"]) == "-38%"
+
+
+def test_zero_peak_blended_gives_zero_discount():
+    pricing = {
+        "prompt": "0",
+        "completion": "0",
+        "overrides": [
+            {"utc_start": 0, "utc_end": 1200, "prompt": "0", "completion": "0"},
+            {"utc_start": 1200, "utc_end": 0, "prompt": "0", "completion": "0"},
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["peak_blended"] == 0
+    assert eff["max_discount"] == 0.0
+    assert mc.fmt_sched_note(eff["max_discount"]) == "SCHED"
+
+
+def test_fmt_tier_note_cases():
+    assert mc.fmt_tier_note(100000) == ">100k"
+    assert mc.fmt_tier_note(100001) == ">100k"
+    assert mc.fmt_tier_note(272000) == ">272k"
+    assert mc.fmt_tier_note(500) == ">500"
+    assert mc.fmt_tier_note(None) is None
+
+
+def test_fmt_sched_note_cases():
+    assert mc.fmt_sched_note(0.375) == "-38%"
+    assert mc.fmt_sched_note(0.0) == "SCHED"
+    assert mc.fmt_sched_note(None) is None
+    # the half-even boundary is pinned to Python's own formatting
+    expected_pct = f"{0.005:.0%}"
+    assert mc.fmt_sched_note(0.005) == (
+        "SCHED" if expected_pct == "0%" else "-" + expected_pct
+    )
+
+
+def test_fmt_sched_detail_grammar():
+    def window(days, start, end, price_in=1e-6, price_out=1e-6):
+        return {
+            "utc_days": days,
+            "utc_start": start,
+            "utc_end": end,
+            "coverage": 0.5,
+            "price_in": price_in,
+            "price_out": price_out,
+            "blended": price_in,
+        }
+
+    # daily, single off-peak wrap window
+    assert mc.fmt_sched_detail([window(None, 1600, 0)], 2e-6) == "daily 16:00-00:00 UTC"
+    # deepseek: weekday off-peak group + weekend whole-day group
+    ds = mc.effective_pricing(deepseek_pricing(), 1_000_000, 0.75)
+    detail = mc.fmt_sched_detail(ds["schedule"], ds["peak_blended"])
+    assert (
+        detail == "weekdays 00:00-01:00, 04:00-06:00, 10:00-00:00; weekends all day UTC"
+    )
+    # custom day set abbreviations, week order (parser-normalized input)
+    custom = [
+        window(["monday", "wednesday", "friday"], 800, 900),
+    ]
+    assert mc.fmt_sched_detail(custom, 2e-6) == "mon,wed,fri 08:00-09:00 UTC"
+    # whole-day window renders "all day"
+    wholeday = [window(["monday"], 0, 0)]
+    assert mc.fmt_sched_detail(wholeday, 2e-6) == "mon all day UTC"
+    # groups ordered by first weekday; windows ascending within a group
+    multi = [
+        window(["saturday", "sunday"], 1200, 1400),
+        window(None, 100, 200),
+    ]
+    assert (
+        mc.fmt_sched_detail(multi, 2e-6)
+        == "daily 01:00-02:00; weekends 12:00-14:00 UTC"
+    )
+    # ASCII only
+    assert all(s.isascii() for s in [detail])
+
+
+def test_fmt_sched_detail_seven_days_is_daily():
+    def window(days, start, end):
+        return {
+            "utc_days": days,
+            "utc_start": start,
+            "utc_end": end,
+            "coverage": 0.3333,
+            "price_in": 1e-6,
+            "price_out": 1e-6,
+            "blended": 1e-6,
+        }
+
+    week = list(mc.WEEKDAYS)
+    # an explicit all-seven-days list labels exactly like utc_days absent
+    assert mc.fmt_sched_detail([window(week, 0, 800)], 2e-6) == (
+        "daily 00:00-08:00 UTC"
+    )
+    # ... and shares one group with absent-days windows
+    mixed = [window(None, 1600, 0), window(week, 0, 800)]
+    assert mc.fmt_sched_detail(mixed, 2e-6) == "daily 00:00-08:00, 16:00-00:00 UTC"
+
+
+def test_fmt_sched_detail_none_cases():
+    assert mc.fmt_sched_detail(None, None) is None
+    # a schedule whose every window is at the peak price -> no off-peak -> None
+    same = [
+        {
+            "utc_days": None,
+            "utc_start": 0,
+            "utc_end": 1200,
+            "coverage": 0.5,
+            "price_in": 1e-6,
+            "price_out": 1e-6,
+            "blended": 1e-6,
+        },
+        {
+            "utc_days": None,
+            "utc_start": 1200,
+            "utc_end": 0,
+            "coverage": 0.5,
+            "price_in": 1e-6,
+            "price_out": 1e-6,
+            "blended": 1e-6,
+        },
+    ]
+    assert mc.fmt_sched_detail(same, 1e-6) is None
+
+
+# ---------------------------------------------------------------------------
+# Tiered pricing: build_candidates integration
+# ---------------------------------------------------------------------------
+
+
+def test_candidates_carry_effective_and_base_prices():
+    models = [make_model(id="acme/model-a", pricing=haiku_pricing())]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, []
+    )
+    (cand,) = candidates
+    assert cand["price_in"] == 0.5  # effective, USD per 1M
+    assert cand["price_out"] == 2.5
+    assert cand["blended"] == pytest.approx(0.75 * 0.5 + 0.25 * 2.5)
+    assert cand["base_price_in"] == pytest.approx(0.1)  # base tier, USD per 1M
+    assert cand["base_price_out"] == pytest.approx(0.5)
+    assert cand["tier_prompt_tokens"] == 100000
+    assert cand["tier_note"] == ">100k"
+    assert cand["sched_note"] is None
+    assert cand["sched_detail"] is None
+
+
+def test_schedule_drop_reason():
+    broken = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [{"utc_start": 0, "utc_end": 1200, "prompt": "0.000001"}],
+    }
+    models = [make_model(id="acme/model-a", pricing=broken)]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=0), {}, {"acme/model-a"}, []
+    )
+    assert candidates == []
+    assert dropped["schedule"] == 1
+    # mixed model with an invalid schedule: no top-level-base fallback
+    mixed = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "overrides": [
+            {"min_prompt_tokens": 100000, "prompt": "0.000002"},
+            {"utc_start": 0, "utc_end": 1200, "prompt": "0.000001"},
+        ],
+    }
+    models = [make_model(id="acme/model-b", pricing=mixed)]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=0), {}, {"acme/model-b"}, []
+    )
+    assert candidates == []
+    assert dropped["schedule"] == 1
+
+
+def test_free_drop_runs_on_effective_prices():
+    tiered_free = {
+        "prompt": "0",
+        "completion": "0",
+        "overrides": [
+            {
+                "min_prompt_tokens": 100000,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            }
+        ],
+    }
+    models = [
+        make_model(id="acme/tiered-free", pricing=tiered_free),
+        make_model(id="acme/plain-free", pricing={"prompt": "0", "completion": "0"}),
+    ]
+    candidates, dropped = mc.build_candidates(
+        models,
+        make_args(min_context=1_000_000, exclude_free=True),
+        {},
+        {"acme/tiered-free", "acme/plain-free"},
+        [],
+    )
+    assert [cand["id"] for cand in candidates] == ["acme/tiered-free"]
+    assert dropped["free"] == 1
+
+
+def test_base_validity_uses_base_prices():
+    pricing = {
+        "prompt": "nan",
+        "completion": "0.000002",
+        "overrides": [
+            {
+                "min_prompt_tokens": 100000,
+                "prompt": "0.000002",
+                "completion": "0.000004",
+            }
+        ],
+    }
+    models = [make_model(id="acme/model-a", pricing=pricing)]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, []
+    )
+    assert candidates == []
+    assert dropped["pricing"] == 1
+
+
+def test_catalog_drop_reasons_constant():
+    reasons = mc.CATALOG_DROP_REASONS
+    assert "schedule" in reasons
+    assert reasons.index("schedule") == reasons.index("pricing") + 1
+
+
+def test_windowed_model_reports_raw_top_level_prices():
+    # Spec rules 1+7: a windowed model's top-level prices are parsed and
+    # validated, then discarded in favor of the frozen peak base. The parser
+    # must therefore expose the RAW top level for the validity gate.
+    pricing = {
+        "prompt": "garbage",
+        "completion": None,
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
+    assert eff["schedule_error"] is False  # the windows themselves are valid
+    assert eff["top_price_in"] is None  # "garbage" does not parse
+    assert eff["top_price_out"] is None
+    assert eff["base_price_in"] == 1e-6  # frozen peak base still drives pricing
+    assert eff["price_in"] == 1e-6
+
+
+def test_windowed_model_with_invalid_top_level_dropped():
+    pricing = {
+        "prompt": "garbage",
+        "completion": None,
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+        ],
+    }
+    models = [make_model(id="acme/model-a", pricing=pricing)]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(min_context=0), {}, {"acme/model-a"}, []
+    )
+    assert candidates == []
+    assert dropped["pricing"] == 1
+
+
+def test_schedules_skip_invalid_top_level_models():
+    broken_top = {
+        "prompt": "garbage",
+        "completion": None,
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+        ],
+    }
+    doc = _doc_with(
+        [
+            make_model(id="acme/model-a"),
+            make_model(id="acme/hy4-ok", pricing=hy4_pricing()),
+            make_model(id="acme/hy4-broken", pricing=broken_top),
+        ]
+    )
+    assert [s["id"] for s in doc["schedules"]] == ["acme/hy4-ok"]
+
+
+# ---------------------------------------------------------------------------
+# Tiered pricing: CLI display (TIER column, legend, --json keys)
+# ---------------------------------------------------------------------------
+
+
+def _scored_candidates():
+    models = [
+        make_model(id="acme/tiered", pricing=haiku_pricing()),
+        make_model(id="acme/plain"),
+    ]
+    args = make_args(min_context=1_000_000)
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/tiered", "acme/plain"}, []
+    )
+    mc.compute_scores(candidates, args, {})
+    return candidates
+
+
+def test_json_additive_tier_keys(capsys):
+    mc.print_json(_scored_candidates())
+    by_model = {row["model"]: row for row in json.loads(capsys.readouterr().out)}
+    tiered = by_model["acme/tiered"]
+    assert tiered["pricing_tier_prompt_tokens"] == 100000
+    assert tiered["base_input_usd_per_m"] == pytest.approx(0.1)
+    assert tiered["base_output_usd_per_m"] == pytest.approx(0.5)
+    assert tiered["tier_note"] == ">100k"
+    assert tiered["sched_note"] is None
+    assert tiered["sched_detail"] is None
+    assert tiered["time_schedule"] is None
+    plain = by_model["acme/plain"]
+    assert plain["pricing_tier_prompt_tokens"] is None
+    assert plain["tier_note"] is None
+    assert plain["time_schedule"] is None
+
+
+def test_json_time_schedule_string(capsys):
+    models = [make_model(id="acme/hy4", pricing=hy4_pricing())]
+    args = make_args(min_context=1_000_000)
+    candidates, _ = mc.build_candidates(models, args, {}, {"acme/hy4"}, [])
+    mc.compute_scores(candidates, args, {})
+    mc.print_json(candidates)
+    (row,) = json.loads(capsys.readouterr().out)
+    assert row["sched_note"] == "-10%"
+    assert row["sched_detail"] == "daily 16:00-00:00 UTC"
+    assert row["time_schedule"] == "-10% daily 16:00-00:00 UTC"
+    assert row["pricing_tier_prompt_tokens"] is None
+
+
+def test_table_has_tier_column(capsys):
+    mc.print_table(_scored_candidates(), 2, mc.PRIORITY_WEIGHTS["balanced"], "note")
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    header = lines[0]
+    assert "DISC" in header and "TIER" in header and "CTX" in header
+    assert header.index("DISC") < header.index("TIER") < header.index("CTX")
+    tiered_row = next(line for line in lines if "acme/tiered" in line)
+    assert ">100k" in tiered_row
+    plain_row = next(line for line in lines if "acme/plain" in line)
+    assert ">100k" not in plain_row
+
+
+def test_footer_legend_lines(capsys):
+    mc.print_table(_scored_candidates(), 2, mc.PRIORITY_WEIGHTS["balanced"], "note")
+    out = capsys.readouterr().out
+    assert (
+        "Prices shown are what a long session pays: several models bill at a "
+        "higher rate once the prompt outgrows their cheap short-context tier."
+    ) in out
+    assert (
+        "TIER marks how prices vary: a token threshold is the prompt size "
+        "above which the higher rate applies; a percentage is a scheduled "
+        "off-peak discount (price shown: the standard rate); SCHED marks a "
+        "schedule whose discount is under 1%. --json lists each model's "
+        "schedule."
+    ) in out
+    legend_lines = [
+        line
+        for line in out.splitlines()
+        if line.startswith(("Prices shown", "TIER marks"))
+    ]
+    assert legend_lines and all(line.isascii() for line in legend_lines)
 
 
 def test_build_candidates_survives_string_context_length():
@@ -930,6 +1940,15 @@ def _cand(model_id, blended, context=2_000_000, age_days: float | None = 0.0):
         "price_in": blended,
         "price_out": blended,
         "blended": blended,
+        "base_price_in": blended,
+        "base_price_out": blended,
+        "tier_prompt_tokens": None,
+        "tiers": [],
+        "schedule": None,
+        "max_discount": None,
+        "tier_note": None,
+        "sched_note": None,
+        "sched_detail": None,
         "age_days": age_days,
         "quality": None,
         "discount": None,
@@ -1731,7 +2750,7 @@ def build_doc(**overrides):
 
 def test_catalog_envelope():
     doc = build_doc()
-    assert doc["schema_version"] == 1
+    assert doc["schema_version"] == 2
     assert doc["tool"] == "model-compare"
     datetime.fromisoformat(doc["generated_at"])  # ISO with offset, raises if not
     p = doc["parameters"]
@@ -1773,6 +2792,14 @@ def test_catalog_entry_shape():
             "input_per_1m",
             "output_per_1m",
             "blended_per_1m",
+            "base",
+            "tiers",
+            "schedule",
+        }
+        assert set(entry["pricing"]["base"]) == {
+            "input_per_1m",
+            "output_per_1m",
+            "blended_per_1m",
         }
         assert set(entry["scores"]) == {"price", "quality", "context", "age", "overall"}
         assert set(entry["scores"]["overall"]) == {"balanced", "price", "quality"}
@@ -1784,6 +2811,13 @@ def test_catalog_entry_shape():
         "input_per_1m": 1.0,
         "output_per_1m": 2.0,
         "blended_per_1m": 1.25,
+        "base": {
+            "input_per_1m": 1.0,
+            "output_per_1m": 2.0,
+            "blended_per_1m": 1.25,
+        },
+        "tiers": [],
+        "schedule": None,
     }
     assert a["listed_at"] == "2023-11-14"  # utc date of 1_700_000_000
     assert isinstance(a["age_days"], int) and a["age_days"] >= 0
@@ -1797,6 +2831,131 @@ def test_catalog_entry_shape():
     assert b["quality"] == 68.4
     assert b["quality_match"] == "openrouter"
     assert b["discount"] is None
+
+
+def _doc_with(models, min_context=1_000_000, zdr_ids=None, aa_by_id=None):
+    args = make_args(min_context=min_context)
+    filtered = []
+    zdr = {m["id"] for m in models} if zdr_ids is None else zdr_ids
+    candidates, dropped = mc.build_candidates(models, args, {}, zdr, filtered)
+    mc.compute_scores(candidates, args, {})
+    return mc.build_catalog(
+        args, models, candidates, dropped, filtered, {}, {}, None, aa_by_id or {}, {}
+    )
+
+
+def test_catalog_tiered_pricing_block():
+    doc = _doc_with([make_model(id="acme/haiku", pricing=haiku_pricing())])
+    (entry,) = doc["models"]
+    pricing = entry["pricing"]
+    assert pricing["input_per_1m"] == 0.5
+    assert pricing["output_per_1m"] == 2.5
+    assert pricing["base"] == {
+        "input_per_1m": pytest.approx(0.1),
+        "output_per_1m": pytest.approx(0.5),
+        "blended_per_1m": pytest.approx(0.2),
+    }
+    assert pricing["tiers"] == [
+        {
+            "min_prompt_tokens": 100000,
+            "input_per_1m": 0.5,
+            "output_per_1m": 2.5,
+            "blended_per_1m": 1.0,
+        }
+    ]
+    assert pricing["schedule"] is None
+
+
+def test_catalog_schedule_pricing_block():
+    doc = _doc_with([make_model(id="acme/hy4", pricing=hy4_pricing())])
+    (entry,) = doc["models"]
+    pricing = entry["pricing"]
+    assert pricing["input_per_1m"] == pytest.approx(0.834)
+    assert pricing["output_per_1m"] == pytest.approx(2.501)
+    assert pricing["base"]["input_per_1m"] == pytest.approx(0.834)  # frozen peak
+    assert pricing["base"]["output_per_1m"] == pytest.approx(2.501)
+    schedule = pricing["schedule"]
+    assert [(w["utc_start"], w["utc_end"], w["coverage"]) for w in schedule] == [
+        (0, 1600, 0.6667),
+        (1600, 0, 0.3333),
+    ]
+    assert schedule[0]["input_per_1m"] == pytest.approx(0.834)
+    assert schedule[0]["blended_per_1m"] == pytest.approx(1.25075)
+    assert pricing["tiers"] == []
+
+
+def test_catalog_schedules_top_level():
+    models = [
+        make_model(id="acme/hy3", pricing=deepseek_pricing(), context_length=262144),
+        make_model(id="acme/candidate-hy4", pricing=hy4_pricing()),
+        make_model(id="~acme/alias", pricing=hy4_pricing()),
+        make_model(id="acme/batch-hy4:batch", pricing=hy4_pricing()),
+        make_model(id="acme/nonzdr-hy4", pricing=hy4_pricing()),
+        make_model(id="acme/plain"),
+    ]
+    zdr = {m["id"] for m in models} - {"acme/nonzdr-hy4"}
+    doc = _doc_with(models, zdr_ids=zdr)
+    ids = [s["id"] for s in doc["schedules"]]
+    assert ids == sorted(ids)
+    assert "acme/hy3" in ids  # sub-floor context: schedules are unfiltered
+    assert "acme/batch-hy4:batch" in ids  # :batch variants are distinct deals
+    assert "acme/nonzdr-hy4" in ids  # non-ZDR: schedules stay unfiltered
+    assert "~acme/alias" not in ids  # router aliases excluded
+    assert "acme/plain" not in ids  # no schedule
+    by_id = {s["id"]: s for s in doc["schedules"]}
+    candidate = by_id["acme/candidate-hy4"]
+    assert candidate["score"] is not None  # balanced overall for candidates
+    assert candidate["quality"] is None  # no AA data in this document
+    noncand = by_id["acme/hy3"]
+    assert noncand["score"] is None
+    assert noncand["quality"] is None
+    assert noncand["max_discount"] == 0.5
+    assert noncand["sched_note"] == "-50%"
+    assert noncand["sched_detail"] == (
+        "weekdays 00:00-01:00, 04:00-06:00, 10:00-00:00; weekends all day UTC"
+    )
+    assert noncand["context"] == 262144
+    assert noncand["offpeak"]["input_per_1m"] == pytest.approx(0.66)
+    assert noncand["peak"]["input_per_1m"] == pytest.approx(1.32)
+
+
+def test_catalog_schedules_quality_from_openrouter_aa():
+    doc = _doc_with(
+        [
+            make_model(id="acme/model-a"),  # keeps the candidate pool non-empty
+            make_model(
+                id="acme/hy3", pricing=deepseek_pricing(), context_length=262144
+            ),
+        ],
+        aa_by_id={"acme/hy3": {"intelligence_index": 40.0}},
+    )
+    by_id = {entry["id"]: entry for entry in doc["schedules"]}
+    assert by_id["acme/hy3"]["quality"] == 40.0  # OR-published AA for non-candidates
+    assert by_id["acme/hy3"]["score"] is None
+
+
+def test_catalog_determinism_with_frozen_clock(monkeypatch):
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 9, 6, 0, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(mc, "datetime", FrozenDatetime)
+    monkeypatch.setattr(mc.time, "time", lambda: 1_700_000_000.0)
+
+    def build(top_in, top_out):
+        pricing = dict(hy4_pricing())
+        pricing["prompt"] = top_in
+        pricing["completion"] = top_out
+        doc = _doc_with([make_model(id="acme/hy4", pricing=pricing)])
+        return json.dumps(doc, sort_keys=True)
+
+    # Two fetch times differ only in the windowed model's top-level prices
+    # (each equals one of its windows); the frozen peak base must make the
+    # documents byte-identical.
+    first = build("0.000000834", "0.000002501")
+    second = build("0.0000007506", "0.0000022509")
+    assert first == second
 
 
 def test_catalog_future_created_age_days_clamped():

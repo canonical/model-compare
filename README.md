@@ -77,6 +77,24 @@ filters (context floor, text-only, tool-calling, ZDR by default). The full
 scoring formulas, filter list, the `--catalog` JSON contract and the test
 setup are in [DESIGN.md](DESIGN.md).
 
+## Tiered pricing
+
+OpenRouter publishes conditional price overrides per model
+(`pricing.overrides`): long-context tiers that charge more above a prompt
+threshold, and off-peak schedules that charge less during certain UTC
+windows. This tool ranks every model at **the tier in effect at a prompt
+size of `min_context` tokens** — with the default 1M context that is the
+worst case, which is what a long coding session actually pays. Time-windowed
+models are ranked at their peak window (deterministic) and annotated; models
+whose windows do not tile the week exactly are dropped (`schedule` drop
+reason). The table's TIER column marks a token threshold (`>100k`), an
+off-peak discount (`-38%`), or a sub-1% schedule (`SCHED`);
+`--json` carries `pricing_tier_prompt_tokens`, `base_input_usd_per_m`,
+`base_output_usd_per_m`, `tier_note`, `sched_note`, `sched_detail` and
+`time_schedule`. `catalog.json` publishes the full picture: `pricing.base`,
+`pricing.tiers`, `pricing.schedule` (with per-window `coverage` fractions
+for time-weighted pricing) and the top-level `schedules` deals index.
+
 ## License
 
 GPL-3.0 — see [LICENSE](LICENSE).

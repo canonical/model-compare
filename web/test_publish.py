@@ -107,9 +107,9 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
     assert scripts == [
         "model_compare.py",  # --catalog (first: primes the shared caches)
         "model_compare.py",  # --best
-        "model_compare.py",  # balanced --json --top 10
-        "model_compare.py",  # price --json --top 10
-        "model_compare.py",  # quality --json --top 10
+        "model_compare.py",  # balanced --json --top 20
+        "model_compare.py",  # price --json --top 20
+        "model_compare.py",  # quality --json --top 20
         "generate_highlights.py",
         "build_site_data.py",
     ]

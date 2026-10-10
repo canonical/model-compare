@@ -183,7 +183,7 @@ def build_site(output_dir: Path) -> None:
         for priority in PRIORITIES:
             run_script(
                 model_compare,
-                ["--priority", priority, "--json", "--top", "10"],
+                ["--priority", priority, "--json", "--top", "20"],
                 out=scratch / f"{priority}.json",
             )
 
