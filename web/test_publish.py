@@ -49,7 +49,7 @@ def _write_artifacts(out_dir, overrides=None, best_id="z-ai/glm-5.3-flash"):
     must match what the stubbed `--best` run wrote to best.txt.
     """
     docs = {
-        "data.json": {"generated_at": STAMP},
+        "data.json": {"schema_version": 1, "generated_at": STAMP},
         "catalog.json": {
             "generated_at": STAMP,
             "models": [],
@@ -257,7 +257,7 @@ def test_build_site_fails_when_expected_artifacts_missing(tmp_path, monkeypatch)
 @pytest.mark.parametrize(
     "name, doc",
     [
-        ("data.json", {"generated_at": "2026-09-27T06:00:00Z"}),
+        ("data.json", {"schema_version": 1, "generated_at": "2026-09-27T06:00:00Z"}),
         ("history.json", {"updated_at": "2026-09-27T06:00:00Z", "snapshots": {}}),
     ],
 )
@@ -293,6 +293,11 @@ def test_build_site_fails_on_malformed_artifact(tmp_path, monkeypatch, name):
         ("history.json", {"snapshots": {}}),
         ("history.json", {"updated_at": STAMP}),
         ("data.json", {}),
+        ("data.json", {"generated_at": STAMP}),  # missing only schema_version
+        ("data.json", {"schema_version": 2, "generated_at": STAMP}),
+        # strict identity: True == 1 and 1.0 == 1 in Python, neither is v1
+        ("data.json", {"schema_version": True, "generated_at": STAMP}),
+        ("data.json", {"schema_version": 1.0, "generated_at": STAMP}),
         ("catalog.json", []),
         # the best.txt gate reads rankings; a catalog without them is broken
         ("catalog.json", {"generated_at": STAMP, "models": []}),
@@ -303,6 +308,18 @@ def test_build_site_fails_on_missing_stamp_fields(tmp_path, monkeypatch, name, d
     monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=overrides))
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
     with pytest.raises(RuntimeError, match=name):
+        publish.build_site(tmp_path / "site")
+
+
+def test_build_site_requires_data_json_schema_version(tmp_path, monkeypatch):
+    # Regression pin for the required-tuple half of the gate: a data.json
+    # missing only schema_version must fail at load ("lacks"), not slip
+    # through to a later check -- reverting the tuple to ("generated_at",)
+    # must turn this red.
+    overrides = {"data.json": json.dumps({"generated_at": STAMP})}
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=overrides))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    with pytest.raises(RuntimeError, match="data.json lacks schema_version"):
         publish.build_site(tmp_path / "site")
 
 

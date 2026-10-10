@@ -150,6 +150,7 @@ rows = [
     row("moonshotai/kimi-k2.5", 39.0, 0.6, 2.5, 0, 256000, 41, 0.568),
 ]
 data = {
+    "schema_version": 1,
     "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     "best": "openrouter/google/gemini-2.5-pro",
     "priorities": {
@@ -157,6 +158,8 @@ data = {
         "price": sorted(rows, key=lambda r: (r["input_usd_per_m"], -r["score"])),
         "quality": sorted(rows, key=lambda r: -r["quality_index"]),
     },
+    # v1 shape: build_data always emits the key (empty without a catalog)
+    "schedules": [],
 }
 with open(sys.argv[1], "w") as fh:
     json.dump(data, fh, indent=2)

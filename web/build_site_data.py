@@ -711,6 +711,12 @@ def order_rows(rows, ranking) -> list:
     return [by_id[model_id] for model_id in top]
 
 
+# data.json's own contract version: additive changes are free; renaming,
+# removing, or changing the meaning of a field bumps it (mirrors the catalog
+# and history documents).
+DATA_SCHEMA_VERSION = 1
+
+
 def project_schedules(catalog) -> list:
     """data.json projection of catalog.schedules: the Off-peak deals rows.
 
@@ -788,6 +794,7 @@ def build_data(best, priorities, now=None, generated_at=None, catalog=None) -> d
             except ValueError as exc:
                 raise ValueError(f"priority {name!r}: {exc}") from None
     return {
+        "schema_version": DATA_SCHEMA_VERSION,
         "generated_at": generated_at,
         "best": best,
         "priorities": rows_by_priority,

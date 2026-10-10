@@ -1571,6 +1571,11 @@ def test_build_data_schedules_key():
     assert bare["schedules"] == []
 
 
+def test_build_data_emits_schema_version():
+    data = bsd.build_data("openrouter/acme/model-a", make_priorities())
+    assert data["schema_version"] == 1
+
+
 def test_row_keys_optional_passthrough():
     rows = make_priorities()
     rows["balanced"][0]["tier_note"] = ">100k"
