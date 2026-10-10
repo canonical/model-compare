@@ -295,6 +295,9 @@ def test_build_site_fails_on_malformed_artifact(tmp_path, monkeypatch, name):
         ("data.json", {}),
         ("data.json", {"generated_at": STAMP}),  # missing only schema_version
         ("data.json", {"schema_version": 2, "generated_at": STAMP}),
+        # strict identity: True == 1 and 1.0 == 1 in Python, neither is v1
+        ("data.json", {"schema_version": True, "generated_at": STAMP}),
+        ("data.json", {"schema_version": 1.0, "generated_at": STAMP}),
         ("catalog.json", []),
         # the best.txt gate reads rankings; a catalog without them is broken
         ("catalog.json", {"generated_at": STAMP, "models": []}),

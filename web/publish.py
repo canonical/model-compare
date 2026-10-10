@@ -93,7 +93,8 @@ def check_stamps(output_dir: Path) -> dict:
     # .get: fail closed with the clean RuntimeError below even if the
     # required tuple above ever stops listing schema_version.
     version = data.get("schema_version")
-    if version != 1:
+    # Strict identity: True and 1.0 compare equal to 1 but are not v1.
+    if type(version) is not int or version != 1:
         # publish imports nothing from build_site_data (subprocess-only by
         # design); the expected data.json version is pinned here, like the
         # opencode id prefix in check_best.
