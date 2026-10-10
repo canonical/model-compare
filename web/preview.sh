@@ -158,6 +158,8 @@ data = {
         "price": sorted(rows, key=lambda r: (r["input_usd_per_m"], -r["score"])),
         "quality": sorted(rows, key=lambda r: -r["quality_index"]),
     },
+    # v1 shape: build_data always emits the key (empty without a catalog)
+    "schedules": [],
 }
 with open(sys.argv[1], "w") as fh:
     json.dump(data, fh, indent=2)
