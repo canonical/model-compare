@@ -1015,6 +1015,42 @@ def build_aa_benchmarks(benchmarks) -> dict:
     return aa_by_id
 
 
+def build_catalog_aa_benchmarks(models) -> dict:
+    """Map exact catalog model ids to their published AA benchmark trio."""
+    aa_by_id = {}
+    for model in models:
+        model_id = model.get("id") or ""
+        if not model_id:
+            continue
+        benchmarks = model.get("benchmarks")
+        aa = (
+            benchmarks.get("artificial_analysis")
+            if isinstance(benchmarks, dict)
+            else None
+        )
+        if not isinstance(aa, dict):
+            continue
+        trio = {}
+        for field in AA_BENCHMARK_FIELDS:
+            value = aa.get(field)
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
+                trio[field] = float(value)
+        if trio:
+            aa_by_id[model_id] = trio
+    return aa_by_id
+
+
+def aa_benchmark_for_model(aa_by_id, model_id):
+    exact = aa_by_id.get(model_id)
+    if exact and exact.get("intelligence_index") is not None:
+        return exact
+    return aa_by_id.get(base_model_id(model_id)) or exact
+
+
 def resolve_quality(candidates, aa_by_id, exact, fuzzy, aa_source):
     """Per-candidate quality: OR benchmarks first, AA exact fallback, else None.
 
@@ -1027,7 +1063,7 @@ def resolve_quality(candidates, aa_by_id, exact, fuzzy, aa_source):
     quality_by_id = {}
     source_by_id = {}
     for cand in candidates:
-        bench = aa_by_id.get(base_model_id(cand["id"]))
+        bench = aa_benchmark_for_model(aa_by_id, cand["id"])
         intelligence = bench.get("intelligence_index") if bench else None
         if intelligence is not None:
             quality_by_id[cand["id"]] = intelligence
@@ -1095,7 +1131,7 @@ def build_schedules(models, args, quality_by_id, aa_by_id, balanced_by_id):
         offpeak = min(windows, key=lambda window: window["blended"])
         quality = quality_by_id.get(model_id)
         if quality is None:
-            benchmark = aa_by_id.get(base_model_id(model_id)) or {}
+            benchmark = aa_benchmark_for_model(aa_by_id, model_id) or {}
             quality = benchmark.get("intelligence_index")
         name = model.get("name") or model_id
         entries.append(
@@ -1586,7 +1622,7 @@ def build_catalog(
                 + w.get("age", 0.0) * scores["age"],
                 4,
             )
-        bench = aa_by_id.get(base_model_id(cand["id"])) or {}
+        bench = aa_benchmark_for_model(aa_by_id, cand["id"]) or {}
         entries.append(
             {
                 "id": cand["id"],
@@ -1858,6 +1894,8 @@ def run(args, models, or_cached) -> int:
         )
         return 1
     aa_entries, aa_source, aa_cached = fetch_aa_entries(args)
+    # Exact, official catalog values take precedence over frontend base-id data.
+    aa_by_id.update(build_catalog_aa_benchmarks(models))
     exact, fuzzy = build_aa_lookup(aa_entries)
 
     filtered = []

@@ -2154,6 +2154,25 @@ def test_build_aa_benchmarks_empty_inputs():
     assert mc.build_aa_benchmarks(None) == {}
 
 
+def test_build_catalog_aa_benchmarks_uses_exact_ids_and_valid_values():
+    models = [
+        {
+            "id": "acme/model:free",
+            "benchmarks": {
+                "artificial_analysis": {
+                    "intelligence_index": 57.5,
+                    "coding_index": float("nan"),
+                    "agentic_index": True,
+                }
+            },
+        },
+        {"id": "acme/no-aa", "benchmarks": {"design_arena": []}},
+    ]
+    assert mc.build_catalog_aa_benchmarks(models) == {
+        "acme/model:free": {"intelligence_index": 57.5}
+    }
+
+
 def test_base_model_id_strips_variant():
     assert mc.base_model_id("z-ai/glm-5.3-flash:free") == "z-ai/glm-5.3-flash"
     assert mc.base_model_id("z-ai/glm-5.3") == "z-ai/glm-5.3"
@@ -2577,6 +2596,28 @@ def test_resolve_quality_falls_back_to_exact_aa_and_records_provenance():
 def test_resolve_quality_variant_inherits_base_trio():
     candidates = [{"id": "acme/model-a:free", "name": "Acme: Model A (free)"}]
     aa_by_id = {"acme/model-a": {"intelligence_index": 57.5}}
+    quality, source = mc.resolve_quality(candidates, aa_by_id, {}, {}, None)
+    assert quality == {"acme/model-a:free": 57.5}
+    assert source == {"acme/model-a:free": "openrouter"}
+
+
+def test_resolve_quality_prefers_exact_variant_trio_over_base_trio():
+    candidates = [{"id": "acme/model-a:free", "name": "Acme: Model A (free)"}]
+    aa_by_id = {
+        "acme/model-a": {"intelligence_index": 57.5},
+        "acme/model-a:free": {"intelligence_index": 42.0},
+    }
+    quality, source = mc.resolve_quality(candidates, aa_by_id, {}, {}, None)
+    assert quality == {"acme/model-a:free": 42.0}
+    assert source == {"acme/model-a:free": "openrouter"}
+
+
+def test_resolve_quality_uses_base_intelligence_when_exact_trio_lacks_it():
+    candidates = [{"id": "acme/model-a:free", "name": "Acme: Model A (free)"}]
+    aa_by_id = {
+        "acme/model-a": {"intelligence_index": 57.5},
+        "acme/model-a:free": {"coding_index": 42.0},
+    }
     quality, source = mc.resolve_quality(candidates, aa_by_id, {}, {}, None)
     assert quality == {"acme/model-a:free": 57.5}
     assert source == {"acme/model-a:free": "openrouter"}
