@@ -79,9 +79,11 @@ highlights.
   `openrouter/<id>#<effort>`. `*` marks OpenRouter's effective default for
   information only; it does not choose QUAL. An AA row for an effort
   OpenRouter does not support says `not selectable` and offers no copy button.
-  AA `$/task` is AA's measured benchmark cost at AA's reference price, not the
-  TASK$ session cost. Without a catalog fetch the section says the details are
-  unavailable.
+  An AA row with no effort label cannot fill QUAL: the Depth section shows
+  its index as a reference and says it may not be the quality the user gets
+  at a selectable effort. AA `$/task` is AA's measured benchmark cost at AA's
+  reference price, not the TASK$ session cost. Without a catalog fetch the
+  section says the details are unavailable.
 - **Simple / Expert layout toggle** — the two buttons on the right of the tab
   line switch the ranked table between the full expert layout (14 columns:
   rank, 7-day, model, depth, quality, in, out, discount, precision, tier,

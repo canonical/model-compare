@@ -1917,7 +1917,7 @@ def test_pool_accounting_balances_with_endpoint_drops(monkeypatch, capsys):
 
 
 def test_catalog_schema_versions_are_in_lockstep():
-    assert mc.VERSION == "0.7.2"
+    assert mc.VERSION == "0.7.3"
     assert mc.CATALOG_QUALITY_SCHEMA_VERSION == mc.CATALOG_SCHEMA_VERSION == 6
     assert (
         mc.CATALOG_QUALITY_SCHEMA_VERSION
@@ -4356,6 +4356,91 @@ def test_build_aa_depth_lookup_normalizes_cost_and_creator_key():
     assert lookup["zai:model a"]["high"] is record
 
 
+def test_build_aa_depth_lookup_skips_overflowing_index():
+    lookup = mc.build_aa_depth_lookup(
+        [
+            {
+                "id": "1",
+                "name": "Model A (High)",
+                "slug": "model-a-high",
+                "index": 10**400,
+                "as_of": "t1",
+            }
+        ]
+    )
+    # huge ints overflow float(); the row is skipped, no effort group created
+    assert lookup == {}
+
+
+def test_build_aa_unlabeled_lookup_keeps_only_unlabeled_rows():
+    lookup = mc.build_aa_unlabeled_lookup(
+        [
+            {
+                "id": "1",
+                "name": "GLM-5.3-Flash",
+                "slug": "glm-5-3-flash",
+                "index": 27.8,
+                "creator": "Z.AI",
+                "cost_per_task": 0.58,
+                "as_of": "t1",
+            },
+            {
+                "id": "2",
+                "name": "GLM-5.3 (Max)",
+                "slug": "glm-5-3",
+                "index": 31.7,
+                "as_of": "t1",
+            },
+            {
+                "id": "3",
+                "name": "Model (Non-reasoning, High)",
+                "slug": "model",
+                "index": 40.0,
+                "as_of": "t1",
+            },
+        ]
+    )
+    record = lookup["glm 5 3 flash"]
+    assert record == {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    assert lookup["zai:glm 5 3 flash"] is record
+    # Labeled rows and ambiguous labels never enter the reference map.
+    assert "glm 5 3" not in lookup
+    assert "model" not in lookup
+
+
+def test_build_aa_unlabeled_lookup_drops_conflicting_duplicates():
+    lookup = mc.build_aa_unlabeled_lookup(
+        [
+            {"id": "1", "name": "Model A", "slug": "model-a", "index": 40.0},
+            {"id": "2", "name": "Model A", "slug": "model-a", "index": 41.0},
+        ]
+    )
+    # Two unlabeled rows for one base key cannot be told apart: never guess.
+    assert lookup.get("model a") is None
+
+
+def test_build_aa_unlabeled_lookup_skips_overflowing_index():
+    lookup = mc.build_aa_unlabeled_lookup(
+        [
+            {
+                "id": "1",
+                "name": "GLM-5.3-Flash",
+                "slug": "glm-5-3-flash",
+                "index": 10**400,
+                "as_of": "t1",
+            }
+        ]
+    )
+    # huge ints overflow float(); the row is skipped and the lookup stays
+    # empty for its base key
+    assert lookup == {}
+
+
 def test_legacy_aa_entries_dedupe_by_key_first_wins():
     # The depth path keeps every effort variant (id-first dedupe), but the
     # legacy lookup must see the key-unique list it always saw: one entry per
@@ -4418,6 +4503,20 @@ def test_build_aa_lookup_skips_non_finite_index():
         mc.match_quality({"id": "acme/model-a", "name": "Acme: Model A"}, exact, fuzzy)
         is None
     )
+    assert mc.match_quality(
+        {"id": "acme/model-b", "name": "Model B"}, exact, fuzzy
+    ) == (55.0, None)
+
+
+def test_build_aa_lookup_skips_overflowing_index():
+    entries = [
+        {"key": "acme/model-a", "name": "Model A", "index": 10**400},
+        {"key": "acme/model-b", "name": "Model B", "index": 55.0},
+    ]
+    exact, fuzzy = mc.build_aa_lookup(entries)
+    # huge ints overflow float(); the entry never reaches the exact map
+    assert all("model a" not in key for _, key in exact)
+    assert len(fuzzy) == 1
     assert mc.match_quality(
         {"id": "acme/model-b", "name": "Model B"}, exact, fuzzy
     ) == (55.0, None)
@@ -6206,6 +6305,163 @@ def test_resolve_quality_depth_catalog_best_selectable():
     assert source == {"acme/model-a": "catalog"}
 
 
+def test_resolve_quality_attaches_unlabeled_aa_reference():
+    cand = {
+        "id": "z-ai/glm-5.3-flash",
+        "name": "Z.AI: GLM 5.3 Flash",
+        "default_effort": "max",
+        "supported_efforts": ["max", "high", "low"],
+        "reasoning": {"is_reasoning": True},
+    }
+    lookup = mc.build_aa_unlabeled_lookup(
+        [
+            {
+                "id": "1",
+                "name": "GLM-5.3-Flash",
+                "slug": "glm-5-3-flash",
+                "index": 27.8,
+                "creator": "Z.AI",
+                "cost_per_task": 0.58,
+                "as_of": "t1",
+            }
+        ]
+    )
+    quality, source = mc.resolve_quality(
+        [cand], {}, {}, {}, "AA API v2", depth_lookup={}, unlabeled_lookup=lookup
+    )
+    # QUAL stays blank: the reference never fills the main record.
+    assert quality == {}
+    assert source == {}
+    assert cand["quality_unlabeled"] == {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+
+
+def test_resolve_quality_ambiguous_unlabeled_key_terminates_tier_walk():
+    # The base tier ("glm 5 3 flash") holds an ambiguous duplicate (None);
+    # the lower display tier ("glm53 flash") holds a real record. A present
+    # key terminates the walk -- the ambiguity must suppress the reference
+    # rather than fall through to the lower tier.
+    cand = {
+        "id": "z-ai/glm-5.3-flash",
+        "name": "Z.AI: GLM5.3 Flash",
+        "default_effort": "max",
+        "supported_efforts": ["max", "high", "low"],
+        "reasoning": {"is_reasoning": True},
+    }
+    lookup = {
+        "glm 5 3 flash": None,
+        "glm53 flash": {
+            "index": 27.8,
+            "cost_per_task_usd": 0.58,
+            "source": "aa",
+            "as_of": "t1",
+        },
+    }
+    quality, source = mc.resolve_quality(
+        [cand], {}, {}, {}, "AA API v2", depth_lookup={}, unlabeled_lookup=lookup
+    )
+    assert quality == {}
+    assert source == {}
+    assert "quality_unlabeled" not in cand
+
+
+def test_resolve_quality_keeps_unlabeled_reference_out_of_main_quality():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "high",
+        "reasoning": {"is_reasoning": True},
+    }
+    lookup = mc.build_aa_depth_lookup(
+        [
+            {
+                "id": "1",
+                "name": "Model A (High)",
+                "slug": "model-a-high",
+                "index": 46.8,
+                "as_of": "t1",
+            }
+        ]
+    )
+    unlabeled = mc.build_aa_unlabeled_lookup(
+        [{"id": "2", "name": "Model A", "slug": "model-a", "index": 40.0}]
+    )
+    quality, source = mc.resolve_quality(
+        [cand],
+        {},
+        {},
+        {},
+        "AA API v2",
+        depth_lookup=lookup,
+        unlabeled_lookup=unlabeled,
+    )
+    assert quality["acme/model-a"]["index"] == 46.8
+    # A resolved QUAL makes the reference redundant: never attach it.
+    assert "quality_unlabeled" not in cand
+
+
+def test_resolve_quality_clears_stale_unlabeled_reference():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "high",
+        "reasoning": {"is_reasoning": True},
+        "quality_unlabeled": {
+            "index": 99.0,
+            "cost_per_task_usd": None,
+            "source": "aa",
+            "as_of": "stale",
+        },
+    }
+    lookup = mc.build_aa_depth_lookup(
+        [
+            {
+                "id": "1",
+                "name": "Model A (High)",
+                "slug": "model-a-high",
+                "index": 46.8,
+                "as_of": "t1",
+            }
+        ]
+    )
+    quality, _ = mc.resolve_quality(
+        [cand], {}, {}, {}, "AA API v2", depth_lookup=lookup
+    )
+    assert quality["acme/model-a"]["index"] == 46.8
+    assert "quality_unlabeled" not in cand
+
+
+def test_resolve_quality_hydrates_unlabeled_reference_from_catalog():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "max",
+        "reasoning": {"is_reasoning": True},
+    }
+    catalog_depths = {
+        "acme/model-a": {
+            "default_effort": "max",
+            "depths": {},
+            "unlabeled": {
+                "index": 27.8,
+                "cost_per_task_usd": 0.58,
+                "source": "aa",
+                "as_of": "t1",
+            },
+        }
+    }
+    quality, source = mc.resolve_quality(
+        [cand], {}, {}, {}, None, catalog_depths=catalog_depths
+    )
+    assert quality == {}
+    assert cand["quality_unlabeled"]["index"] == 27.8
+    assert cand["quality_unlabeled"]["as_of"] == "t1"
+
+
 def test_resolve_quality_single_state_reasoning_uses_reasoning_row():
     cand = {
         "id": "acme/model-a",
@@ -7046,6 +7302,44 @@ def test_print_json_carries_depth_fields(capsys):
     assert "is_reasoning" not in row["reasoning"]
 
 
+def test_print_json_carries_unlabeled_aa_reference(capsys):
+    cand = _cand("z-ai/glm-5.3-flash", 27.8)
+    cand["quality"] = None
+    cand["quality_record"] = None
+    cand["reasoning"] = {
+        "default_effort": "max",
+        "supported_efforts": ["max", "high", "low"],
+        "is_reasoning": True,
+    }
+    cand["reasoning_depths"] = []
+    cand["quality_unlabeled"] = {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    mc.print_json([cand])
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["quality_index"] is None
+    assert row["reasoning"]["aa_unlabeled"] == {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+
+
+def test_print_json_unlabeled_aa_reference_is_null_when_absent(capsys):
+    cand = _cand("acme/model-a", 50.0)
+    cand["quality"] = None
+    cand["quality_record"] = None
+    cand["reasoning"] = {"default_effort": "high", "supported_efforts": ["high"]}
+    cand["reasoning_depths"] = []
+    mc.print_json([cand])
+    row = json.loads(capsys.readouterr().out)[0]
+    assert row["reasoning"]["aa_unlabeled"] is None
+
+
 def test_print_json_non_reasoning_none_record(capsys):
     cand = _cand("acme/model-a", 50.0)
     cand["quality"] = 30.0
@@ -7376,8 +7670,89 @@ def test_fetch_quality_catalog_parses_v6_depths(monkeypatch):
                     "as_of": stamp,
                 },
             },
+            "unlabeled": None,
         }
     }
+
+
+def test_fetch_quality_catalog_parses_v6_aa_unlabeled(monkeypatch):
+    """An AA row with no effort label hydrates as a display-only reference:
+    it never becomes the main quality, but the depth map carries it."""
+    stamp = "2026-11-04T12:27:03+00:00"
+    doc = _catalog_doc(
+        [
+            {
+                "id": "z-ai/glm-5.3-flash",
+                "quality": None,
+                "quality_match": None,
+                "reasoning": {
+                    "default_effort": "max",
+                    "supported_efforts": ["max", "high", "low"],
+                    "depths": [],
+                    "aa_unlabeled": {
+                        "index": 27.8,
+                        "cost_per_task_usd": 0.58,
+                        "source": "aa",
+                        "as_of": stamp,
+                    },
+                },
+            }
+        ],
+        schema_version=6,
+    )
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: doc)
+    result = mc.fetch_quality_catalog(make_args())
+    assert result["by_id"] == {}
+    assert result["depths_by_id"]["z-ai/glm-5.3-flash"]["unlabeled"] == {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": stamp,
+    }
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda record: record.update(index=float("nan")),
+        lambda record: record.update(index="27.8"),
+        lambda record: record.update(index=True),
+        lambda record: record.update(cost_per_task_usd="0.58"),
+        lambda record: record.update(source=7),
+        lambda record: record.update(source=""),
+        lambda record: record.update(as_of=7),
+        lambda record: record.pop("as_of"),
+        lambda record: record.pop("index"),
+        lambda record: record.pop("cost_per_task_usd"),
+    ],
+)
+def test_catalog_quality_by_id_malformed_aa_unlabeled_degrades(mutate, capsys):
+    record = {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    mutate(record)
+    doc = _catalog_doc(
+        [
+            {
+                "id": "acme/model-a",
+                "quality": None,
+                "quality_match": None,
+                "reasoning": {
+                    "default_effort": "max",
+                    "supported_efforts": [],
+                    "depths": [],
+                    "aa_unlabeled": record,
+                },
+            }
+        ],
+        schema_version=6,
+    )
+    # Fail closed for the whole artifact, like every other malformed row.
+    assert mc.catalog_quality_by_id(doc) == {}
+    assert "unexpected response shape" in capsys.readouterr().err
 
 
 def test_fetch_quality_catalog_parses_schedule_entries(monkeypatch):
@@ -8019,6 +8394,12 @@ def test_build_catalog_v6_carries_reasoning_block():
     cand["reasoning_depths"] = [
         {"effort": "max", "index": 56.0, "source": "aa", "as_of": "t1"}
     ]
+    cand["quality_unlabeled"] = {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
     mc.compute_scores(
         [cand],
         make_args(),
@@ -8056,6 +8437,15 @@ def test_build_catalog_v6_carries_reasoning_block():
     # The published depth record reuses the quality record's shape: `index`,
     # never `quality_index`.
     assert entry["reasoning"]["depths"][0]["index"] == 56.0
+    # The display-only unlabeled AA reference rides in the reasoning block;
+    # it never becomes the entry's main quality.
+    assert entry["reasoning"]["aa_unlabeled"] == {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    assert entry["quality"] == 46.8
     assert doc["sources"]["aa"]["depth_rows"] == 1
     assert doc["sources"]["aa"]["matched_depth"] == 1
     assert doc["sources"]["aa"]["matched_default"] == 1
@@ -8880,7 +9270,7 @@ def test_version_flag():
         check=True,
     )
     # Literal pin: a release that forgets to bump VERSION fails here.
-    assert proc.stdout.strip() == "model-compare 0.7.2"
+    assert proc.stdout.strip() == "model-compare 0.7.3"
 
 
 # ---------------------------------------------------------------------------
@@ -10496,6 +10886,48 @@ def test_depth_detail_reports_missing_default_record(capsys):
     out = capsys.readouterr().out
     assert "AA has no high record for this model." in out
     assert "high*" in out
+
+
+def test_depth_detail_shows_unlabeled_aa_reference(capsys):
+    cand = _cand("z-ai/glm-5.3-flash", 27.8)
+    cand["reasoning"] = {
+        "default_effort": "max",
+        "supported_efforts": ["max", "high", "low"],
+        "is_reasoning": True,
+    }
+    cand["reasoning_depths"] = []
+    cand["quality_unlabeled"] = {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    mc.print_depth_detail([cand])
+    out = capsys.readouterr().out
+    assert "AA index 27.8 without an effort label" in out
+    assert "AA $0.58 per task" in out
+    assert "reference only" in out
+    assert "may not be the quality you get at a selectable effort" in out
+    # The per-effort table is still absent, but the blanket "no data" line
+    # would contradict the reference above it.
+    assert "no AA depth data" not in out
+
+
+def test_depth_detail_unlabeled_reference_without_cost(capsys):
+    cand = _cand("z-ai/glm-5.3-flash", 27.8)
+    cand["reasoning"] = {"default_effort": "max", "supported_efforts": ["max"]}
+    cand["reasoning_depths"] = []
+    cand["quality_unlabeled"] = {
+        "index": 27.8,
+        "cost_per_task_usd": None,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    mc.print_depth_detail([cand])
+    out = capsys.readouterr().out
+    note_line = next(line for line in out.splitlines() if "AA index 27.8" in line)
+    assert "without an effort label" in note_line
+    assert "$" not in note_line
 
 
 def test_best_and_json_print_no_depth_detail(monkeypatch, capsys):

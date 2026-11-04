@@ -1473,6 +1473,102 @@ def test_depth_detail_row_messages():
     )
 
 
+def test_unlabeled_reference_note():
+    assert (
+        run_js("unlabeledNote({index: 27.8, cost_per_task_usd: 0.58})")
+        == "AA index 27.8 without an effort label (AA $0.58 per task); "
+        "reference only, may not be the quality you get at a selectable effort."
+    )
+    assert (
+        run_js("unlabeledNote({index: 27.8, cost_per_task_usd: null})")
+        == "AA index 27.8 without an effort label; reference only, may not be "
+        "the quality you get at a selectable effort."
+    )
+    assert run_js("unlabeledNote(null)") is None
+
+
+def test_quality_tooltip_explains_unlabeled_reference():
+    assert (
+        run_js(
+            "qualityTooltip({reasoning: {aa_unlabeled: {index: 27.8, "
+            "as_of: '2026-11-04T12:27:03+00:00'}}})"
+        )
+        == "AA measures this model at 27.8, checked 12:27Z, without a "
+        "reasoning-effort label, so QUAL stays blank; it may not be the "
+        "quality you get at a selectable effort."
+    )
+    assert (
+        run_js("qualityTooltip({reasoning: {aa_unlabeled: {index: 27.8}}})")
+        == "AA measures this model at 27.8, without a reasoning-effort label, "
+        "so QUAL stays blank; it may not be the quality you get at a "
+        "selectable effort."
+    )
+
+
+def test_depth_detail_row_shows_unlabeled_reference():
+    entry = {
+        "id": "z-ai/glm-5.3-flash",
+        "reasoning": {
+            "default_effort": "max",
+            "supported_efforts": ["max", "high", "low"],
+            "depths": [],
+            "aa_unlabeled": {
+                "index": 27.8,
+                "cost_per_task_usd": 0.58,
+                "source": "aa",
+                "as_of": "t1",
+            },
+        },
+    }
+    out = run_js(
+        "(function () {"
+        f" var td = depthDetailRow({json.dumps(entry)}, true).children[0];"
+        " return {"
+        "   heading: td.children[0].textContent,"
+        "   note: td.children[1].textContent,"
+        "   tableRows: td.children[2].children[1].children.length"
+        " };"
+        "})()"
+    )
+    assert out == {
+        "heading": "Depth",
+        "note": "AA index 27.8 without an effort label (AA $0.58 per task); "
+        "reference only, may not be the quality you get at a selectable effort.",
+        "tableRows": 3,
+    }
+
+
+def test_depth_detail_row_unlabeled_reference_replaces_no_data_line():
+    entry = {
+        "id": "acme/plain",
+        "reasoning": {
+            "default_effort": "none",
+            "supported_efforts": [],
+            "depths": [],
+            "aa_unlabeled": {
+                "index": 26.7,
+                "cost_per_task_usd": None,
+                "source": "aa",
+                "as_of": "t1",
+            },
+        },
+    }
+    out = run_js(
+        "(function () {"
+        f" var td = depthDetailRow({json.dumps(entry)}, true).children[0];"
+        " return {"
+        "   children: td.children.length,"
+        "   note: td.children[1].textContent"
+        " };"
+        "})()"
+    )
+    assert out == {
+        "children": 2,
+        "note": "AA index 26.7 without an effort label; reference only, may "
+        "not be the quality you get at a selectable effort.",
+    }
+
+
 def test_render_expanded_row_shows_depth_before_endpoints():
     row = dict(SIMPLE_VIEW_ROW)
     row.update(

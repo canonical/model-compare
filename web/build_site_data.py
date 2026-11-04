@@ -157,6 +157,10 @@ CATALOG_REASONING_KEYS = ("default_effort", "supported_efforts", "depths")
 # effort, AA cost per benchmark task (null when unreported), source label and
 # its as_of. `index`, never `quality_index`.
 CATALOG_DEPTH_KEYS = ("effort", "index", "cost_per_task_usd", "source", "as_of")
+# One display-only unlabeled AA reference: the intelligence index and AA's
+# benchmark cost, both measured without a reasoning-effort label, plus the
+# source label and its as_of. Deliberately no `effort` key.
+CATALOG_UNLABELED_KEYS = ("index", "cost_per_task_usd", "source", "as_of")
 # The OpenRouter session-cost dataset's four turn ranges (brainstorm
 # section 2.6): the only keys a medians cell dict may carry.
 SESSION_COST_TURN_RANGES = ("1-turn", "2-9-turns", "10-49-turns", "50-plus-turns")
@@ -443,7 +447,9 @@ def _validate_catalog_reasoning(reasoning, label) -> None:
     ``index``; ``quality_index`` is the pre-release draft key and is rejected
     as an unknown key. Effort labels are unique per model (a duplicate is
     ambiguous, never last-wins), the index is finite, and the AA cost is
-    finite or null when unreported.
+    finite or null when unreported. ``aa_unlabeled`` is optional (older
+    catalogs lack it): null, or a display-only AA reference measured without
+    an effort label.
     """
     if not isinstance(reasoning, dict):
         raise ValueError(f"{label} is not an object")
@@ -495,6 +501,28 @@ def _validate_catalog_reasoning(reasoning, label) -> None:
         if not isinstance(source, str) or not source:
             raise ValueError(f"{sub} source must be a non-empty string")
         as_of = depth["as_of"]
+        if as_of is not None and not isinstance(as_of, str):
+            raise ValueError(f"{sub} as_of must be a string or null")
+    unlabeled = reasoning.get("aa_unlabeled")
+    if unlabeled is not None:
+        sub = f"{label}.aa_unlabeled"
+        if not isinstance(unlabeled, dict):
+            raise ValueError(f"{sub} is not an object")
+        unknown = [key for key in unlabeled if key not in CATALOG_UNLABELED_KEYS]
+        if unknown:
+            raise ValueError(f"{sub} has unknown keys: " + ", ".join(unknown))
+        missing = [key for key in CATALOG_UNLABELED_KEYS if key not in unlabeled]
+        if missing:
+            raise ValueError(f"{sub} is missing keys: " + ", ".join(missing))
+        if not _is_number(unlabeled["index"]):
+            raise ValueError(f"{sub} index must be a finite number")
+        cost = unlabeled["cost_per_task_usd"]
+        if cost is not None and not _is_number(cost):
+            raise ValueError(f"{sub} cost_per_task_usd must be a finite number or null")
+        source = unlabeled["source"]
+        if not isinstance(source, str) or not source:
+            raise ValueError(f"{sub} source must be a non-empty string")
+        as_of = unlabeled["as_of"]
         if as_of is not None and not isinstance(as_of, str):
             raise ValueError(f"{sub} as_of must be a string or null")
 

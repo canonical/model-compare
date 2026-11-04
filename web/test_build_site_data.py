@@ -2299,6 +2299,54 @@ def test_validate_catalog_rejects_quality_index_in_depth_record():
         bsd.validate_catalog(doc)
 
 
+def test_validate_catalog_accepts_unlabeled_aa_reference():
+    doc = make_catalog()
+    doc["models"][0]["reasoning"] = _reasoning_block(
+        aa_unlabeled={
+            "index": 27.8,
+            "cost_per_task_usd": 0.58,
+            "source": "aa",
+            "as_of": "2026-11-04T12:27:03+00:00",
+        }
+    )
+    bsd.validate_catalog(doc)  # must not raise
+    # Absent (older catalogs) and explicit null both mean "no reference".
+    bsd.validate_catalog(make_catalog())
+    doc["models"][0]["reasoning"] = _reasoning_block(aa_unlabeled=None)
+    bsd.validate_catalog(doc)
+
+
+@pytest.mark.parametrize(
+    "mutate, field",
+    [
+        (lambda r: r.update(index=float("nan")), "index"),
+        (lambda r: r.update(index="27.8"), "index"),
+        (lambda r: r.update(index=True), "index"),
+        (lambda r: r.update(cost_per_task_usd=float("inf")), "cost_per_task_usd"),
+        (lambda r: r.update(cost_per_task_usd="0.58"), "cost_per_task_usd"),
+        (lambda r: r.update(source=7), "source"),
+        (lambda r: r.update(source=""), "source"),
+        (lambda r: r.update(as_of=7), "as_of"),
+        (lambda r: r.pop("as_of"), "as_of"),
+        (lambda r: r.pop("index"), "index"),
+        (lambda r: r.pop("cost_per_task_usd"), "cost_per_task_usd"),
+        (lambda r: r.update(effort="max"), "effort"),
+    ],
+)
+def test_validate_catalog_rejects_bad_unlabeled_reference(mutate, field):
+    doc = make_catalog()
+    record = {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "2026-11-04T12:27:03+00:00",
+    }
+    mutate(record)
+    doc["models"][0]["reasoning"] = _reasoning_block(aa_unlabeled=record)
+    with pytest.raises(ValueError, match=field):
+        bsd.validate_catalog(doc)
+
+
 def test_validate_catalog_requires_reasoning_and_quality_effort_keys():
     doc = make_catalog()
     doc["models"][0].pop("reasoning")

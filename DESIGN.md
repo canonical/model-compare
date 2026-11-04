@@ -205,6 +205,14 @@ Per-source matching and `as_of` semantics:
    only for a known non-reasoning model (`quality_effort: "none"`); for a
    reasoning model it is a reference only.
 
+AA also returns some rows with no effort label at all (no name
+parenthetical, no slug suffix — "GLM-5.3-Flash"). Such a row is not a depth
+record: the index cannot be tied to a selectable effort, so it never fills
+`QUAL` and never enters the weighted score. It is carried as
+`reasoning.aa_unlabeled` (`index`, `cost_per_task_usd`, `source`, `as_of`)
+and shown in the CLI and site depth detail as a reference, with a note that
+a selectable effort may score differently. `QUAL` stays `-`.
+
 Drift is always winner-vs-OR, and only like-for-like: the comparison is
 valid only when both sides are non-reasoning. When the winner is `aa` or
 `catalog` for a non-reasoning model at `quality_effort: "none"` and the OR
@@ -487,12 +495,14 @@ below).
 effective default, not the raw pre-select value),
 `supported_efforts` (expanded from `null` to the full gateway set, never
 `null`; an omitted field stays empty), `default_enabled`, `mandatory`,
-`supports_max_tokens` (the raw flags, for provenance) and `depths` (the
-per-depth records above; empty only when no source measured an effort). A
-non-reasoning model with an AA or OpenRouter record carries exactly one
-`none` record. `--json` emits the same block, with its own top-level
-`default_effort` duplicated so `data.json` rows keep it after the nested
-block is dropped.
+`supports_max_tokens` (the raw flags, for provenance), `depths` (the
+per-depth records above; empty only when no source measured an effort) and
+`aa_unlabeled` (an optional display-only reference: the AA index and AA
+`$/task` measured without an effort label, with its source and `as_of`; null
+when AA measured every row at a known effort). A non-reasoning model with an
+AA or OpenRouter record carries exactly one `none` record. `--json` emits the
+same block, with its own top-level `default_effort` duplicated so `data.json`
+rows keep it after the nested block is dropped.
 
 **The `pricing` block describes the baseline endpoint.** The baseline is the
 cheapest live (status-0) baseline-eligible endpoint at the model's default

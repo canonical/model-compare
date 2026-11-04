@@ -365,6 +365,22 @@
         return text + ".";
       }
 
+      // A display-only AA reference: the index was measured without a
+      // reasoning-effort label, so it cannot fill QUAL. The number is still
+      // worth surfacing because AA does rank the model, but the note must
+      // say plainly that a selectable effort may score differently.
+      function unlabeledNote(record) {
+        var index = finiteNumber(record && record.index);
+        if (index === null) return null;
+        var cost = finiteNumber(record && record.cost_per_task_usd);
+        var text = "AA index " + pyFixed(index, 1) + " without an effort label";
+        if (cost !== null) text += " (AA $" + pyFixed(cost, 2) + " per task)";
+        return (
+          text +
+          "; reference only, may not be the quality you get at a selectable effort."
+        );
+      }
+
       // QUAL cell tooltip: where the quality number came from (the source
       // label verbatim -- display strings from data.json are shown as-is)
       // and when it was checked, the effort it was measured at, plus any
@@ -376,12 +392,27 @@
       // name what it disagrees with, so the note is withheld rather than
       // leaking "NaN". A reasoning row's OR snapshot has no effort label,
       // so its reference is not a like-for-like drift check. Rows without
-      // provenance (older data.json files, unmatched models) return null:
-      // the cell keeps its bare value and the column header's title carries
-      // the hint.
+      // provenance (older data.json files, unmatched models) return null,
+      // unless AA ranked the model without an effort label: that reference
+      // explains why the cell is blank.
       function qualityTooltip(row) {
         var source = row.quality_source;
-        if (!source) return null;
+        if (!source) {
+          // QUAL is blank, but AA may still rank the model without an
+          // effort label. Say so here: otherwise the blank cell reads as
+          // missing data rather than a deliberate gate.
+          var unlabeled = row.reasoning && row.reasoning.aa_unlabeled;
+          var unlabeledIndex = finiteNumber(unlabeled && unlabeled.index);
+          if (unlabeledIndex === null) return null;
+          var checked = qualityAsOf("aa", unlabeled.as_of);
+          return (
+            "AA measures this model at " +
+            pyFixed(unlabeledIndex, 1) +
+            (checked === null ? "" : ", checked " + checked) +
+            ", without a reasoning-effort label, so QUAL stays blank; " +
+            "it may not be the quality you get at a selectable effort."
+          );
+        }
         var text = "AA intelligence index - source: " + String(source);
         var asOf = qualityAsOf(source, row.quality_as_of);
         if (asOf !== null) {
@@ -912,12 +943,23 @@
         heading.className = "detail-heading";
         heading.textContent = "Depth";
         td.appendChild(heading);
+        var note = unlabeledNote(entry.reasoning.aa_unlabeled);
+        if (note !== null) {
+          var noteP = document.createElement("p");
+          noteP.className = "endpoint-note";
+          noteP.textContent = note;
+          td.appendChild(noteP);
+        }
         var table = depthTable(entry);
         if (!table) {
-          var empty = document.createElement("p");
-          empty.className = "endpoint-note";
-          empty.textContent = "no depth data for this model.";
-          td.appendChild(empty);
+          // A reference note already says AA measured this model; the
+          // blanket "no depth data" line would contradict it.
+          if (note === null) {
+            var empty = document.createElement("p");
+            empty.className = "endpoint-note";
+            empty.textContent = "no depth data for this model.";
+            td.appendChild(empty);
+          }
         } else {
           td.appendChild(table);
         }

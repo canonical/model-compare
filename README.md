@@ -183,7 +183,10 @@ benchmark task, the cost ratio against the default depth, and the OpenCode
 variant suffix that selects it (`#max`). `--no-depths` hides the block; the
 `DEPTH` and `QUAL` columns stay. AA `$/task` is AA's measured benchmark cost
 at AA's reference price, not the OpenRouter per-token price, and it never
-enters the score. In OpenCode, append `#<effort>` to the model id
+enters the score. An AA row with no effort label (some models AA ranks only
+once) cannot fill `QUAL`: the depth block shows that index as a reference
+and says it may not be the quality you get at a selectable effort. In
+OpenCode, append `#<effort>` to the model id
 (`openrouter/anthropic/claude-sonnet-5.5#max`) to select a depth; the
 model-compare OpenCode plugin pins each alias to its scored effort using
 `quality_effort` in the schema-6 catalog.
