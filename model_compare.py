@@ -108,7 +108,7 @@ QUALITY_CATALOG_CACHE = "published-catalog"
 # A published catalog generated more than this many days ago is stale:
 # warn but use -- the records' as_of makes the staleness visible downstream.
 QUALITY_CATALOG_MAX_AGE_DAYS = 14
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 
 # opencode expects provider-qualified model ids: openrouter/<provider/model>.
@@ -270,12 +270,18 @@ def is_first_party(provider_name: str, author: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+_DEFAULT_PORTS = {"https": 443, "http": 80}
+
+
 class StripApiKeyRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Drop the AA API key when a redirect leaves the original origin.
+    """Drop API credentials when a redirect leaves the original origin.
 
     urllib copies custom request headers onto the redirected request even
-    across hosts. The key is kept only when scheme, host and port all match,
-    so a cross-host redirect or an https->http downgrade never carries it.
+    across hosts. The AA API key ("X-api-key") and the session-cost bearer
+    token ("Authorization") are kept only when scheme, host and effective
+    port all match -- an explicit default port counts as its scheme's
+    default -- so a cross-host redirect or an https->http downgrade never
+    carries them.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -285,14 +291,22 @@ class StripApiKeyRedirectHandler(urllib.request.HTTPRedirectHandler):
                 urllib.parse.urlsplit(req.full_url),
                 urllib.parse.urlsplit(new.full_url),
             )
-            same_origin = (old.scheme, old.hostname, old.port) == (
+            # An explicit default port is the scheme's default, not a
+            # different origin: https://host:443 == https://host.
+            same_origin = (
+                old.scheme,
+                old.hostname,
+                old.port or _DEFAULT_PORTS.get(old.scheme),
+            ) == (
                 dest.scheme,
                 dest.hostname,
-                dest.port,
+                dest.port or _DEFAULT_PORTS.get(dest.scheme),
             )
             if not same_origin:
                 # Request stores header names capitalize()d: "X-api-key".
                 new.remove_header("X-api-key")
+                # fetch_session_cost authenticates with a bearer token.
+                new.remove_header("Authorization")
         return new
 
 
@@ -1108,7 +1122,19 @@ def strip_permaslug_date(permaslug: str) -> str:
     return match.group(1) if match else permaslug
 
 
-def fetch_session_cost(args) -> dict | None:
+def catalog_pairing_entries(models):
+    """Catalog listings projected to the slug/permaslug pairing
+    _pair_permaslug_payloads consumes: models-API entries key on id and
+    canonical_slug, which the pairing reads as slug/permaslug. Entries
+    without an id cannot pair and are dropped."""
+    return [
+        {"slug": model["id"], "permaslug": model.get("canonical_slug") or ""}
+        for model in models or []
+        if isinstance(model, dict) and model.get("id")
+    ]
+
+
+def fetch_session_cost(args, models=None) -> dict | None:
     """Per-task session-cost medians from OpenRouter's dataset, or None.
 
     A separate published dimension (design section 4.8): the median USD
@@ -1117,21 +1143,30 @@ def fetch_session_cost(args) -> dict | None:
     (?app_slug=<harness>&limit=500&offset=k) regardless of the model list;
     pagination stops on a page shorter than the limit or once the next
     offset would exceed the API's 5000 cap. Cells key on dated permaslugs
-    (z-ai/glm-5.3-flash-20260826), stripped to the bare catalog id with
-    strip_permaslug_date; when several strip to the same id, the latest
-    date wins each turn-range cell (same rule as build_aa_benchmarks).
+    (z-ai/glm-5.3-flash-20260826), resolved to exact catalog slugs with
+    the same three-pass pairing as build_aa_benchmarks (#22): a blind
+    strip with latest-date-wins merges snapshots across listings of one
+    model family, the exact conflation #17 removed for the benchmarks.
+    ``models`` is the raw catalog listing (id/canonical_slug entries);
+    catalog_pairing_entries translates it to the slug/permaslug map the
+    pairing consumes. When several dated permaslugs pair with one slug,
+    the payloads are turn-range maps, not whole records, so the merge
+    unions the maps and each range resolves to the latest date's cell
+    (first wins on an equal date); an ambiguous strip with no catalog
+    pairing to disambiguate drops rather than guesses.
 
     Returns None (graceful degradation, design section 4.9) when no key is
     configured (the --openrouter-api-key flag, else OPENROUTER_API_KEY),
-    when the fetch fails after fetch_json's retries, or when the response
-    shape is unexpected -- a malformed payload must never crash the run.
-    The merged result is cached under "session-cost" with the standard TTL.
+    when the fetch fails after fetch_json's retries, when the response
+    shape is unexpected, or when no cell survives the pairing -- a
+    malformed payload must never crash the run. The merged result is
+    cached under "session-cost-v3" with the standard TTL.
     """
     api_key = args.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         return None
     if not args.no_cache:
-        cached = load_cache("session-cost", args.cache_ttl)
+        cached = load_cache("session-cost-v3", args.cache_ttl)
         if isinstance(cached, dict) and isinstance(cached.get("medians"), dict):
             return cached
     cells = []
@@ -1157,16 +1192,12 @@ def fetch_session_cost(args) -> dict | None:
         if len(data) < 500:
             break
         offset += 500
-    medians: dict[str, dict[str, float]] = {}
+    # Cells group one payload per permaslug before the pairing passes. A
+    # cell naming a new turn range is dropped (the catalog validator
+    # rejects unknown ranges, and session cost must never fail the
+    # publish), as is any non-finite median.
+    valid: dict[str, tuple[dict[str, float], str]] = {}
     seen_date: dict[tuple[str, str], str] = {}
-
-    def accept(bare, date, turn_range, median):
-        key = (bare, turn_range)
-        if key in seen_date and seen_date[key] >= date:
-            return
-        seen_date[key] = date
-        medians.setdefault(bare, {})[turn_range] = median
-
     for cell in cells:
         permaslug = cell.get("model_permaslug")
         turn_range = cell.get("turn_range")
@@ -1192,13 +1223,28 @@ def fetch_session_cost(args) -> dict | None:
             continue
         if not math.isfinite(median):
             continue
-        match = re.match(r"^(.*)-(\d{8})$", permaslug)
-        accept(
-            strip_permaslug_date(permaslug),
-            match.group(2) if match else "",
-            turn_range,
-            median,
-        )
+        bare = strip_permaslug_date(permaslug)
+        # strip_permaslug_date removed a trailing -YYYYMMDD exactly when
+        # the key was dated; the date is then the final 8 characters.
+        date = "" if bare == permaslug else permaslug[-8:]
+        # The dataset can republish a (permaslug, range) cell; the latest
+        # date wins, first on an equal date.
+        key = (permaslug, turn_range)
+        if key in seen_date and seen_date[key] >= date:
+            continue
+        seen_date[key] = date
+        if permaslug not in valid:
+            valid[permaslug] = ({}, date)
+        valid[permaslug][0][turn_range] = median
+    # Resolve keys to exact catalog slugs with the same three-pass pairing
+    # as build_aa_benchmarks (#22). The payloads are turn-range maps, so
+    # same-slug snapshots merge per range instead of replacing wholesale.
+    medians = {
+        slug: payload
+        for slug, (payload, _date) in _pair_permaslug_payloads(
+            valid, catalog_pairing_entries(models), merge=True
+        ).items()
+    }
     if not medians:
         warn("session-cost dataset returned no usable cells")
         return None
@@ -1233,7 +1279,7 @@ def fetch_session_cost(args) -> dict | None:
         "window_end_date": window_end_date,
         "medians": medians,
     }
-    save_cache("session-cost", result)
+    save_cache("session-cost-v3", result)
     return result
 
 
@@ -2836,7 +2882,7 @@ def base_model_id(model_id: str) -> str:
 AA_BENCHMARK_FIELDS = ("intelligence_index", "coding_index", "agentic_index")
 
 
-def _pair_permaslug_payloads(valid, models):
+def _pair_permaslug_payloads(valid, models, merge=None):
     """Resolve permaslug-keyed payloads to exact catalog slugs.
 
     ``valid`` maps a permaslug (or an undated catalog id) to
@@ -2846,6 +2892,14 @@ def _pair_permaslug_payloads(valid, models):
     documented on build_aa_benchmarks: permaslug pairs first (latest date
     wins per slug), then undated keys self-map, then an unambiguous dated
     strip. Returns ``{slug: (payload, date)}``.
+
+    ``merge`` changes only pass 1's same-slug resolution and is for
+    payloads that are turn-range maps (fetch_session_cost), not whole
+    records: same-slug snapshots union their range maps, each range
+    resolving to the latest date's cell (first wins on an equal date).
+    Whole-record payloads must keep the default, which replaces the
+    payload wholesale -- a record is self-contained, so mixing snapshots
+    would splice fields from different snapshots.
     """
     permaslug_to_slug = {}
     for entry in models or []:
@@ -2863,10 +2917,27 @@ def _pair_permaslug_payloads(valid, models):
 
     # Pass 1: permaslug keys pair with their own slug; same-slug
     # snapshots resolve to the latest date (first wins on an equal date).
+    # In merge mode a payload is a turn-range map, not a whole record, so
+    # same-slug snapshots union their maps per range instead of replacing.
     seen_date = {}
+    seen_range = {}
     for key, (payload, date) in valid.items():
         slug = permaslug_to_slug.get(key)
-        if slug is None or (slug in seen_date and seen_date[slug] >= date):
+        if slug is None:
+            continue
+        if merge:
+            claimed.add(slug)
+            merged, prev_date = paired.setdefault(slug, ({}, ""))
+            for turn_range, median in payload.items():
+                rkey = (slug, turn_range)
+                if rkey in seen_range and seen_range[rkey] >= date:
+                    continue
+                seen_range[rkey] = date
+                merged[turn_range] = median
+            if date > prev_date:
+                paired[slug] = (merged, date)
+            continue
+        if slug in seen_date and seen_date[slug] >= date:
             continue
         seen_date[slug] = date
         paired[slug] = (payload, date)
@@ -3139,10 +3210,7 @@ def build_reasoning_metadata(
             # permaslug is unpaired still resolves by its own id.
             valid[slug] = (entry, "")
 
-    catalog_pairs = [
-        {"slug": model["id"], "permaslug": model.get("canonical_slug") or ""}
-        for model in models
-    ]
+    catalog_pairs = catalog_pairing_entries(models)
     frontend_by_id = {
         candidate_id: entry
         for candidate_id, (entry, _date) in _pair_permaslug_payloads(
@@ -5687,7 +5755,7 @@ def run(args, models, or_cached) -> int:
     # entirely -- the medians never reach those outputs. Keyless,
     # fetch_session_cost returns None before any network or cache access.
     if args.catalog or args.json:
-        session_cost = fetch_session_cost(args)
+        session_cost = fetch_session_cost(args, models)
         # The key-presence fact distinguishes "skipped" from "unavailable";
         # same expression fetch_session_cost uses for its own guard.
         session_cost_mode = (

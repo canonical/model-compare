@@ -1917,7 +1917,7 @@ def test_pool_accounting_balances_with_endpoint_drops(monkeypatch, capsys):
 
 
 def test_catalog_schema_versions_are_in_lockstep():
-    assert mc.VERSION == "0.7.3"
+    assert mc.VERSION == "0.7.4"
     assert mc.CATALOG_QUALITY_SCHEMA_VERSION == mc.CATALOG_SCHEMA_VERSION == 6
     assert (
         mc.CATALOG_QUALITY_SCHEMA_VERSION
@@ -9270,7 +9270,7 @@ def test_version_flag():
         check=True,
     )
     # Literal pin: a release that forgets to bump VERSION fails here.
-    assert proc.stdout.strip() == "model-compare 0.7.3"
+    assert proc.stdout.strip() == "model-compare 0.7.4"
 
 
 # ---------------------------------------------------------------------------
@@ -9395,7 +9395,10 @@ def test_cache_writes_land_in_isolated_dir_not_real_cache(monkeypatch, tmp_path)
 def _redirect(old_url, new_url):
     import urllib.request
 
-    req = urllib.request.Request(old_url, headers={"x-api-key": "secret"})
+    req = urllib.request.Request(
+        old_url,
+        headers={"x-api-key": "secret", "Authorization": "Bearer session-key"},
+    )
     handler = mc.StripApiKeyRedirectHandler()
     return handler.redirect_request(req, None, 302, "Found", {}, new_url)
 
@@ -9405,6 +9408,11 @@ def test_redirect_same_host_keeps_api_key():
     assert new.get_header("X-api-key") == "secret"
 
 
+def test_redirect_same_host_keeps_bearer_token():
+    new = _redirect("https://api.example.test/a", "https://api.example.test/b")
+    assert new.get_header("Authorization") == "Bearer session-key"
+
+
 def test_redirect_cross_host_strips_api_key():
     new = _redirect("https://api.example.test/a", "https://evil.example.test/b")
     assert new is not None
@@ -9412,9 +9420,54 @@ def test_redirect_cross_host_strips_api_key():
     assert new.full_url == "https://evil.example.test/b"
 
 
+def test_redirect_cross_host_strips_bearer_token():
+    # fetch_session_cost authenticates with "Authorization: Bearer <key>",
+    # and urllib copies headers across hosts on redirect like any other.
+    new = _redirect("https://api.example.test/a", "https://evil.example.test/b")
+    assert new is not None
+    assert not new.has_header("Authorization")
+    assert new.full_url == "https://evil.example.test/b"
+
+
 def test_redirect_scheme_downgrade_strips_api_key():
     new = _redirect("https://api.example.test/a", "http://api.example.test/b")
     assert not new.has_header("X-api-key")
+
+
+def test_redirect_scheme_downgrade_strips_bearer_token():
+    new = _redirect("https://api.example.test/a", "http://api.example.test/b")
+    assert not new.has_header("Authorization")
+
+
+def test_redirect_explicit_default_port_keeps_credentials():
+    # An explicit default port is the scheme's default, not a different
+    # origin: https://host/a -> https://host:443/b keeps credentials.
+    new = _redirect("https://api.example.test/a", "https://api.example.test:443/b")
+    assert new is not None
+    assert new.get_header("X-api-key") == "secret"
+    assert new.get_header("Authorization") == "Bearer session-key"
+    # The http/80 equivalent.
+    new = _redirect("http://api.example.test/a", "http://api.example.test:80/b")
+    assert new is not None
+    assert new.get_header("X-api-key") == "secret"
+    assert new.get_header("Authorization") == "Bearer session-key"
+
+
+def test_redirect_default_port_to_explicit_keeps_credentials():
+    # The reverse direction: https://host:443/a -> https://host/b is the
+    # same origin too.
+    new = _redirect("https://api.example.test:443/a", "https://api.example.test/b")
+    assert new is not None
+    assert new.get_header("X-api-key") == "secret"
+    assert new.get_header("Authorization") == "Bearer session-key"
+
+
+def test_redirect_nondefault_port_strips_credentials():
+    # An explicit non-default port is a different origin: fail closed.
+    new = _redirect("https://api.example.test/a", "https://api.example.test:8443/b")
+    assert new is not None
+    assert not new.has_header("X-api-key")
+    assert not new.has_header("Authorization")
 
 
 def test_http_get_uses_redirect_stripping_opener(monkeypatch):
@@ -9563,23 +9616,180 @@ def _cost_payload(cells, as_of="2026-10-15T00:00:00Z"):
     }
 
 
-def test_session_cost_merges_dated_permaslugs(monkeypatch):
-    """Dated permaslugs strip to the bare id; the latest date wins the cell."""
+def test_session_cost_pairs_permaslugs_via_models(monkeypatch):
+    """The #22 shape: the base listing and its dated snapshot are distinct
+    catalog slugs, and the dataset publishes a cell for each permaslug.
+    Pairing through the catalog's own slug/permaslug map gives each slug
+    its own values -- under the old blind strip with latest-date-wins the
+    base listing borrowed the snapshot's cell and the snapshot got none."""
     payload = _cost_payload(
         [
-            _cost_cell("z-ai/glm-5.3-flash-20260826", "10-49-turns", 0.25),
-            _cost_cell("z-ai/glm-5.3-flash-20260901", "10-49-turns", 0.50),
+            _cost_cell("deepseek/deepseek-v4.1-flash-20260910", "10-49-turns", 0.50),
+            _cost_cell("deepseek/deepseek-v4.1-flash-20261017", "10-49-turns", 0.25),
         ]
     )
+    # models-API shape: id is the exact catalog slug, canonical_slug the
+    # dated permaslug (the snapshot listing's id carries its own -1017).
+    models = [
+        make_model(
+            id="deepseek/deepseek-v4.1-flash",
+            canonical_slug="deepseek/deepseek-v4.1-flash-20260910",
+        ),
+        make_model(
+            id="deepseek/deepseek-v4.1-flash-1017",
+            canonical_slug="deepseek/deepseek-v4.1-flash-20261017",
+        ),
+    ]
     monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
-    result = mc.fetch_session_cost(make_args(openrouter_api_key=None))
-    assert result["medians"] == {"z-ai/glm-5.3-flash": {"10-49-turns": 0.50}}
+    result = mc.fetch_session_cost(make_args(openrouter_api_key=None), models=models)
+    assert result is not None  # no usable cells means the pairing never engaged
+    assert result["medians"] == {
+        "deepseek/deepseek-v4.1-flash": {"10-49-turns": 0.50},
+        "deepseek/deepseek-v4.1-flash-1017": {"10-49-turns": 0.25},
+    }
     # The strip helper: dated -> bare, undated unchanged.
     assert (
         mc.strip_permaslug_date("z-ai/glm-5.3-flash-20260826") == "z-ai/glm-5.3-flash"
     )
     assert mc.strip_permaslug_date("z-ai/glm-5.3-flash") == "z-ai/glm-5.3-flash"
+
+
+def test_run_catalog_session_cost_pairs_models_api_shape(monkeypatch, capsys):
+    """End to end: run() hands the raw models-API listing to
+    fetch_session_cost; the pairing resolves dated permaslugs to exact
+    slugs and the catalog block carries each slug's own medians."""
+    models = [
+        make_model(
+            id="deepseek/deepseek-v4.1-flash",
+            name="DeepSeek: DeepSeek V4.1 Flash",
+            canonical_slug="deepseek/deepseek-v4.1-flash-20260910",
+        ),
+        make_model(
+            id="deepseek/deepseek-v4.1-flash-1017",
+            name="DeepSeek: DeepSeek V4.1 Flash (1017)",
+            canonical_slug="deepseek/deepseek-v4.1-flash-20261017",
+        ),
+    ]
+    _stub_endpoint_pipeline(
+        monkeypatch, models, {m["id"]: _endpoint_stage_eps() for m in models}
+    )
+    payload = _cost_payload(
+        [
+            _cost_cell("deepseek/deepseek-v4.1-flash-20260910", "10-49-turns", 0.50),
+            _cost_cell("deepseek/deepseek-v4.1-flash-20261017", "10-49-turns", 0.25),
+        ]
+    )
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    args = make_args(min_context=0, catalog=True, openrouter_api_key="sk-or")
+    assert mc.run(args, models, False) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["sources"]["session_cost"] == "ok"
+    assert doc["session_cost"]["medians"] == {
+        "deepseek/deepseek-v4.1-flash": {"10-49-turns": 0.50},
+        "deepseek/deepseek-v4.1-flash-1017": {"10-49-turns": 0.25},
+    }
+
+
+def test_session_cost_merges_disjoint_turn_ranges_across_permaslugs(monkeypatch):
+    """One slug, several dated permaslugs with disjoint turn-range coverage:
+    the merge unions the range maps -- each range resolving to the latest
+    date's cell (first wins on an equal date) -- instead of pass 1
+    replacing the whole payload with the latest listing, which silently
+    dropped the older permaslug's ranges."""
+    payload = _cost_payload(
+        [
+            _cost_cell("acme/m-20260826", "1-turn", 0.10),
+            _cost_cell("acme/m-20260826", "10-49-turns", 0.30),
+            _cost_cell("acme/m-20260901", "10-49-turns", 0.50),
+        ]
+    )
+    # The same id listed twice with different canonical slugs (variant
+    # listings repeat an identical id): both permaslugs pair to one slug.
+    models = [
+        make_model(id="acme/m", canonical_slug="acme/m-20260826"),
+        make_model(id="acme/m", canonical_slug="acme/m-20260901"),
+    ]
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    result = mc.fetch_session_cost(make_args(openrouter_api_key=None), models=models)
+    assert result is not None
+    assert result["medians"] == {
+        "acme/m": {"1-turn": 0.10, "10-49-turns": 0.50},
+    }
+
+
+def test_session_cost_ambiguous_strip_dropped(monkeypatch, capsys):
+    """The #22 shape with no catalog pairing to disambiguate: two dated
+    permaslugs strip to one id, so neither may claim it (no borrowing) --
+    the medians degrade to None rather than a merged block."""
+    payload = _cost_payload(
+        [
+            _cost_cell("deepseek/deepseek-v4.1-flash-20261017", "10-49-turns", 0.25),
+            _cost_cell("deepseek/deepseek-v4.1-flash-20260910", "10-49-turns", 0.50),
+        ]
+    )
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    assert mc.fetch_session_cost(make_args(openrouter_api_key=None)) is None
+    assert "no usable cells" in capsys.readouterr().err
+
+
+def test_session_cost_undated_and_unambiguous_strip(monkeypatch):
+    """An undated key self-maps; a dated key the catalog does not pair
+    still strips when the stripped id is unclaimed and unambiguous
+    (mirrors build_aa_benchmarks passes 2 and 3)."""
+    payload = _cost_payload(
+        [
+            _cost_cell("acme/model-a", "1-turn", 0.10),
+            _cost_cell("acme/legacy-20250101", "10-49-turns", 0.20),
+        ]
+    )
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    result = mc.fetch_session_cost(make_args(openrouter_api_key=None), models=[])
+    assert result["medians"] == {
+        "acme/model-a": {"1-turn": 0.10},
+        "acme/legacy": {"10-49-turns": 0.20},
+    }
+
+
+def test_session_cost_cache_key_is_v3_and_never_reads_v2(monkeypatch, tmp_path):
+    """The cache key is session-cost-v3: a payload cached under v2 was
+    written by the flawed pre-fix build and must never be served; fresh
+    results land under v3. (v2 was already the bump from v1; v3 is the
+    merge-strategy fix's own bump, unreleased as of 0.7.3.)"""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    args = make_args(openrouter_api_key=None, no_cache=False, cache_ttl=10_000)
+    # A stale v2 payload: if load_cache("session-cost-v2") ever runs, this
+    # wrong-shaped envelope would be served instead of the fetch.
+    v2_path = Path(mc.cache_path("session-cost-v2"))
+    v2_path.parent.mkdir(parents=True, exist_ok=True)
+    v2_path.write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {
+                    "attribution": "stale",
+                    "medians": {"deepseek/deepseek-v4.1-flash": {"10-49-turns": 99.0}},
+                },
+            }
+        )
+    )
+    payload = _cost_payload([_cost_cell("acme/model-a", "1-turn", 0.10)])
+    calls = []
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: calls.append(k) or payload)
+    result = mc.fetch_session_cost(args)
+    # The fetch ran (the v2 payload was not served) and the result is fresh.
+    assert len(calls) == 1
+    assert result["medians"] == {"acme/model-a": {"1-turn": 0.10}}
+    # The fresh result is cached under v3 and served from there next time.
+    v3_path = Path(mc.cache_path("session-cost-v3"))
+    assert v3_path.exists()
+    cached = mc.fetch_session_cost(args)
+    assert len(calls) == 1  # no second fetch: the v3 payload was served
+    assert cached["medians"] == {"acme/model-a": {"1-turn": 0.10}}
 
 
 def test_session_cost_keyless_returns_none(monkeypatch):
@@ -9750,7 +9960,9 @@ def _offline_catalog_doc(
     if api_key is None:
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     else:
-        monkeypatch.setattr(mc, "fetch_session_cost", lambda args: session_cost)
+        monkeypatch.setattr(
+            mc, "fetch_session_cost", lambda args, models=None: session_cost
+        )
     args = make_args(min_context=0, catalog=True, openrouter_api_key=api_key)
     assert mc.run(args, models, False) == 0
     return json.loads(capsys.readouterr().out)
@@ -9922,7 +10134,7 @@ def test_json_rows_carry_session_cost_usd(monkeypatch, capsys):
         models,
         {"z-ai/glm": endpoints, "acme/plain": _endpoint_stage_eps()},
     )
-    monkeypatch.setattr(mc, "fetch_session_cost", lambda args: envelope)
+    monkeypatch.setattr(mc, "fetch_session_cost", lambda args, models=None: envelope)
     args = make_args(min_context=0, json=True, openrouter_api_key="sk-or")
     assert mc.run(args, models, False) == 0
     rows = {row["model"]: row for row in json.loads(capsys.readouterr().out)}
