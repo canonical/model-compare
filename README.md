@@ -293,7 +293,7 @@ catalog:
 |------|------------|
 | [`litellm_rate_card.json`](https://canonical.github.io/model-compare/litellm_rate_card.json) | a pure LiteLLM cost-map fragment, one entry per ranked candidate, keyed `openrouter/<catalog id>` |
 | [`litellm_steering.json`](https://canonical.github.io/model-compare/litellm_steering.json) | the OpenRouter preference object, a strict single-endpoint profile, the reasoning effort used for the ranking, and `_meta` provenance |
-| [`litellm.json`](https://canonical.github.io/model-compare/litellm.json) | LiteLLM's upstream map merged with our 81-entry fragment |
+| [`litellm.json`](https://canonical.github.io/model-compare/litellm.json) | LiteLLM's upstream map merged with our fragment |
 | [`litellm_merge_status.json`](https://canonical.github.io/model-compare/litellm_merge_status.json) | whether the merged map was rebuilt, frozen on a collision, or skipped |
 
 The rate card is a fragment: LiteLLM rejects a custom map that is too small to
@@ -337,10 +337,13 @@ not send `none` when `mandatory` is true, and do not use LiteLLM's
 `reasoning_effort` field for a literal `max` -- LiteLLM rewrites it to
 `xhigh`. Use `extra_body={"reasoning": {"effort": "max"}}`.
 
-Known limits: the fragment covers the 81 ranked candidates, not the filtered
-models; it has no rank, score, quality or provenance fields; and LiteLLM can
-express only one off-peak rate level. A model with several distinct off-peak
-levels is published without `off_peak_pricing`, and a model with both tiers
+Known limits: the fragment covers the ranked candidates only, not the
+filtered models. The candidate count changes with the pool; read the rate
+card's key count or `_meta.entries` in the steering file rather than assuming
+a fixed size. The fragment has no rank, score, quality or provenance fields,
+and LiteLLM can express only one off-peak rate level. A model with several
+distinct off-peak levels is published without `off_peak_pricing`, and a model
+with both tiers
 and a schedule keeps its tiers and loses the off-peak block. Both cases are
 recorded in `_meta.warnings`.
 
