@@ -1917,7 +1917,7 @@ def test_pool_accounting_balances_with_endpoint_drops(monkeypatch, capsys):
 
 
 def test_catalog_schema_versions_are_in_lockstep():
-    assert mc.VERSION == "0.7.7"
+    assert mc.VERSION == "0.7.8"
     assert mc.CATALOG_QUALITY_SCHEMA_VERSION == mc.CATALOG_SCHEMA_VERSION == 6
     assert (
         mc.CATALOG_QUALITY_SCHEMA_VERSION
@@ -2460,7 +2460,8 @@ def test_print_table_color_rules(capsys):
     header = lines[0]
     assert header.startswith("\x1b[1mRANK\x1b[0m")
     assert "SCORE" in header
-    assert re.search(r"\x1b\[1mSCORE\x1b\[0m", header)
+    # Tolerant of padding inside the bold wrap (fixture-width agnostic).
+    assert re.search(r"\x1b\[1m\s*SCORE\s*\x1b\[0m", header)
     first_row = next(line for line in lines if top[0]["id"] in line)
     assert "\x1b[32m" in first_row
     rank_cell = first_row.split("  ")[0]
@@ -9347,7 +9348,7 @@ def test_version_flag():
         check=True,
     )
     # Literal pin: a release that forgets to bump VERSION fails here.
-    assert proc.stdout.strip() == "model-compare 0.7.7"
+    assert proc.stdout.strip() == "model-compare 0.7.8"
 
 
 # ---------------------------------------------------------------------------
@@ -9794,6 +9795,65 @@ def test_session_cost_merges_disjoint_turn_ranges_across_permaslugs(monkeypatch)
     assert result is not None
     assert result["medians"] == {
         "acme/m": {"1-turn": 0.10, "10-49-turns": 0.50},
+    }
+
+
+def test_pair_permaslug_merge_unions_undated_self_map_into_paired_slug():
+    """Merge mode unions every pass's ranges for a slug: pass 1 pairs the
+    dated permaslug, then the undated bare id -- the same slug -- unions
+    its own ranges in pass 2 instead of being dropped as claimed."""
+    valid = {
+        "acme/m-20260826": ({"10-49-turns": 0.42}, "20260826"),
+        "acme/m": ({"1-turn": 0.01}, ""),
+    }
+    models = [{"slug": "acme/m", "permaslug": "acme/m-20260826"}]
+    assert mc._pair_permaslug_payloads(valid, models, merge=True) == {
+        "acme/m": ({"10-49-turns": 0.42, "1-turn": 0.01}, "20260826")
+    }
+    # Non-merge (AA whole-record) behavior is untouched: the claimed
+    # undated key still drops rather than unioning into the record.
+    assert mc._pair_permaslug_payloads(valid, models) == {
+        "acme/m": ({"10-49-turns": 0.42}, "20260826")
+    }
+
+
+def test_pair_permaslug_merge_unions_dated_strip_into_undated_self_map():
+    """models=None mirror: the undated key self-maps (pass 2) and claims
+    the id, then the single unambiguous dated strip (pass 3) unions its
+    ranges into that id instead of being dropped as claimed."""
+    valid = {
+        "acme/m-20260826": ({"10-49-turns": 0.42}, "20260826"),
+        "acme/m": ({"1-turn": 0.01}, ""),
+    }
+    assert mc._pair_permaslug_payloads(valid, None, merge=True) == {
+        "acme/m": ({"1-turn": 0.01, "10-49-turns": 0.42}, "20260826")
+    }
+    # Non-merge mirror: the strip stays blocked by the claimed bare id.
+    assert mc._pair_permaslug_payloads(valid, None) == {
+        "acme/m": ({"1-turn": 0.01}, "")
+    }
+    # The merge never writes into the caller's payload dicts.
+    assert valid["acme/m"] == ({"1-turn": 0.01}, "")
+
+
+def test_session_cost_merges_mixed_dated_and_undated_cells(monkeypatch):
+    """The dataset sometimes publishes the bare id's cells alongside the
+    dated permaslug's: the catalog pairing (pass 1) and the undated
+    self-map (pass 2) must union their ranges, not silently drop one
+    shape (the pre-pairing code merged both)."""
+    payload = _cost_payload(
+        [
+            _cost_cell("acme/m-20260826", "10-49-turns", 0.42),
+            _cost_cell("acme/m", "1-turn", 0.01),
+        ]
+    )
+    models = [make_model(id="acme/m", canonical_slug="acme/m-20260826")]
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+    result = mc.fetch_session_cost(make_args(openrouter_api_key=None), models=models)
+    assert result is not None
+    assert result["medians"] == {
+        "acme/m": {"10-49-turns": 0.42, "1-turn": 0.01},
     }
 
 
@@ -11022,6 +11082,15 @@ def test_depth_detail_empty_prints_nothing(capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_print_table_depths_no_candidates_no_stray_blank(capsys):
+    # With --depths but no ranked candidates, the depth separator must
+    # not print: print_depth_detail returns early on an empty top.
+    mc.print_table([], mc.PRIORITY_WEIGHTS["balanced"], None, depths=True)
+    out = capsys.readouterr().out
+    assert "Depth details" not in out
+    assert not out.endswith("\n\n")
+
+
 def test_run_omits_depth_detail_by_default(monkeypatch, capsys):
     models = [make_model(id="acme/model-a", name="Acme: A")]
     _stub_quality_run(monkeypatch, models, aa_raises=True)
@@ -11232,7 +11301,8 @@ def test_legend_alignment_uses_plain_text_width(capsys):
     lines = capsys.readouterr().out.splitlines()
     plain = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in lines]
     terms = [
-        line for line in plain
+        line
+        for line in plain
         if line.startswith("QUALITY") or line.startswith("$IN/$OUT")
     ]
     assert len(terms) == 2
@@ -11344,7 +11414,8 @@ def test_depth_detail_header_row_is_bold_over_dim_rule(capsys):
     assert f"{mc.SGR_BOLD}effort" in header
     assert f"{mc.SGR_BOLD}AA idx" in header
     rule = next(
-        line for line in lines
+        line
+        for line in lines
         if re.sub(r"\x1b\[[0-9;]*m", "", line).strip().startswith("-----")
     )
     assert mc.SGR_DIM in rule
@@ -11380,9 +11451,7 @@ def test_depth_detail_legend_is_chunked_one_term_per_line(capsys):
 
 def test_legends_quote_the_default_marker(capsys):
     # Quoted like the other literal markers ("-"), in both legends.
-    mc.print_table(
-        _scored_candidates()[:1], mc.PRIORITY_WEIGHTS["balanced"], None
-    )
+    mc.print_table(_scored_candidates()[:1], mc.PRIORITY_WEIGHTS["balanced"], None)
     main = capsys.readouterr().out
     assert '"*" = OpenRouter' in main
     assert " * = OpenRouter" not in main
@@ -11391,11 +11460,42 @@ def test_legends_quote_the_default_marker(capsys):
     detail = capsys.readouterr().out
     assert '"*" marks OpenRouter' in detail
 
+    mc.print_table(
+        _scored_candidates()[:1],
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        detail="simple",
+    )
+    simple = capsys.readouterr().out
+    # The simple legend's mention of the marker is quoted too.
+    assert '"*" marker' in simple
+    assert "or * marker" not in simple
+
 
 def test_depth_detail_legend_uses_main_legend_highlighting(capsys):
     mc.print_depth_detail([_cand("acme/model-a", 50.0)], style=mc.Style(True))
     out = capsys.readouterr().out
     assert f"{mc.SGR_CYAN}#effort{mc.SGR_RESET}" in out
+
+
+def test_depth_legend_terms_expand_markers_and_size_from_plain_text(
+    monkeypatch, capsys
+):
+    # Term labels go through legend_plain like the main legend's: markup
+    # expands, never leaks, and the hanging indent is sized from the
+    # plain term, not the raw markup length.
+    monkeypatch.setattr(
+        mc,
+        "DEPTH_LEGEND",
+        (("{b:effort}", ["deepest first", "second line"]),),
+    )
+    mc.print_depth_detail([_cand("acme/model-a", 50.0)], style=mc.Style(True))
+    lines = capsys.readouterr().out.splitlines()
+    assert not any("{b:" in line or "{d:" in line for line in lines)
+    label = next(line for line in lines if "deepest first" in line)
+    assert f"{mc.SGR_BOLD}effort{mc.SGR_RESET}" in label
+    cont = next(line for line in lines if line.strip() == "second line")
+    assert cont == " " * (len("effort") + 2) + "second line"
 
 
 def test_best_and_json_print_no_depth_detail(monkeypatch, capsys):
@@ -11662,6 +11762,18 @@ def _deal_row(**overrides):
     return row
 
 
+def test_deals_legend_expands_markers_instead_of_leaking(monkeypatch, capsys):
+    # The inline markers are the one rule set for every legend, deals
+    # included: markup must expand, never leak, and the label column is
+    # sized from plain text.
+    monkeypatch.setattr(mc, "DEALS_LEGEND", (("{b:OFF-PEAK}", "{d:-} = none"),))
+    mc.print_deals([_deal_row()], style=mc.Style(True))
+    out = capsys.readouterr().out
+    assert "{b:" not in out and "{d:" not in out
+    assert f"{mc.SGR_BOLD}OFF-PEAK{mc.SGR_RESET}" in out
+    assert f"{mc.SGR_DIM}-{mc.SGR_RESET}" in out
+
+
 def test_print_deals_color_header_and_placeholders(capsys):
     mc.print_deals(
         [_deal_row(), _deal_row(id="acme/unknown", quality=None, score=None)],
@@ -11671,7 +11783,8 @@ def test_print_deals_color_header_and_placeholders(capsys):
     header = next(line for line in lines if "SCORE" in line and "MODEL" in line)
     assert re.search(r"\x1b\[1m\s*OFF-PEAK\s*\x1b\[0m", header)
     assert re.search(r"\x1b\[1m\s*QUAL\s*\x1b\[0m", header)
-    assert re.search(r"\x1b\[1mSCORE\x1b\[0m", header)
+    # Tolerant of padding inside the bold wrap (fixture-width agnostic).
+    assert re.search(r"\x1b\[1m\s*SCORE\s*\x1b\[0m", header)
     known = next(line for line in lines if "acme/deal" in line)
     assert re.search(r"\x1b\[1m\s*-45%\x1b\[0m", known)
     assert "\x1b[2m" not in known

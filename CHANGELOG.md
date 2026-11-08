@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.8] - 2026-11-08
+
+### Fixed
+
+- Tool version is `model-compare 0.7.8`.
+- Session-cost medians no longer lose whole turn ranges when one slug's
+  cells arrive through different pairing passes. The merge path unions
+  ranges for an undated key that names an already-paired slug (pass 2)
+  and for the single unambiguous dated strip onto an already-paired id
+  (pass 3), not just across same-slug snapshots in pass 1. Ambiguous
+  strips still drop, and the caller's payload dictionaries are never
+  mutated.
+- The simple-view legend quotes the default-effort marker (`"*"`) like
+  the expert and depth legends.
+- `--depths` with no ranked candidates no longer leaves a stray blank
+  line where the depth section would have been.
+- The deals legend runs through the same marker renderer as the other
+  legends, and both it and the depth legend size their label column from
+  the unmarked text, so an inline marker cannot leak literally or skew
+  alignment.
+- `web/publish.py`'s module docstring lists `faq.html` among the
+  published files.
+
 ## [0.7.7] - 2026-11-08
 
 ### Fixed
