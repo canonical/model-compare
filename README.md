@@ -103,7 +103,7 @@ legend, leaving only the table(s).
 | `--max-age-days D` | off | drop models listed more than N days ago |
 | `--quality-ref N` | 70 | index counting as full quality score |
 | `--reasoning-effort E` | `default` | choices: `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; `default` scores each model at its best measured selectable effort; an explicit effort selects exactly that effort and drops models that cannot run it (it never substitutes another effort) |
-| `--no-depths` | off | hide the per-model depth detail below the table (the `DEPTH` and `QUAL` columns stay) |
+| `--depths` | off | also print the per-model depth detail below the table (the `DEPTH` and `QUAL` columns are always shown) |
 | `--aa-api-key KEY` | `$AA_API_KEY` | Artificial Analysis API key |
 | `--exclude-free` | off | drop `:free` variants |
 | `--include-batch` | off | keep `:batch` (async completion) variants; no effect without `--no-zdr`, as the ZDR list has no `:batch` ids today |
@@ -180,8 +180,9 @@ default for information only). In Simple view the effort appears after the
 quality as `· <effort>`. Below the table, a depth block per top-N model lists
 every supported and measured effort with its AA index, its AA cost per
 benchmark task, the cost ratio against the default depth, and the OpenCode
-variant suffix that selects it (`#max`). `--no-depths` hides the block; the
-`DEPTH` and `QUAL` columns stay. AA `$/task` is AA's measured benchmark cost
+variant suffix that selects it (`#max`). The block is off by default;
+`--depths` turns it on, and the `DEPTH` and `QUAL` columns are always
+shown. AA `$/task` is AA's measured benchmark cost
 at AA's reference price, not the OpenRouter per-token price, and it never
 enters the score. An AA row with no effort label (some models AA ranks only
 once) cannot fill `QUAL`: the depth block shows that index as a reference

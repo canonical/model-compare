@@ -320,15 +320,28 @@ considering non-ZDR models; pass `--no-zdr` to explicitly consider everything.
 ## CLI output
 
 The plain table path splits across the two streams. stdout carries the table,
-the `Weights:` line, the wrapped `Quality source:` block and the legend
+the `Weights:` line, the wrapped `Quality source:` block, the column legend
+right under them, and the depth details when `--depths` is passed
 (`--bare` keeps only the table(s); `--off-peak` adds the deals table, with
 its title and legend dropped under `--bare`). stderr
 carries the cache note, the `N of M listed models ranked` line and the dim
 `(dropped: …)` line, which is omitted when nothing was dropped. Piping stdout
-does not change which lines go where.
+does not change which lines go where, because a pipe never pages.
 
-Color is SGR attributes only (bold, dim, green, yellow), never pinned hex, so
-the terminal theme picks the actual hues and light themes stay readable.
+When the pager is active the whole human stream is paged, summary included:
+stderr notes printed before the pager starts would be painted over by the
+pager's first screen and never reach scrollback, so the same lines are
+rendered into the pager's stream above the table instead.
+
+Color is SGR attributes only (bold, dim, green, yellow, cyan), never pinned
+hex, so the terminal theme picks the actual hues and light themes stay
+readable. Legend text is marked up with inline markers rather than styled
+ad hoc: `{b:…}` bold, `{c:…}` cyan, `{d:…}` dim, `{y:…}` yellow, rendered by
+`render_legend`. Term labels are bold, CLI options and typed tokens
+(`--depths`, `#effort`) cyan, literal values and the `-` placeholder dim,
+symbol markers (`*`, `!`) yellow. Bold is reserved for labels and headers,
+so an option never reads as another label; the depth detail's `select`
+column carries no styling of its own.
 `--color auto` colors a stream only when that stream is a TTY and `NO_COLOR`
 is unset or empty — the built-in pager counts as the terminal it feeds —;
 `on` forces it and `off` never does. Column widths are computed from the raw
@@ -341,8 +354,9 @@ and `--best` still prints only the opencode id.
 On a terminal the human output runs through a pager: `$PAGER` verbatim when
 set (an empty value counts as unset), else
 `less --quit-if-one-screen --RAW-CONTROL-CHARS --no-init` — page only what
-exceeds one screen, keep the SGR codes, leave the screen intact on exit so
-the stderr notes survive. A pager that cannot start falls back to direct
+exceeds one screen, keep the SGR codes, leave the screen intact on exit.
+The summary travels through the pager (see above), so nothing depends on
+stderr surviving. A pager that cannot start falls back to direct
 printing; quitting early truncates the unwritten tail; Ctrl-C terminates the
 pager and exits 130. `--no-pager` skips the pager, and `--best`, `--json`,
 `--catalog` never page. The pager is spawned with `LESS=FRX` when `$LESS`
