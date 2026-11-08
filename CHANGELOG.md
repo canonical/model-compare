@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-11-08
+
+### Fixed
+
+- Tool version is `model-compare 0.7.4`.
+- Redirect handling never leaks the session-cost bearer token: the
+  cross-origin redirect guard strips `Authorization` in addition to
+  `X-api-key`, so a cross-host redirect or an https->http downgrade from
+  the session-cost fetch (which authenticates with `Authorization: Bearer
+  <key>`) no longer forwards the credential (issue #16). An explicit
+  default port (`https://host:443/`) counts as the scheme's default, so
+  credentials survive that same-origin redirect; a non-default port still
+  strips.
+- Session-cost medians resolve permaslug keys with the same three-pass
+  catalog pairing as the AA benchmarks instead of blind stripping with
+  latest-date-wins, which merged snapshots across listings of one model
+  family (issue #22, the #17 conflation shape). The pairing consumes the
+  raw models-API listing (`id`/`canonical_slug`) translated by the shared
+  `catalog_pairing_entries` helper, so it engages in production exactly
+  as in the reasoning-metadata path. When several dated permaslugs pair
+  with one slug, the payloads are turn-range maps, so they merge per
+  range (each range resolves to the latest date's cell) instead of the
+  latest listing replacing the whole map. An ambiguous strip with no
+  catalog pairing to disambiguate drops rather than guesses; the result
+  cache key moved to `session-cost-v3` so cached shapes from earlier
+  builds of this release are never read.
+
 ## [0.7.3] - 2026-11-04
 
 ### Added
