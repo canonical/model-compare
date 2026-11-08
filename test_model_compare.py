@@ -1917,7 +1917,7 @@ def test_pool_accounting_balances_with_endpoint_drops(monkeypatch, capsys):
 
 
 def test_catalog_schema_versions_are_in_lockstep():
-    assert mc.VERSION == "0.7.5"
+    assert mc.VERSION == "0.7.6"
     assert mc.CATALOG_QUALITY_SCHEMA_VERSION == mc.CATALOG_SCHEMA_VERSION == 6
     assert (
         mc.CATALOG_QUALITY_SCHEMA_VERSION
@@ -9301,7 +9301,7 @@ def test_version_flag():
         check=True,
     )
     # Literal pin: a release that forgets to bump VERSION fails here.
-    assert proc.stdout.strip() == "model-compare 0.7.5"
+    assert proc.stdout.strip() == "model-compare 0.7.6"
 
 
 # ---------------------------------------------------------------------------

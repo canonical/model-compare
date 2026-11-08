@@ -402,6 +402,7 @@ def build_site(output_dir: Path) -> None:
 
         for name in (
             "index.html",
+            "faq.html",
             "style.css",
             "app.js",
             "favicon.svg",
@@ -418,6 +419,7 @@ def build_site(output_dir: Path) -> None:
         "highlights.json",  # ditto via PREV_HIGHLIGHTS_URL
         "best.txt",
         "index.html",
+        "faq.html",
         "style.css",
         "app.js",
         "favicon.svg",

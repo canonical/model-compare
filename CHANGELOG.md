@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-11-08
+
+### Added
+
+- Tool version is `model-compare 0.7.6`.
+- README: a "Precision and routing" section explains what `PREC` and the
+  `!` marker mean, why the ranked price can differ from the bill, and how
+  to pin routing with the per-model `steering` block -- including the
+  OpenAI SDK `extra_body` gotcha and OpenCode's plugin `body` option
+  (issue #20).
+- Site: a `faq.html` page, linked from the index footer, answers the
+  routing questions (precision and `!`, price versus bill, pinning with
+  `steering` or the plugin, verifying the serving endpoint) and covers
+  depths and variants. It ships with the other static site assets.
+- `web/README.md` lists the new page among the published files.
+
 ## [0.7.5] - 2026-11-08
 
 ### Changed

@@ -584,6 +584,7 @@ PUBLISH_ARTIFACTS = (
     "highlights.json",
     "best.txt",
     "index.html",
+    "faq.html",
     "style.css",
     "app.js",
     "favicon.svg",
@@ -600,6 +601,44 @@ FAVICON_FILES = (
     "favicon-32x32.png",
     "apple-touch-icon.png",
 )
+
+
+def test_publish_copies_the_faq_page(tmp_path, monkeypatch):
+    # The FAQ is a static sibling of index.html; a page that is not in the
+    # copy list and the artifact check would 404 in production while
+    # passing every local test (issue #20).
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run(calls))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    out = tmp_path / "site"
+    publish.build_site(out)
+    assert (out / "faq.html").is_file()
+
+
+def test_faq_page_is_linked_from_the_index_footer_and_answers_routing():
+    site = Path(__file__).resolve().parent / "site"
+    faq = (site / "faq.html").read_text(encoding="utf-8")
+    index = (site / "index.html").read_text(encoding="utf-8")
+    # Linked from the footer, not buried in the OpenCode section.
+    footer_at = index.index("<footer>")
+    assert 'href="faq.html"' in index[footer_at:]
+    # Same shell as the index page: shared stylesheet, same CSP posture.
+    assert 'href="style.css"' in faq
+    assert "Content-Security-Policy" in faq
+    assert "default-src 'none'" in faq
+    # The four questions the issue asks for, plus depths and variants.
+    for needle in (
+        "PREC",
+        "cheapest",
+        "steering",
+        "extra_body",
+        "provider",
+        "--json",
+        "catalog.json",
+        "#max",
+        ":free",
+    ):
+        assert needle in faq, needle
 
 
 def test_publish_healthy_aa_v5_fixture(tmp_path, monkeypatch):
