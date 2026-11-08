@@ -108,7 +108,7 @@ QUALITY_CATALOG_CACHE = "published-catalog"
 # A published catalog generated more than this many days ago is stale:
 # warn but use -- the records' as_of makes the staleness visible downstream.
 QUALITY_CATALOG_MAX_AGE_DAYS = 14
-VERSION = "0.7.6"
+VERSION = "0.7.7"
 USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 
 # opencode expects provider-qualified model ids: openrouter/<provider/model>.
@@ -4471,7 +4471,7 @@ LEGENDS = {
         (
             "DEPTH",
             [
-                "reasoning effort QUAL was measured at; {y:*} = OpenRouter's default (informational)",
+                'reasoning effort QUAL was measured at; {y:"*"} = OpenRouter\'s default (informational)',
                 "{d:-} = no known effort; {c:--depths} shows the depth detail",
             ],
         ),
@@ -4619,22 +4619,26 @@ def print_table(
     header = []
     for col in columns:
         text = col.ljust(widths[col])
-        header.append(text if col == "SCORE" else style.bold(text))
+        header.append(style.bold(text))
     print("  ".join(header))
     print(style.dim("  ".join("-" * widths[col] for col in columns)))
     for rank, row in enumerate(rows, 1):
         cells = []
         for col in columns:
             text = pad(col, row[col])
+            # The risk marker is a symbol marker: yellow in the cell just
+            # as the legend paints it, inside or outside the green #1 row.
+            risk_marker = col == "PREC" and row[col].endswith("!")
+            body = text[:-1] if risk_marker else text
             if col == "RANK":
-                text = style.bold(text)
+                body = style.bold(body)
                 if rank == 1:
-                    text = style.green(text)
+                    body = style.green(body)
             elif rank == 1:
-                text = style.green(text)
+                body = style.green(body)
             elif col in ("QUAL", "QUALITY") and row[col] == "-":
-                text = style.dim(text)
-            cells.append(text)
+                body = style.dim(body)
+            cells.append(body + (style.yellow("!") if risk_marker else ""))
         print("  ".join(cells))
     if bare:
         return
@@ -4727,7 +4731,7 @@ def print_deals(rows, style=None, bare=False):
         # Every deals header is left-aligned (matching the main table and
         # the frozen mockup); only the data cells keep numeric right-align.
         text = col.ljust(widths[col])
-        header.append(text if col == "SCORE" else style.bold(text))
+        header.append(style.bold(text))
     print("  ".join(header))
     print(style.dim("  ".join("-" * widths[col] for col in DEALS_COLUMNS)))
     for cell in cells:
@@ -4766,7 +4770,7 @@ DEPTH_LEGEND = (
         "select",
         [
             'the OpenCode variant suffix that pins the depth; {y:"-"} = not',
-            "selectable; {y:*} marks OpenRouter's default, and appending",
+            'selectable; {y:"*"} marks OpenRouter\'s default, and appending',
             "{c:#effort} to the model id pins it in OpenCode",
         ],
     ),
@@ -4946,9 +4950,7 @@ def print_depth_detail(top, style=None):
         if position:
             print()
         cand = block["cand"]
-        pricing = (
-            f"OR ${cand['price_in']:.2f} in / ${cand['price_out']:.2f} out per 1M"
-        )
+        pricing = f"OR ${cand['price_in']:.2f} in / ${cand['price_out']:.2f} out per 1M"
         print(
             f"#{block['rank']} {style.bold(cand['id'])}   "
             f"{style.dim(pricing)}   "
@@ -5932,7 +5934,10 @@ def run(args, models, or_cached) -> int:
                 source_note.append("quality cached")
             if source_note:
                 summary.append(
-                    (f"note: {', '.join(source_note)} (use --no-cache to refresh)", False)
+                    (
+                        f"note: {', '.join(source_note)} (use --no-cache to refresh)",
+                        False,
+                    )
                 )
             summary.append(
                 (f"{len(candidates)} of {len(models)} listed models ranked", False)

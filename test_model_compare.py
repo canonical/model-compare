@@ -1917,7 +1917,7 @@ def test_pool_accounting_balances_with_endpoint_drops(monkeypatch, capsys):
 
 
 def test_catalog_schema_versions_are_in_lockstep():
-    assert mc.VERSION == "0.7.6"
+    assert mc.VERSION == "0.7.7"
     assert mc.CATALOG_QUALITY_SCHEMA_VERSION == mc.CATALOG_SCHEMA_VERSION == 6
     assert (
         mc.CATALOG_QUALITY_SCHEMA_VERSION
@@ -2460,7 +2460,7 @@ def test_print_table_color_rules(capsys):
     header = lines[0]
     assert header.startswith("\x1b[1mRANK\x1b[0m")
     assert "SCORE" in header
-    assert not re.search(r"\x1b\[1m\s*SCORE", header)
+    assert re.search(r"\x1b\[1mSCORE\x1b\[0m", header)
     first_row = next(line for line in lines if top[0]["id"] in line)
     assert "\x1b[32m" in first_row
     rank_cell = first_row.split("  ")[0]
@@ -2468,6 +2468,52 @@ def test_print_table_color_rules(capsys):
     assert "\x1b[32m" in rank_cell
     second_row = next(line for line in lines if top[1]["id"] in line)
     assert "\x1b[32m" not in second_row
+
+
+def test_print_table_bolds_score_like_every_other_header(capsys):
+    mc.print_table(
+        _scored_candidates(),
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+    )
+    header = capsys.readouterr().out.splitlines()[0]
+    # Every column header, SCORE included, gets the same treatment.
+    for column in ("RANK", "MODEL", "SCORE"):
+        assert re.search(rf"\x1b\[1m\s*{column}\s*\x1b\[0m", header), column
+
+
+def test_prec_risk_marker_is_yellow_in_the_top_row(capsys):
+    top = _scored_candidates()[:1]
+    top[0]["default_precision"] = "fp8"
+    top[0]["annotations"] = {"risk_flag": True}
+    mc.print_table(top, mc.PRIORITY_WEIGHTS["balanced"], None, style=mc.Style(True))
+    out = capsys.readouterr().out
+    # The legend paints the marker yellow, so the cell must too -- even
+    # inside the green #1 row.
+    assert f"{mc.SGR_YELLOW}!{mc.SGR_RESET}" in out
+    assert f"{mc.SGR_GREEN}fp8{mc.SGR_RESET}" in out
+
+
+def test_prec_risk_marker_is_yellow_outside_the_top_row(capsys):
+    top = _scored_candidates()
+    top[1]["default_precision"] = "fp8"
+    top[1]["annotations"] = {"risk_flag": True}
+    mc.print_table(top, mc.PRIORITY_WEIGHTS["balanced"], None, style=mc.Style(True))
+    lines = capsys.readouterr().out.splitlines()
+    row = next(line for line in lines if top[1]["id"] in line)
+    assert f"{mc.SGR_YELLOW}!{mc.SGR_RESET}" in row
+    assert f"{mc.SGR_GREEN}fp8" not in row
+
+
+def test_prec_without_risk_flag_has_no_colored_marker(capsys):
+    top = _scored_candidates()[:1]
+    top[0]["default_precision"] = "fp8"
+    top[0]["annotations"] = {"risk_flag": False}
+    mc.print_table(top, mc.PRIORITY_WEIGHTS["balanced"], None, style=mc.Style(True))
+    out = capsys.readouterr().out
+    assert f"{mc.SGR_YELLOW}!" not in out
+    assert "fp8!" not in out
 
 
 def test_print_table_green_wins_over_dim_on_top_row(capsys):
@@ -9301,7 +9347,7 @@ def test_version_flag():
         check=True,
     )
     # Literal pin: a release that forgets to bump VERSION fails here.
-    assert proc.stdout.strip() == "model-compare 0.7.6"
+    assert proc.stdout.strip() == "model-compare 0.7.7"
 
 
 # ---------------------------------------------------------------------------
@@ -11159,8 +11205,8 @@ def test_legend_symbol_markers_are_yellow(capsys):
         style=mc.Style(True),
     )
     out = capsys.readouterr().out
-    # The * marker (OpenRouter default) and the ! precision marker.
-    assert f"{mc.SGR_YELLOW}*{mc.SGR_RESET}" in out
+    # The quoted * marker (OpenRouter default) and the ! precision marker.
+    assert f'{mc.SGR_YELLOW}"*"{mc.SGR_RESET}' in out
     assert f'{mc.SGR_YELLOW}"!"{mc.SGR_RESET}' in out
 
 
@@ -11330,6 +11376,20 @@ def test_depth_detail_legend_is_chunked_one_term_per_line(capsys):
         assert term in terms, term
     # The old single run-on sentence is gone.
     assert not any("* = OpenRouter default; append #effort" in line for line in lines)
+
+
+def test_legends_quote_the_default_marker(capsys):
+    # Quoted like the other literal markers ("-"), in both legends.
+    mc.print_table(
+        _scored_candidates()[:1], mc.PRIORITY_WEIGHTS["balanced"], None
+    )
+    main = capsys.readouterr().out
+    assert '"*" = OpenRouter' in main
+    assert " * = OpenRouter" not in main
+
+    mc.print_depth_detail([_cand("acme/model-a", 50.0)])
+    detail = capsys.readouterr().out
+    assert '"*" marks OpenRouter' in detail
 
 
 def test_depth_detail_legend_uses_main_legend_highlighting(capsys):
@@ -11611,7 +11671,7 @@ def test_print_deals_color_header_and_placeholders(capsys):
     header = next(line for line in lines if "SCORE" in line and "MODEL" in line)
     assert re.search(r"\x1b\[1m\s*OFF-PEAK\s*\x1b\[0m", header)
     assert re.search(r"\x1b\[1m\s*QUAL\s*\x1b\[0m", header)
-    assert not re.search(r"\x1b\[1m\s*SCORE", header)
+    assert re.search(r"\x1b\[1mSCORE\x1b\[0m", header)
     known = next(line for line in lines if "acme/deal" in line)
     assert re.search(r"\x1b\[1m\s*-45%\x1b\[0m", known)
     assert "\x1b[2m" not in known
