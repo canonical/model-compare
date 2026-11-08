@@ -20,6 +20,10 @@ subprocess.
 | `catalog.json` | the full `--catalog` document (stable contract, see [DESIGN.md](../DESIGN.md)) |
 | `history.json` | rolling 10-day snapshot history feeding the 7-day column |
 | `highlights.json` | the three prose sections at the bottom of the page |
+| `litellm_rate_card.json` | pure LiteLLM cost-map fragment, one entry per ranked candidate keyed `openrouter/<catalog id>` |
+| `litellm_steering.json` | routing/effort companion keyed like the rate card, with `_meta` provenance and the rate-card hash |
+| `litellm.json` | LiteLLM's upstream map merged with the fragment (optional when the merged map is skipped) |
+| `litellm_merge_status.json` | merge provenance, collisions, upstream failure count and reporting state |
 
 ## Pipeline
 
@@ -31,11 +35,18 @@ $ python web/publish.py            # assembles ./_site/ and fails loudly
 
 `web/publish.py` runs `model_compare.py --catalog` first (priming the shared
 caches), then `--best` and the per-priority `--json` runs, fetches the
-previously published `history.json` / `highlights.json` (missing files are
-fine — first run), regenerates both via `web/generate_highlights.py` and
+previously published `history.json` / `highlights.json` / LiteLLM merged map
+/ LiteLLM status (missing files are fine — first run), and fetches LiteLLM's
+upstream cost map. It regenerates highlights with
+`web/generate_highlights.py`, writes the LiteLLM artifacts with
+`web/build_litellm_artifacts.py`, regenerates `data.json` with
 `web/build_site_data.py`, and assembles the deploy directory. The table rows,
 history tabs and highlights diff are all projections of the catalog's
-`rankings`. Every payload is validated; a broken run never deploys.
+`rankings`. Every payload is validated; a broken run never deploys. A bad
+upstream fetch or an `openrouter/` key collision freezes only
+`litellm.json`; the rest of the site still deploys, and
+`web/report_litellm_merge.py` reports the condition through one deduplicated
+GitHub issue.
 
 Repository secrets: `AA_API_KEY` enables the live AA API quality source and
 its per-effort rows (without it, quality hydrates from the published

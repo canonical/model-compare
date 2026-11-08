@@ -489,6 +489,10 @@ Each `models` entry carries: `id` (bare `provider/model`), `name`,
 `provider`, `family` (heuristic: leading token of the slug, e.g. `glm-5.3`
 → `glm`; `null` when there is none), `pricing` — **under v3 the
 baseline endpoint's price structure in full** (see below) — `context`,
+`max_output_tokens` (the baseline endpoint's `max_completion_tokens`, else
+the models-API `top_provider.max_completion_tokens`; null when neither is
+known), `input_modalities` (the models-API `architecture.input_modalities`
+list, possibly empty),
 `listed_at`, `age_days`, `tool_calling`, `zdr`, `discount`, `expired`,
 `quality` (the AA intelligence index at the scored effort — best measured
 selectable by default, or the exact explicit effort — or `null`), `aa` (the
@@ -528,7 +532,10 @@ The block keeps its v2 shape — `input_per_1m`, `output_per_1m`,
 `min_context` tokens), `base` (the baseline endpoint's base tier; for
 time-windowed endpoints the deterministic peak window), `tiers` (ascending
 cumulative long-context tiers) and `schedule` (all windows, peak included,
-with per-window `coverage`) — but every value now comes from that endpoint's
+with per-window `coverage`). `pricing`, `pricing.base`, every tier and every
+schedule window also carry nullable `input_cache_read_per_1m` and
+`input_cache_write_per_1m` (the 1-hour write variant stays endpoint-only) —
+but every value now comes from that endpoint's
 own `pricing.overrides`, so the block stays self-consistent: the blended
 price always matches the tiers and schedule displayed next to it. The models
 API's top-level (advertised) scalars are **not** discarded: they move to the
@@ -545,9 +552,12 @@ The other per-model additive blocks:
 - `endpoints` — every endpoint from the OpenRouter endpoints API, each with
   `provider_name`, `tag`, `quantization` (a precision-ladder label,
   `"unknown"` or `null`), `pricing` (`prompt`, `completion` — USD per token —
-  plus the raw `overrides` list), `context_length`, `status`
+  plus nullable `input_cache_read`/`input_cache_write`/`input_cache_write_1h`
+  and the raw `overrides` list), `context_length`,
+  `max_completion_tokens`, `status`
   (`0` = live; OpenRouter's `EndpointStatus` enum otherwise lists only
-  negative values) and `service_tier`.
+  negative values) and `service_tier`. The per-model endpoint cache key is
+  `endpoints-v2:<id>`; the stale-annotation read uses the same helper.
 - `default_precision` — the precision the ranked price is quoted at (the
   maker's own best, else the best available in the derivation universe —
   live non-variant endpoints that pass the schedule gate); one of the
@@ -619,7 +629,10 @@ Version gates: catalog `schema_version` 6, `data.json` 3, and
 and rejecting anything else. The catalog producer in `model_compare.py` and
 its reader gate (`CATALOG_QUALITY_SCHEMA_VERSION`, derived from the producer)
 use v6; the web catalog validator in `web/build_site_data.py` also requires
-v6. `data.json` stays at schema 3, and `highlights.json` stays at schema 1.
+v6. The `max_output_tokens`, `input_modalities`, cache-rate and endpoint
+`max_completion_tokens` fields are additive, so v6 stays 6; the validator
+checks them only when present so pre-change catalogs still load.
+`data.json` stays at schema 3, and `highlights.json` stays at schema 1.
 The v5 cutover moved the catalog, data and history gates together: `quality`
 changed to the selected/default-effort meaning, `data.json` gained the
 required `quality_effort` and `default_effort` row keys, and the max-based
@@ -654,6 +667,50 @@ key on UTC dates, so that takes seven days of fresh snapshots to accumulate.
 and `--priority` are ignored with `--catalog` (the document always covers the
 full pool, sorted by the balanced overall score); `--catalog` cannot be
 combined with `--best` or `--json`.
+
+### LiteLLM artifacts
+
+`web/build_litellm_artifacts.py` reads the validated catalog and writes four
+artifacts in the publish scratch directory. They never change either JSON
+contract above.
+
+- `litellm_rate_card.json` — a pure LiteLLM cost-map fragment, one entry per
+  candidate, keyed `openrouter/<catalog id>`. It carries
+  `litellm_provider`, `mode: chat`, base per-token costs, `max_input_tokens`,
+  `max_output_tokens`, `supports_function_calling`, `supports_vision`, the
+  reasoning capability flags, base cache costs, `tiered_pricing` from
+  `pricing.tiers` and `off_peak_pricing` from `pricing.schedule`. It carries
+  no `_meta`, rank, score, quality or provenance key. Tier ranges are
+  `[0, t0]`, `[ti, ti+1]`, `[t_last, context]`; LiteLLM's upper bound is
+  inclusive, so shared boundaries match OpenRouter's strict-greater tier
+  rule.
+- `litellm_steering.json` — keyed identically, plus `_meta` (schema 1,
+  generated_at, source_revision, catalog_schema_version, rate_card_sha256,
+  entries, warnings). Each entry carries the catalog `steering.provider`
+  verbatim, `provider_strict` (one endpoint from `order[0]`, no fallbacks,
+  `max_price` at the base per-1M prices, baseline quantization only), and
+  `reasoning` (preferred rank effort, model default, supported efforts,
+  mandatory, `supports_max_tokens`). The literal `max` is preserved.
+- `litellm.json` — LiteLLM's upstream map with the fragment applied by
+  `base.update(fragment)`, compactly serialized. It is optional.
+- `litellm_merge_status.json` — merge provenance, collisions, consecutive
+  upstream fetch failures, and the report decision.
+
+The rate-card hash is the exact-byte SHA-256 of the published fragment; the
+steering `_meta` and the status carry it so the pair cannot drift. A hash
+mismatch, key-parity drift, stale stamp or missing required artifact fails
+the publish (`check_litellm`).
+
+The merged map is isolated from the site. A failed or invalid upstream fetch
+increments `upstream_fetch_failures`, keeps the previous map and reports at
+three consecutive failures. An upstream key collision freezes the previous
+map, keeps the fragment and the site publishing, and reports immediately.
+`web/report_litellm_merge.py` deduplicates one `bug` issue titled "LiteLLM
+merged map needs attention"; the workflow grants `issues: write` and runs the
+report step after deploy with `continue-on-error`. A frozen map's keys are
+allowed to differ from the current rate card; only an `ok` map must be a
+superset. `web/publish.py` fetches the previous merged map and status from
+the live site, the same way it fetches history and highlights.
 
 On the published site the catalog is the ranking and timestamping authority.
 It carries the ranking itself in `rankings`, and everything else projects it

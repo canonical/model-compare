@@ -452,8 +452,112 @@ def catalog_argv(tmp_path, catalog_file=None):
     return argv, out
 
 
+def make_catalog_with_new_fields():
+    doc = make_catalog()
+    entry = doc["models"][0]
+    entry["max_output_tokens"] = 64000
+    entry["input_modalities"] = ["text", "image"]
+    pricing = entry["pricing"]
+    pricing["input_cache_read_per_1m"] = 0.1
+    pricing["input_cache_write_per_1m"] = 1.0
+    pricing["base"]["input_cache_read_per_1m"] = 0.1
+    pricing["base"]["input_cache_write_per_1m"] = 1.0
+    pricing["tiers"] = [
+        {
+            "min_prompt_tokens": 100000,
+            "input_per_1m": 2.0,
+            "output_per_1m": 4.0,
+            "blended_per_1m": 2.5,
+            "input_cache_read_per_1m": 0.2,
+            "input_cache_write_per_1m": 2.0,
+        }
+    ]
+    pricing["schedule"] = [
+        {
+            "utc_days": None,
+            "utc_start": 0,
+            "utc_end": 0,
+            "coverage": 1.0,
+            "input_per_1m": 0.5,
+            "output_per_1m": 1.0,
+            "blended_per_1m": 0.625,
+            "input_cache_read_per_1m": 0.05,
+            "input_cache_write_per_1m": 0.5,
+        }
+    ]
+    entry["endpoints"] = [
+        {
+            "provider_name": "Z.AI",
+            "tag": "z-ai/fp8",
+            "quantization": "fp8",
+            "pricing": {
+                "prompt": 0.0000002,
+                "completion": 0.0000004,
+                "input_cache_read": 0.00000002,
+                "input_cache_write": 0.0000002,
+                "input_cache_write_1h": 0.0000003,
+                "overrides": None,
+            },
+            "context_length": 262144,
+            "max_completion_tokens": 64000,
+            "status": 0,
+            "service_tier": None,
+        }
+    ]
+    entry["default_precision"] = "fp8"
+    return doc
+
+
 def test_validate_catalog_happy_path():
     bsd.validate_catalog(make_catalog())  # must not raise
+
+
+def test_validate_catalog_accepts_new_optional_fields():
+    bsd.validate_catalog(make_catalog_with_new_fields())
+
+
+def test_validate_catalog_still_accepts_catalog_without_new_fields():
+    doc = make_catalog_with_new_fields()
+    entry = doc["models"][0]
+    entry.pop("max_output_tokens")
+    entry.pop("input_modalities")
+    entry["pricing"].pop("input_cache_read_per_1m")
+    entry["pricing"].pop("input_cache_write_per_1m")
+    entry["pricing"]["base"].pop("input_cache_read_per_1m")
+    entry["pricing"]["base"].pop("input_cache_write_per_1m")
+    entry["pricing"]["tiers"][0].pop("input_cache_read_per_1m")
+    entry["pricing"]["tiers"][0].pop("input_cache_write_per_1m")
+    entry["pricing"]["schedule"][0].pop("input_cache_read_per_1m")
+    entry["pricing"]["schedule"][0].pop("input_cache_write_per_1m")
+    entry["endpoints"][0].pop("max_completion_tokens")
+    entry["endpoints"][0]["pricing"].pop("input_cache_read")
+    entry["endpoints"][0]["pricing"].pop("input_cache_write")
+    entry["endpoints"][0]["pricing"].pop("input_cache_write_1h")
+    bsd.validate_catalog(doc)
+
+
+@pytest.mark.parametrize("bad", ["x", True, -1, float("inf")])
+def test_validate_catalog_rejects_malformed_new_cache_rate(bad):
+    doc = make_catalog_with_new_fields()
+    doc["models"][0]["pricing"]["input_cache_read_per_1m"] = bad
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+@pytest.mark.parametrize("bad", ["text", [1], ["text", ""]])
+def test_validate_catalog_rejects_malformed_modalities(bad):
+    doc = make_catalog_with_new_fields()
+    doc["models"][0]["input_modalities"] = bad
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+@pytest.mark.parametrize("bad", [0, -1, "64000", True])
+def test_validate_catalog_rejects_malformed_max_output(bad):
+    doc = make_catalog_with_new_fields()
+    doc["models"][0]["max_output_tokens"] = bad
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
 
 
 def test_build_site_data_accepts_new_row_keys():

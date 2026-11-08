@@ -108,7 +108,7 @@ QUALITY_CATALOG_CACHE = "published-catalog"
 # A published catalog generated more than this many days ago is stale:
 # warn but use -- the records' as_of makes the staleness visible downstream.
 QUALITY_CATALOG_MAX_AGE_DAYS = 14
-VERSION = "0.7.8"
+VERSION = "0.7.9"
 USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 
 # opencode expects provider-qualified model ids: openrouter/<provider/model>.
@@ -437,6 +437,9 @@ def parse_endpoints(payload) -> list[dict]:
             continue
         raw = entry.get("pricing")
         raw_pricing = raw if isinstance(raw, dict) else {}
+        max_completion = entry.get("max_completion_tokens")
+        if type(max_completion) is not int or max_completion <= 0:
+            max_completion = None
         endpoints.append(
             {
                 "provider_name": entry.get("provider_name"),
@@ -445,14 +448,29 @@ def parse_endpoints(payload) -> list[dict]:
                 "pricing": {
                     "prompt": parse_price(raw_pricing.get("prompt")),
                     "completion": parse_price(raw_pricing.get("completion")),
+                    "input_cache_read": parse_non_negative_price(
+                        raw_pricing.get("input_cache_read")
+                    ),
+                    "input_cache_write": parse_non_negative_price(
+                        raw_pricing.get("input_cache_write")
+                    ),
+                    "input_cache_write_1h": parse_non_negative_price(
+                        raw_pricing.get("input_cache_write_1h")
+                    ),
                     "overrides": raw_pricing.get("overrides"),
                 },
                 "context_length": entry.get("context_length"),
+                "max_completion_tokens": max_completion,
                 "status": entry.get("status"),
                 "service_tier": entry.get("service_tier"),
             }
         )
     return endpoints
+
+
+def endpoint_cache_name(model_id: str) -> str:
+    """The one cache key both the fetch and the stale-annotation read use."""
+    return f"endpoints-v2:{model_id.replace('/', '_')}"
 
 
 def fetch_model_endpoints(model_id: str, args) -> list[dict]:
@@ -463,7 +481,7 @@ def fetch_model_endpoints(model_id: str, args) -> list[dict]:
     which raises at once on 4xx and after the retries on 5xx/network
     errors -- the caller owns the fail-closed policy.
     """
-    cache_name = f"endpoints:{model_id.replace('/', '_')}"
+    cache_name = endpoint_cache_name(model_id)
     if not args.no_cache:
         cached = load_cache(cache_name, args.cache_ttl)
         if cached:
@@ -945,7 +963,7 @@ def _stale_filtered_annotations(model_id, catalog_context, args):
     ranked candidate's annotations. A model whose cache holds no endpoint
     list at all yields None (the entry carries the drop reason alone).
     """
-    cached = load_cache_expired(f"endpoints:{model_id.replace('/', '_')}")
+    cached = load_cache_expired(endpoint_cache_name(model_id))
     if not isinstance(cached, list):
         return None
     author = model_id.partition("/")[0]
@@ -1079,6 +1097,29 @@ def apply_endpoint_pricing(candidates, args, filtered):
         )
         cand["base_price_in"] = eff["base_price_in"] * 1_000_000.0
         cand["base_price_out"] = eff["base_price_out"] * 1_000_000.0
+        cand["cache_read_per_1m"] = (
+            _per_1m(eff["price_cache_read"])
+            if eff["price_cache_read"] is not None
+            else None
+        )
+        cand["cache_write_per_1m"] = (
+            _per_1m(eff["price_cache_write"])
+            if eff["price_cache_write"] is not None
+            else None
+        )
+        cand["base_cache_read_per_1m"] = (
+            _per_1m(eff["base_cache_read"])
+            if eff["base_cache_read"] is not None
+            else None
+        )
+        cand["base_cache_write_per_1m"] = (
+            _per_1m(eff["base_cache_write"])
+            if eff["base_cache_write"] is not None
+            else None
+        )
+        baseline_max_output = baseline.get("max_completion_tokens")
+        if type(baseline_max_output) is int and baseline_max_output > 0:
+            cand["max_output_tokens"] = baseline_max_output
         cand["tier_prompt_tokens"] = eff["tier_prompt_tokens"]
         cand["tiers"] = eff["tiers"]
         cand["schedule"] = eff["schedule"]
@@ -1823,6 +1864,18 @@ def parse_price(value) -> float | None:
         return None
 
 
+def parse_non_negative_price(value) -> float | None:
+    """A finite, non-negative price; malformed, negative or NaN -> None.
+
+    Cache rates use this fail-soft gate: a bad cache rate is ignored, never
+    allowed to drop a model or poison a published artifact.
+    """
+    price = parse_price(value)
+    if price is None or not math.isfinite(price) or price < 0:
+        return None
+    return price
+
+
 # ---------------------------------------------------------------------------
 # OpenRouter tiered pricing (pricing.overrides)
 # ---------------------------------------------------------------------------
@@ -1913,11 +1966,12 @@ def _coverage(days_count: int, minutes: int) -> float:
 
 
 def _entry_prices(entry):
-    """Parse an override entry's prompt/completion prices (spec rule 5).
+    """Parse an override entry's prices (spec rule 5).
 
-    Returns {"prompt": float|None, "completion": float|None} where None means
-    the key is absent (inheritance), or None when a present price is
-    malformed, negative or non-finite (the entry is skipped whole).
+    Returns {"prompt", "completion", "input_cache_read",
+    "input_cache_write"} where None means the key is absent (inheritance).
+    A malformed prompt/completion skips the entry whole (returns None); a
+    malformed cache rate is ignored on its own, never skips the entry.
     """
     values = {}
     for key in ("prompt", "completion"):
@@ -1928,6 +1982,8 @@ def _entry_prices(entry):
         if value is None or not math.isfinite(value) or value < 0:
             return None
         values[key] = value
+    for key in ("input_cache_read", "input_cache_write"):
+        values[key] = parse_non_negative_price(entry.get(key))
     return values
 
 
@@ -1938,7 +1994,9 @@ def _schedule_windows(window_entries):
     utc_days deduplicated in week order, per-window coverage), or None when
     the windows do not tile the 7-day week exactly (gaps or overlaps), or a
     window is missing prompt/completion (rule 7: no top-level inheritance --
-    the top level is fetch-time dependent).
+    the top level is fetch-time dependent). A window's cache rates stay None
+    when it does not set them; effective_pricing resolves those against the
+    frozen peak base after the peak window is known.
     """
     windows = []
     covered = set()
@@ -1967,6 +2025,8 @@ def _schedule_windows(window_entries):
                 "coverage": _coverage(len(day_indices), len(span)),
                 "price_in": price_in,
                 "price_out": price_out,
+                "input_cache_read": entry["input_cache_read"],
+                "input_cache_write": entry["input_cache_write"],
             }
         )
     if matched != _WEEK_MINUTES or len(covered) != _WEEK_MINUTES:
@@ -1985,10 +2045,14 @@ def effective_pricing(pricing, prompt_tokens, input_share):
     source = pricing if isinstance(pricing, dict) else {}
     top_in = parse_price(source.get("prompt"))
     top_out = parse_price(source.get("completion"))
+    top_cache_read = parse_non_negative_price(source.get("input_cache_read"))
+    top_cache_write = parse_non_negative_price(source.get("input_cache_write"))
     base_in, base_out = top_in, top_out
+    base_cache_read, base_cache_write = top_cache_read, top_cache_write
+    current_cache_read, current_cache_write = base_cache_read, base_cache_write
     overrides = source.get("overrides")
 
-    tier_entries = []  # (threshold, price_in|None, price_out|None), API order
+    tier_entries = []  # (threshold, prices dict|None), API order
     window_entries = []  # validated time-window pre-windows, API order
     time_touched = False
     schedule_broken = False
@@ -2052,10 +2116,12 @@ def effective_pricing(pricing, prompt_tokens, input_share):
                         "days": days,
                         "price_in": prices["prompt"],
                         "price_out": prices["completion"],
+                        "input_cache_read": prices["input_cache_read"],
+                        "input_cache_write": prices["input_cache_write"],
                     }
                 )
             elif has_threshold:
-                tier_entries.append((threshold, prices["prompt"], prices["completion"]))
+                tier_entries.append((threshold, prices))
             # else: conditionless entry (price keys only) -- ignored (plan
             # Review Focus; none live, and honoring an unconditional price
             # swap would be dangerous)
@@ -2083,6 +2149,24 @@ def effective_pricing(pricing, prompt_tokens, input_share):
         peak_blended = peak["blended"]  # ties: first in API order
         # Deterministic base (rule 7): freeze at the peak window's prices.
         base_in, base_out = peak["price_in"], peak["price_out"]
+        base_cache_read = (
+            peak["input_cache_read"]
+            if peak["input_cache_read"] is not None
+            else top_cache_read
+        )
+        base_cache_write = (
+            peak["input_cache_write"]
+            if peak["input_cache_write"] is not None
+            else top_cache_write
+        )
+        # A window that sets no cache rate inherits the frozen base, not the
+        # fetch-time top-level value.
+        for window in schedule:
+            if window["input_cache_read"] is None:
+                window["input_cache_read"] = base_cache_read
+            if window["input_cache_write"] is None:
+                window["input_cache_write"] = base_cache_write
+        current_cache_read, current_cache_write = base_cache_read, base_cache_write
         if peak_blended == 0:
             max_discount = 0.0
         else:
@@ -2095,31 +2179,57 @@ def effective_pricing(pricing, prompt_tokens, input_share):
     applied = None
     current_in, current_out = base_in, base_out
     by_threshold = {}
-    for threshold, tier_in, tier_out in tier_entries:
+    for threshold, prices in tier_entries:
+        tier_in, tier_out = prices["prompt"], prices["completion"]
+        tier_cache_read = prices["input_cache_read"]
+        tier_cache_write = prices["input_cache_write"]
         if prompt_tokens > threshold:
             if tier_in is not None:
                 current_in = tier_in
             if tier_out is not None:
                 current_out = tier_out
+            if tier_cache_read is not None:
+                current_cache_read = tier_cache_read
+            if tier_cache_write is not None:
+                current_cache_write = tier_cache_write
             applied = threshold
-        slot = by_threshold.setdefault(threshold, {"price_in": None, "price_out": None})
+        slot = by_threshold.setdefault(
+            threshold,
+            {
+                "price_in": None,
+                "price_out": None,
+                "cache_read": None,
+                "cache_write": None,
+            },
+        )
         if tier_in is not None:
             slot["price_in"] = tier_in
         if tier_out is not None:
             slot["price_out"] = tier_out
+        if tier_cache_read is not None:
+            slot["cache_read"] = tier_cache_read
+        if tier_cache_write is not None:
+            slot["cache_write"] = tier_cache_write
     tiers = []
     running_in, running_out = base_in, base_out
+    running_cache_read, running_cache_write = base_cache_read, base_cache_write
     for threshold in sorted(by_threshold):
         slot = by_threshold[threshold]
         if slot["price_in"] is not None:
             running_in = slot["price_in"]
         if slot["price_out"] is not None:
             running_out = slot["price_out"]
+        if slot["cache_read"] is not None:
+            running_cache_read = slot["cache_read"]
+        if slot["cache_write"] is not None:
+            running_cache_write = slot["cache_write"]
         tiers.append(
             {
                 "min_prompt_tokens": threshold,
                 "price_in": running_in,
                 "price_out": running_out,
+                "input_cache_read": running_cache_read,
+                "input_cache_write": running_cache_write,
             }
         )
 
@@ -2133,6 +2243,10 @@ def effective_pricing(pricing, prompt_tokens, input_share):
         "top_price_out": top_out,
         "base_price_in": base_in,
         "base_price_out": base_out,
+        "price_cache_read": current_cache_read,
+        "price_cache_write": current_cache_write,
+        "base_cache_read": base_cache_read,
+        "base_cache_write": base_cache_write,
         "tier_prompt_tokens": applied,
         "tiers": tiers,
         "schedule": schedule,
@@ -3830,11 +3944,31 @@ def build_schedules(
                     "input_per_1m": _per_1m(peak["price_in"]),
                     "output_per_1m": _per_1m(peak["price_out"]),
                     "blended_per_1m": _per_1m(peak["blended"]),
+                    "input_cache_read_per_1m": (
+                        _per_1m(peak["input_cache_read"])
+                        if peak["input_cache_read"] is not None
+                        else None
+                    ),
+                    "input_cache_write_per_1m": (
+                        _per_1m(peak["input_cache_write"])
+                        if peak["input_cache_write"] is not None
+                        else None
+                    ),
                 },
                 "offpeak": {
                     "input_per_1m": _per_1m(offpeak["price_in"]),
                     "output_per_1m": _per_1m(offpeak["price_out"]),
                     "blended_per_1m": _per_1m(offpeak["blended"]),
+                    "input_cache_read_per_1m": (
+                        _per_1m(offpeak["input_cache_read"])
+                        if offpeak["input_cache_read"] is not None
+                        else None
+                    ),
+                    "input_cache_write_per_1m": (
+                        _per_1m(offpeak["input_cache_write"])
+                        if offpeak["input_cache_write"] is not None
+                        else None
+                    ),
                 },
                 "schedule": [
                     {
@@ -3845,6 +3979,16 @@ def build_schedules(
                         "input_per_1m": _per_1m(window["price_in"]),
                         "output_per_1m": _per_1m(window["price_out"]),
                         "blended_per_1m": _per_1m(window["blended"]),
+                        "input_cache_read_per_1m": (
+                            _per_1m(window["input_cache_read"])
+                            if window["input_cache_read"] is not None
+                            else None
+                        ),
+                        "input_cache_write_per_1m": (
+                            _per_1m(window["input_cache_write"])
+                            if window["input_cache_write"] is not None
+                            else None
+                        ),
                     }
                     for window in windows
                 ],
@@ -4029,14 +4173,59 @@ def build_candidates(
         blended_m = (
             args.input_share * price_in_m + (1.0 - args.input_share) * price_out_m
         )
+        top_provider = model.get("top_provider")
+        max_output = (
+            top_provider.get("max_completion_tokens")
+            if isinstance(top_provider, dict)
+            else None
+        )
+        if type(max_output) is not int or max_output <= 0:
+            max_output = None
+        architecture = model.get("architecture")
+        input_modalities = (
+            architecture.get("input_modalities")
+            if isinstance(architecture, dict)
+            else None
+        )
+        if not isinstance(input_modalities, list) or any(
+            not isinstance(modality, str) or not modality
+            for modality in input_modalities
+        ):
+            input_modalities = []
+        cache_read_per_1m = (
+            _per_1m(eff["price_cache_read"])
+            if eff["price_cache_read"] is not None
+            else None
+        )
+        cache_write_per_1m = (
+            _per_1m(eff["price_cache_write"])
+            if eff["price_cache_write"] is not None
+            else None
+        )
+        base_cache_read_per_1m = (
+            _per_1m(eff["base_cache_read"])
+            if eff["base_cache_read"] is not None
+            else None
+        )
+        base_cache_write_per_1m = (
+            _per_1m(eff["base_cache_write"])
+            if eff["base_cache_write"] is not None
+            else None
+        )
         candidates.append(
             {
                 "id": model_id,
                 "name": model.get("name") or model_id,
                 "context": context,
+                "max_output_tokens": max_output,
+                "input_modalities": input_modalities,
                 "price_in": price_in_m,
                 "price_out": price_out_m,
                 "blended": blended_m,
+                "cache_read_per_1m": cache_read_per_1m,
+                "cache_write_per_1m": cache_write_per_1m,
+                "base_cache_read_per_1m": base_cache_read_per_1m,
+                "base_cache_write_per_1m": base_cache_write_per_1m,
                 "base_price_in": eff["base_price_in"] * 1_000_000.0,
                 "base_price_out": eff["base_price_out"] * 1_000_000.0,
                 "tier_prompt_tokens": eff["tier_prompt_tokens"],
@@ -5258,6 +5447,8 @@ def build_catalog(
                     "input_per_1m": round(cand["price_in"], 6),
                     "output_per_1m": round(cand["price_out"], 6),
                     "blended_per_1m": round(cand["blended"], 6),
+                    "input_cache_read_per_1m": cand.get("cache_read_per_1m"),
+                    "input_cache_write_per_1m": cand.get("cache_write_per_1m"),
                     "base": {
                         "input_per_1m": round(cand["base_price_in"], 6),
                         "output_per_1m": round(cand["base_price_out"], 6),
@@ -5266,6 +5457,8 @@ def build_catalog(
                             + (1 - args.input_share) * cand["base_price_out"],
                             6,
                         ),
+                        "input_cache_read_per_1m": cand.get("base_cache_read_per_1m"),
+                        "input_cache_write_per_1m": cand.get("base_cache_write_per_1m"),
                     },
                     "tiers": [
                         {
@@ -5275,6 +5468,16 @@ def build_catalog(
                             "blended_per_1m": _per_1m(
                                 args.input_share * tier["price_in"]
                                 + (1 - args.input_share) * tier["price_out"]
+                            ),
+                            "input_cache_read_per_1m": (
+                                _per_1m(tier["input_cache_read"])
+                                if tier["input_cache_read"] is not None
+                                else None
+                            ),
+                            "input_cache_write_per_1m": (
+                                _per_1m(tier["input_cache_write"])
+                                if tier["input_cache_write"] is not None
+                                else None
                             ),
                         }
                         for tier in cand["tiers"]
@@ -5289,6 +5492,16 @@ def build_catalog(
                                 "input_per_1m": _per_1m(window["price_in"]),
                                 "output_per_1m": _per_1m(window["price_out"]),
                                 "blended_per_1m": _per_1m(window["blended"]),
+                                "input_cache_read_per_1m": (
+                                    _per_1m(window["input_cache_read"])
+                                    if window["input_cache_read"] is not None
+                                    else None
+                                ),
+                                "input_cache_write_per_1m": (
+                                    _per_1m(window["input_cache_write"])
+                                    if window["input_cache_write"] is not None
+                                    else None
+                                ),
                             }
                             for window in cand["schedule"]
                         ]
@@ -5297,6 +5510,8 @@ def build_catalog(
                     ),
                 },
                 "context": cand["context"],
+                "max_output_tokens": cand.get("max_output_tokens"),
+                "input_modalities": cand.get("input_modalities") or [],
                 "listed_at": listed_date.isoformat() if listed_date else None,
                 "age_days": max(0, (now.date() - listed_date).days)
                 if listed_date

@@ -4,6 +4,7 @@
 Runs the standalone model_compare.py, then the web-side generators
 (generate_highlights.py, build_site_data.py), and assembles the deploy
 directory: data.json, catalog.json, history.json, highlights.json,
+litellm_rate_card.json, litellm_steering.json, litellm_merge_status.json,
 best.txt, index.html, faq.html and its style.css/app.js/favicon
 assets. Fails loudly on any unexpected result -- including
 data.json/history.json stamps that disagree with catalog.json's
@@ -14,6 +15,7 @@ so a broken run never deploys a broken site.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.client
 import json
 import os
@@ -33,6 +35,22 @@ USER_AGENT = "model-compare (https://github.com/canonical/model-compare)"
 PRIORITIES = ("balanced", "price", "quality")
 PREV_HISTORY_URL = "https://canonical.github.io/model-compare/history.json"
 PREV_HIGHLIGHTS_URL = "https://canonical.github.io/model-compare/highlights.json"
+PREV_LITELLM_MERGED_URL = (
+    "https://canonical.github.io/model-compare/litellm.json"
+)
+PREV_LITELLM_STATUS_URL = (
+    "https://canonical.github.io/model-compare/litellm_merge_status.json"
+)
+LITELLM_UPSTREAM_URL = (
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+    "model_prices_and_context_window.json"
+)
+LITELLM_REQUIRED = (
+    "litellm_rate_card.json",
+    "litellm_steering.json",
+    "litellm_merge_status.json",
+)
+LITELLM_MERGED = "litellm.json"
 # Endpoint-stage failures are normal churn (provider outages, gating), but a
 # mass exodus means the catalog is no longer comparable to previous runs.
 # publish imports nothing from model_compare/build_site_data (subprocess-only
@@ -332,6 +350,123 @@ def check_endpoint_drops(catalog_path: Path) -> None:
         )
 
 
+def _artifact_bytes(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"publish: unreadable {path.name}: {exc}") from exc
+
+
+def _artifact_object(raw: bytes, name: str) -> dict:
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"publish: {name} is not JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise RuntimeError(f"publish: {name} is not a JSON object")
+    return doc
+
+
+def check_litellm(output_dir: Path, catalog: dict) -> None:
+    """Fail unless the LiteLLM artifacts agree with each other and the catalog.
+
+    The rate card is the price contract: its exact bytes are hashed into the
+    steering `_meta` and the status file. The merged map is optional and its
+    key set is compared with the rate card only when it was rebuilt (`ok`);
+    a frozen map is deliberately allowed to carry an older candidate set.
+    """
+    rate_bytes = _artifact_bytes(output_dir / LITELLM_REQUIRED[0])
+    rate_card = _artifact_object(rate_bytes, LITELLM_REQUIRED[0])
+    steering = _artifact_object(
+        _artifact_bytes(output_dir / LITELLM_REQUIRED[1]), LITELLM_REQUIRED[1]
+    )
+    status = _artifact_object(
+        _artifact_bytes(output_dir / LITELLM_REQUIRED[2]), LITELLM_REQUIRED[2]
+    )
+
+    meta = steering.get("_meta")
+    if not isinstance(meta, dict):
+        raise RuntimeError("publish: litellm_steering.json lacks _meta")
+    if meta.get("generated_at") != catalog.get("generated_at"):
+        raise RuntimeError(
+            "publish: litellm_steering.json generated_at disagrees with catalog"
+        )
+    rate_hash = hashlib.sha256(rate_bytes).hexdigest()
+    if meta.get("rate_card_sha256") != rate_hash:
+        raise RuntimeError(
+            "publish: litellm_steering.json rate_card_sha256 does not match "
+            "litellm_rate_card.json"
+        )
+    keys = set(steering) - {"_meta"}
+    if keys != set(rate_card):
+        raise RuntimeError(
+            "publish: litellm_steering.json keys do not match the rate card"
+        )
+    models = catalog.get("models")
+    expected = len(models) if isinstance(models, list) else None
+    if meta.get("entries") != len(rate_card):
+        raise RuntimeError(
+            "publish: litellm_steering.json entries disagrees with the rate card"
+        )
+    if expected is not None and len(rate_card) != expected:
+        raise RuntimeError(
+            "publish: litellm_rate_card.json entries disagree with catalog models"
+        )
+
+    status_meta = status.get("_meta")
+    if not isinstance(status_meta, dict):
+        raise RuntimeError("publish: litellm_merge_status.json lacks _meta")
+    if status_meta.get("generated_at") != catalog.get("generated_at"):
+        raise RuntimeError(
+            "publish: litellm_merge_status.json generated_at disagrees with catalog"
+        )
+    rate_status = status.get("rate_card")
+    if not isinstance(rate_status, dict):
+        raise RuntimeError("publish: litellm_merge_status.json lacks rate_card")
+    if rate_status.get("sha256") != rate_hash:
+        raise RuntimeError(
+            "publish: litellm_merge_status.json rate_card hash does not match"
+        )
+    if rate_status.get("entries") != len(rate_card):
+        raise RuntimeError(
+            "publish: litellm_merge_status.json rate_card entries disagree"
+        )
+
+    merged = status.get("merged")
+    if not isinstance(merged, dict):
+        raise RuntimeError("publish: litellm_merge_status.json lacks merged")
+    state = merged.get("status")
+    merged_path = output_dir / LITELLM_MERGED
+    if state == "skipped":
+        if merged_path.exists():
+            raise RuntimeError(
+                "publish: litellm.json exists but status says skipped"
+            )
+        return
+    if state not in ("ok", "frozen"):
+        raise RuntimeError(f"publish: unknown merged status {state!r}")
+    raw = _artifact_bytes(merged_path)
+    digest = hashlib.sha256(raw).hexdigest()
+    if merged.get("sha256") != digest:
+        raise RuntimeError(
+            "publish: litellm_merge_status.json merged hash does not match "
+            "litellm.json"
+        )
+    merged_doc = _artifact_object(raw, LITELLM_MERGED)
+    if state == "ok":
+        missing = set(rate_card) - set(merged_doc)
+        if missing:
+            raise RuntimeError(
+                "publish: litellm.json is missing rate-card keys: "
+                + ", ".join(sorted(missing)[:5])
+            )
+        if merged.get("rate_card_sha256") != rate_hash:
+            raise RuntimeError(
+                "publish: litellm_merge_status.json merged rate-card hash "
+                "does not match the current rate card"
+            )
+
+
 def build_site(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="mc-build-") as tmp:
@@ -359,10 +494,16 @@ def build_site(output_dir: Path) -> None:
         for url, name in (
             (PREV_HISTORY_URL, "history-prev.json"),
             (PREV_HIGHLIGHTS_URL, "highlights-prev.json"),
+            (PREV_LITELLM_MERGED_URL, "litellm-merged-prev.json"),
+            (PREV_LITELLM_STATUS_URL, "litellm-status-prev.json"),
         ):
             prev = fetch_prev(url)
             if prev is not None:
                 (scratch / name).write_bytes(prev)
+
+        upstream = fetch_prev(LITELLM_UPSTREAM_URL)
+        if upstream is not None:
+            (scratch / "litellm-upstream.json").write_bytes(upstream)
 
         run_script(
             WEB_DIR / "generate_highlights.py",
@@ -377,6 +518,39 @@ def build_site(output_dir: Path) -> None:
                 str(scratch / "highlights-new.json"),
             ],
         )
+
+        litellm_args = [
+            "--catalog",
+            str(scratch / "catalog.json"),
+            "--output-dir",
+            str(scratch / "litellm"),
+            "--revision",
+            resolve_revision(),
+            "--upstream-status",
+            "ok" if upstream is not None else "failed",
+            "--upstream-url",
+            LITELLM_UPSTREAM_URL,
+        ]
+        if upstream is not None:
+            litellm_args += ["--upstream-map", str(scratch / "litellm-upstream.json")]
+        if (scratch / "litellm-merged-prev.json").is_file():
+            litellm_args += [
+                "--prev-merged",
+                str(scratch / "litellm-merged-prev.json"),
+            ]
+        if (scratch / "litellm-status-prev.json").is_file():
+            litellm_args += [
+                "--prev-status",
+                str(scratch / "litellm-status-prev.json"),
+            ]
+        run_script(WEB_DIR / "build_litellm_artifacts.py", litellm_args)
+
+        for name in LITELLM_REQUIRED + (LITELLM_MERGED,):
+            source = scratch / "litellm" / name
+            if source.is_file():
+                shutil.copyfile(source, output_dir / name)
+            elif name == LITELLM_MERGED and (output_dir / name).exists():
+                (output_dir / name).unlink()
 
         priority_args: list[str] = []
         for p in PRIORITIES:
@@ -417,6 +591,7 @@ def build_site(output_dir: Path) -> None:
         "catalog.json",
         "history.json",  # self-feeds the next run via PREV_HISTORY_URL
         "highlights.json",  # ditto via PREV_HIGHLIGHTS_URL
+        *LITELLM_REQUIRED,
         "best.txt",
         "index.html",
         "faq.html",
@@ -432,7 +607,9 @@ def build_site(output_dir: Path) -> None:
         raise RuntimeError(
             f"publish: expected artifacts not written: {', '.join(missing)}"
         )
-    check_best(output_dir, check_stamps(output_dir))
+    catalog = check_stamps(output_dir)
+    check_best(output_dir, catalog)
+    check_litellm(output_dir, catalog)
     for name in artifacts:
         print(f"publish: wrote {output_dir / name}")
 

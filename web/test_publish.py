@@ -1,5 +1,6 @@
 """Tests for the web/publish.py orchestrator (all subprocesses stubbed)."""
 
+import hashlib
 import http.client
 import json
 import subprocess
@@ -69,6 +70,52 @@ def _write_artifacts(out_dir, overrides=None, best_id="z-ai/glm-5.3-flash"):
         (out_dir / name).write_text(json.dumps(doc) if text is None else text)
 
 
+def _write_litellm_artifacts(out_dir, stamp=STAMP, merged_state="skipped"):
+    """Write the three required LiteLLM artifacts with matching hashes."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rate_bytes = b"{}\n"
+    (out_dir / "litellm_rate_card.json").write_bytes(rate_bytes)
+    rate_hash = hashlib.sha256(rate_bytes).hexdigest()
+    steering = {
+        "_meta": {
+            "schema_version": 1,
+            "generated_at": stamp,
+            "source_revision": STUB_REV,
+            "catalog_schema_version": 6,
+            "rate_card_sha256": rate_hash,
+            "entries": 0,
+            "warnings": [],
+        }
+    }
+    (out_dir / "litellm_steering.json").write_text(json.dumps(steering))
+    merged = {
+        "status": merged_state,
+        "reason": "no_previous_map" if merged_state == "skipped" else None,
+        "sha256": None,
+        "entries": None,
+        "rate_card_sha256": rate_hash,
+    }
+    status = {
+        "_meta": {
+            "schema_version": 1,
+            "generated_at": stamp,
+            "source_revision": STUB_REV,
+            "catalog_schema_version": 6,
+        },
+        "rate_card": {"sha256": rate_hash, "entries": 0},
+        "upstream": {
+            "url": "https://example/upstream.json",
+            "sha256": None,
+            "entries": None,
+        },
+        "merged": merged,
+        "collisions": [],
+        "upstream_fetch_failures": 0,
+        "report": {"needed": False, "reason": None},
+    }
+    (out_dir / "litellm_merge_status.json").write_text(json.dumps(status))
+
+
 # What the stubbed `model_compare.py --catalog` run prints: the AA and
 # endpoint-drop gates read it from scratch before any other step runs.
 # Catalog v5 shape: the keyed run's chain is "aa", its three disjoint match
@@ -133,10 +180,19 @@ def _fake_run(
         calls.append(cmd)
         if _is_catalog_run(cmd):
             stdout.write(
-                json.dumps({"generated_at": STAMP, "sources": {"aa": aa}, "pool": pool})
+                json.dumps(
+                    {
+                        "generated_at": STAMP,
+                        "sources": {"aa": aa},
+                        "pool": pool,
+                        "models": [],
+                    }
+                )
             )
         if "--best" in cmd:
             stdout.write(best + "\n")
+        if Path(cmd[1]).name == "build_litellm_artifacts.py":
+            _write_litellm_artifacts(Path(cmd[cmd.index("--output-dir") + 1]))
         if simulate_build_site_data and Path(cmd[1]).name == "build_site_data.py":
             _write_artifacts(Path(cmd[cmd.index("--output") + 1]).parent, overrides)
         return subprocess.CompletedProcess(cmd, 0)
@@ -160,6 +216,7 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
         "model_compare.py",  # price --json --top 20
         "model_compare.py",  # quality --json --top 20
         "generate_highlights.py",
+        "build_litellm_artifacts.py",
         "build_site_data.py",
     ]
     assert "--catalog" in calls[0]
@@ -183,6 +240,9 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
     assert (out / "index.html").is_file()
     assert (out / "style.css").is_file()
     assert (out / "app.js").is_file()
+    assert (out / "litellm_rate_card.json").is_file()
+    assert (out / "litellm_steering.json").is_file()
+    assert (out / "litellm_merge_status.json").is_file()
     for name in FAVICON_FILES:
         assert (out / name).is_file()
 
@@ -216,6 +276,17 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
     assert all(
         Path(p.split("=", 1)[1]).parent == gh_paths[0].parent for p in priority_values
     )
+
+
+def test_build_site_removes_stale_merged_map(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run(calls))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    out = tmp_path / "site"
+    out.mkdir()
+    (out / "litellm.json").write_text("{}")
+    publish.build_site(out)
+    assert not (out / "litellm.json").exists()
 
 
 def test_build_site_fails_loudly(tmp_path, monkeypatch):
@@ -287,11 +358,14 @@ def test_fetch_success_feeds_prev_files_to_generators(tmp_path, monkeypatch):
                         "generated_at": STAMP,
                         "sources": HEALTHY_AA,
                         "pool": HEALTHY_POOL,
+                        "models": [],
                     }
                 )
             )
         if "--best" in cmd:
             stdout.write("openrouter/x/y\n")
+        if Path(cmd[1]).name == "build_litellm_artifacts.py":
+            _write_litellm_artifacts(Path(cmd[cmd.index("--output-dir") + 1]))
         if Path(cmd[1]).name == "build_site_data.py":
             prev_arg = Path(cmd[cmd.index("--history-prev-file") + 1])
             # read during the call: the scratch dir is removed afterwards
@@ -601,6 +675,118 @@ FAVICON_FILES = (
     "favicon-32x32.png",
     "apple-touch-icon.png",
 )
+
+
+def _litellm_catalog():
+    return {"generated_at": STAMP, "models": []}
+
+
+def test_check_litellm_accepts_skipped(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_check_litellm_rejects_hash_mismatch(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    steering = json.loads((tmp_path / "litellm_steering.json").read_text())
+    steering["_meta"]["rate_card_sha256"] = "0" * 64
+    (tmp_path / "litellm_steering.json").write_text(json.dumps(steering))
+    with pytest.raises(RuntimeError, match="rate_card_sha256"):
+        publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_check_litellm_rejects_missing_map_when_ok(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    status = json.loads((tmp_path / "litellm_merge_status.json").read_text())
+    status["merged"]["status"] = "ok"
+    (tmp_path / "litellm_merge_status.json").write_text(json.dumps(status))
+    with pytest.raises(RuntimeError):
+        publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_check_litellm_rejects_present_map_when_skipped(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    (tmp_path / "litellm.json").write_text("{}")
+    with pytest.raises(RuntimeError):
+        publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_check_litellm_accepts_frozen_map_with_old_keys(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    merged = b'{"old/key": {}}\n'
+    (tmp_path / "litellm.json").write_bytes(merged)
+    status = json.loads((tmp_path / "litellm_merge_status.json").read_text())
+    status["merged"].update(
+        {
+            "status": "frozen",
+            "reason": "collision",
+            "sha256": hashlib.sha256(merged).hexdigest(),
+            "entries": 1,
+            "rate_card_sha256": "0" * 64,
+        }
+    )
+    status["collisions"] = ["openrouter/z-ai/glm-5.3"]
+    (tmp_path / "litellm_merge_status.json").write_text(json.dumps(status))
+    publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_check_litellm_rejects_missing_rate_card(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    (tmp_path / "litellm_rate_card.json").unlink()
+    with pytest.raises(RuntimeError, match="litellm_rate_card.json"):
+        publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_check_litellm_rejects_key_parity_drift(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    steering = json.loads((tmp_path / "litellm_steering.json").read_text())
+    steering["openrouter/ghost/model"] = {"provider": {}}
+    (tmp_path / "litellm_steering.json").write_text(json.dumps(steering))
+    with pytest.raises(RuntimeError, match="keys do not match"):
+        publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_check_litellm_rejects_stale_steering_stamp(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    steering = json.loads((tmp_path / "litellm_steering.json").read_text())
+    steering["_meta"]["generated_at"] = "2000-01-01T00:00:00+00:00"
+    (tmp_path / "litellm_steering.json").write_text(json.dumps(steering))
+    with pytest.raises(RuntimeError, match="generated_at"):
+        publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_check_litellm_rejects_stale_status_stamp(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    status = json.loads((tmp_path / "litellm_merge_status.json").read_text())
+    status["_meta"]["generated_at"] = "2000-01-01T00:00:00+00:00"
+    (tmp_path / "litellm_merge_status.json").write_text(json.dumps(status))
+    with pytest.raises(RuntimeError, match="generated_at"):
+        publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_check_litellm_rejects_frozen_hash_mismatch(tmp_path):
+    _write_litellm_artifacts(tmp_path)
+    (tmp_path / "litellm.json").write_bytes(b'{"old/key": {}}\n')
+    status = json.loads((tmp_path / "litellm_merge_status.json").read_text())
+    status["merged"] = {
+        "status": "frozen",
+        "reason": "collision",
+        "sha256": "0" * 64,
+        "entries": 1,
+        "rate_card_sha256": "0" * 64,
+    }
+    (tmp_path / "litellm_merge_status.json").write_text(json.dumps(status))
+    with pytest.raises(RuntimeError, match="merged hash does not match"):
+        publish.check_litellm(tmp_path, _litellm_catalog())
+
+
+def test_publish_workflow_has_litellm_reporting():
+    repo = Path(__file__).resolve().parent.parent
+    text = (repo / ".github" / "workflows" / "publish.yml").read_text()
+    assert "issues: write" in text
+    assert "retention-days: 1" in text
+    assert "report_litellm_merge.py" in text
+    assert "if: always()" in text
 
 
 def test_publish_copies_the_faq_page(tmp_path, monkeypatch):

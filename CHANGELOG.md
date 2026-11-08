@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.9] - 2026-11-08
+
+### Added
+
+- Tool version is `model-compare 0.7.9`.
+- The publish run now writes `litellm_rate_card.json` (a pure LiteLLM
+  cost-map fragment for the ranked candidates), `litellm_steering.json`
+  (preference and strict routing profiles plus the reasoning effort behind
+  the ranking), `litellm.json` (LiteLLM's upstream map plus the
+  fragment) and `litellm_merge_status.json` (merge provenance and failure
+  state).
+- `catalog.json` v6 gains additive `max_output_tokens` and
+  `input_modalities` model fields, cache read/write rates on the pricing
+  base, tiers and schedule windows, and `max_completion_tokens` plus cache
+  rates on endpoint entries. The endpoint cache key moves to v2.
+- A collision or repeated upstream fetch failure freezes only the merged
+  map; the fragment and the site keep publishing, and a deduplicated `bug`
+  issue reports the condition.
+
 ## [0.7.8] - 2026-11-08
 
 ### Fixed

@@ -245,7 +245,13 @@ def test_haiku_single_tier_at_min_context():
     assert eff["price_out"] == 2.5e-6
     assert eff["tier_prompt_tokens"] == 100000
     assert eff["tiers"] == [
-        {"min_prompt_tokens": 100000, "price_in": 5e-7, "price_out": 2.5e-6}
+        {
+            "min_prompt_tokens": 100000,
+            "price_in": 5e-7,
+            "price_out": 2.5e-6,
+            "input_cache_read": 5e-8,
+            "input_cache_write": 6.25e-7,
+        }
     ]
     assert eff["base_price_in"] == 1e-7
     assert eff["base_price_out"] == 5e-7
@@ -306,7 +312,13 @@ def test_duplicate_thresholds_deduped_later_wins_per_key():
     }
     eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
     assert eff["tiers"] == [
-        {"min_prompt_tokens": 100000, "price_in": 2e-6, "price_out": 4e-6}
+        {
+            "min_prompt_tokens": 100000,
+            "price_in": 2e-6,
+            "price_out": 4e-6,
+            "input_cache_read": None,
+            "input_cache_write": None,
+        }
     ]
     assert eff["price_in"] == 2e-6
     assert eff["price_out"] == 4e-6
@@ -321,6 +333,118 @@ def test_per_key_inheritance_from_base():
     eff = mc.effective_pricing(pricing, 1_000_000, 0.75)
     assert eff["price_in"] == 3e-6
     assert eff["price_out"] == 2e-6
+
+
+def test_effective_pricing_cache_rates_passthrough():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "input_cache_read": "0.0000001",
+        "input_cache_write": "0.000001",
+    }
+    eff = mc.effective_pricing(pricing, 1000, 0.5)
+    assert eff["price_cache_read"] == 1e-7
+    assert eff["price_cache_write"] == 1e-6
+    assert eff["base_cache_read"] == 1e-7
+    assert eff["base_cache_write"] == 1e-6
+
+
+def test_effective_pricing_cache_rates_inherit_through_tiers():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "input_cache_read": "0.0000001",
+        "input_cache_write": "0.000001",
+        "overrides": [
+            {"min_prompt_tokens": 100000, "prompt": "0.000003"},
+            {"min_prompt_tokens": 200000, "input_cache_read": "0.0000003"},
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 300000, 0.5)
+    assert eff["price_cache_read"] == 3e-7
+    assert eff["price_cache_write"] == 1e-6
+    assert [t["input_cache_read"] for t in eff["tiers"]] == [1e-7, 3e-7]
+    assert [t["input_cache_write"] for t in eff["tiers"]] == [1e-6, 1e-6]
+
+
+def test_effective_pricing_cache_rates_inherit_through_windows():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "input_cache_read": "0.0000001",
+        "input_cache_write": "0.000001",
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.0000005",
+                "completion": "0.000001",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1000, 0.5)
+    assert eff["schedule"][0]["input_cache_read"] == 1e-7
+    assert eff["schedule"][0]["input_cache_write"] == 1e-6
+
+
+def test_window_cache_rates_inherit_the_frozen_peak_base():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "input_cache_read": "0.0000001",
+        "input_cache_write": "0.000001",
+        "overrides": [
+            {
+                "utc_start": 0,
+                "utc_end": 1200,
+                "prompt": "0.000002",
+                "completion": "0.000004",
+                "input_cache_read": "0.0000005",
+                "input_cache_write": "0.000005",
+            },
+            {
+                "utc_start": 1200,
+                "utc_end": 0,
+                "prompt": "0.000001",
+                "completion": "0.000002",
+            },
+        ],
+    }
+    eff = mc.effective_pricing(pricing, 1000, 0.5)
+    peak = next(w for w in eff["schedule"] if w["price_in"] == 2e-6)
+    sibling = next(w for w in eff["schedule"] if w["price_in"] == 1e-6)
+    assert peak["input_cache_read"] == 5e-7
+    assert sibling["input_cache_read"] == 5e-7
+    assert sibling["input_cache_write"] == 5e-6
+    assert eff["base_cache_read"] == 5e-7
+    assert eff["price_cache_read"] == 5e-7
+
+
+def test_effective_pricing_malformed_cache_rate_is_ignored():
+    pricing = {
+        "prompt": "0.000001",
+        "completion": "0.000002",
+        "input_cache_read": "nan",
+        "input_cache_write": "-1",
+    }
+    eff = mc.effective_pricing(pricing, 1000, 0.5)
+    assert eff["price_cache_read"] is None
+    assert eff["price_cache_write"] is None
+    assert eff["tiers"] == []
+
+
+def test_effective_pricing_haiku_tier_cache_rates():
+    eff = mc.effective_pricing(haiku_pricing(), 1_000_000, 0.75)
+    assert eff["price_cache_read"] == 5e-8
+    assert eff["price_cache_write"] == 6.25e-7
+    assert eff["base_cache_read"] is None
+    assert eff["tiers"][0]["input_cache_read"] == 5e-8
 
 
 def test_key_whitelist_audio_price_keys_apply():
@@ -1173,6 +1297,52 @@ def test_parse_endpoints_keeps_verified_fields():
     assert eps[0]["service_tier"] is None
 
 
+def test_parse_endpoints_keeps_max_completion_and_cache_rates():
+    payload = {
+        "data": {
+            "endpoints": [
+                _endpoint(
+                    max_completion_tokens=943718,
+                    pricing={
+                        "prompt": "0.00000001",
+                        "completion": "0.0000005",
+                        "input_cache_read": "0.000000005",
+                        "input_cache_write": "0.00000125",
+                        "input_cache_write_1h": "0.000002",
+                    },
+                )
+            ]
+        }
+    }
+    ep = mc.parse_endpoints(payload)[0]
+    assert ep["max_completion_tokens"] == 943718
+    assert ep["pricing"]["input_cache_read"] == 5e-9
+    assert ep["pricing"]["input_cache_write"] == 1.25e-6
+    assert ep["pricing"]["input_cache_write_1h"] == 2e-6
+
+
+def test_parse_endpoints_new_fields_default_to_null():
+    ep = mc.parse_endpoints({"data": {"endpoints": [_endpoint()]}})[0]
+    assert ep["max_completion_tokens"] is None
+    assert ep["pricing"]["input_cache_read"] is None
+    assert ep["pricing"]["input_cache_write"] is None
+    assert ep["pricing"]["input_cache_write_1h"] is None
+
+
+def test_fetch_model_endpoints_uses_v2_cache(monkeypatch):
+    seen = []
+
+    def fake_load(name, ttl):
+        seen.append(name)
+        return None
+
+    monkeypatch.setattr(mc, "load_cache", fake_load)
+    monkeypatch.setattr(mc, "save_cache", lambda *a, **k: None)
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: {"data": {"endpoints": []}})
+    mc.fetch_model_endpoints("z-ai/glm-5.3", make_args(no_cache=False, cache_ttl=60))
+    assert seen == ["endpoints-v2:z-ai_glm-5.3"]
+
+
 def test_variant_detection_marker_and_zero_price():
     assert mc.is_variant_endpoint(_endpoint(tag="z-ai:free"))
     assert mc.is_variant_endpoint(_endpoint(tag="z-ai:batch"))  # marker, not price
@@ -1226,8 +1396,8 @@ def test_fetch_model_endpoints_round_trip(monkeypatch):
     eps = mc.fetch_model_endpoints("z-ai/glm", args)
     assert calls == [mc.OPENROUTER_ENDPOINTS_URL.format(id="z-ai/glm")]
     assert eps == mc.parse_endpoints(payload)
-    # Saved under the flattened cache name ("/" -> "_", hyphen kept).
-    assert Path(mc.cache_path("endpoints:z-ai_glm")).exists()
+    # Saved under the flattened v2 cache name ("/" -> "_", hyphen kept).
+    assert Path(mc.cache_path("endpoints-v2:z-ai_glm")).exists()
     # Second call: served from cache, no refetch.
     assert mc.fetch_model_endpoints("z-ai/glm", args) == eps
     assert len(calls) == 1
@@ -1872,7 +2042,7 @@ def _stub_endpoint_pipeline(
         endpoints = endpoints_by_id[model_id]
         # Mirror fetch_model_endpoints: a successful fetch writes the cache
         # the stale-annotations rule reads later.
-        mc.save_cache(f"endpoints:{model_id.replace('/', '_')}", endpoints)
+        mc.save_cache(mc.endpoint_cache_name(model_id), endpoints)
         return endpoints
 
     monkeypatch.setattr(mc, "fetch_model_endpoints", fake_fetch)
@@ -1917,7 +2087,7 @@ def test_pool_accounting_balances_with_endpoint_drops(monkeypatch, capsys):
 
 
 def test_catalog_schema_versions_are_in_lockstep():
-    assert mc.VERSION == "0.7.8"
+    assert mc.VERSION == "0.7.9"
     assert mc.CATALOG_QUALITY_SCHEMA_VERSION == mc.CATALOG_SCHEMA_VERSION == 6
     assert (
         mc.CATALOG_QUALITY_SCHEMA_VERSION
@@ -2065,8 +2235,8 @@ def test_fetch_failure_drops_model_with_stale_annotations(monkeypatch):
     monkeypatch.setattr(mc, "fetch_model_endpoints", boom)
     # Only z-ai/glm has an (expired) cached endpoint list to fall back to.
     stale_eps = [_endpoint(provider_name="Z.AI", tag="z-ai/fp8", quantization="fp8")]
-    mc.save_cache("endpoints:z-ai_glm", stale_eps)
-    path = Path(mc.cache_path("endpoints:z-ai_glm"))
+    mc.save_cache(mc.endpoint_cache_name("z-ai/glm"), stale_eps)
+    path = Path(mc.cache_path(mc.endpoint_cache_name("z-ai/glm")))
     blob = json.loads(path.read_text())
     blob["fetched_at"] = time.time() - 999999
     path.write_text(json.dumps(blob))
@@ -3923,6 +4093,145 @@ def test_build_candidates_additive_fields():
     assert cand["tool_calling"] is True
     assert cand["zdr"] is True
     assert cand["expired"] is False
+
+
+def test_build_candidates_attaches_new_fields():
+    model = make_model(
+        top_provider={"max_completion_tokens": 64000},
+        architecture={"modality": "text->text", "input_modalities": ["text", "image"]},
+        pricing={
+            "prompt": "0.000001",
+            "completion": "0.000002",
+            "input_cache_read": "0.0000001",
+            "input_cache_write": "0.000001",
+        },
+    )
+    cands, _ = mc.build_candidates([model], make_args(), {}, {"acme/model-a"})
+    cand = cands[0]
+    assert cand["max_output_tokens"] == 64000
+    assert cand["input_modalities"] == ["text", "image"]
+    assert cand["cache_read_per_1m"] == pytest.approx(0.1)
+    assert cand["cache_write_per_1m"] == pytest.approx(1.0)
+    assert cand["base_cache_read_per_1m"] == pytest.approx(0.1)
+    assert cand["base_cache_write_per_1m"] == pytest.approx(1.0)
+
+
+def test_apply_endpoint_pricing_uses_baseline_new_fields(monkeypatch):
+    eps = [
+        {
+            "provider_name": "Morph",
+            "tag": "morph/fp8",
+            "quantization": "fp8",
+            "pricing": {
+                "prompt": "0.00000001",
+                "completion": "0.0000005",
+                "input_cache_read": "0.000000005",
+                "input_cache_write": "0.00000125",
+                "overrides": [],
+            },
+            "context_length": 1_000_000,
+            "max_completion_tokens": 943718,
+            "status": 0,
+            "service_tier": None,
+        }
+    ]
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    args = make_args(min_context=0)
+    candidates, _ = mc.build_candidates(
+        [make_model(id="z-ai/glm", top_provider={"max_completion_tokens": 8192})],
+        args,
+        {},
+        {"z-ai/glm"},
+        [],
+    )
+    candidates, _ = mc.apply_endpoint_pricing(candidates, args, [])
+    cand = candidates[0]
+    assert cand["max_output_tokens"] == 943718
+    assert cand["cache_read_per_1m"] == pytest.approx(0.005)
+    assert cand["cache_write_per_1m"] == pytest.approx(1.25)
+    assert cand["base_cache_read_per_1m"] == pytest.approx(0.005)
+    assert cand["base_cache_write_per_1m"] == pytest.approx(1.25)
+
+
+def test_build_catalog_emits_new_fields():
+    model = make_model(
+        id="acme/model-a",
+        top_provider={"max_completion_tokens": 64000},
+        architecture={"modality": "text->text", "input_modalities": ["text", "image"]},
+        pricing={
+            "prompt": "0.000001",
+            "completion": "0.000002",
+            "input_cache_read": "0.0000001",
+            "input_cache_write": "0.000001",
+            "overrides": [
+                {
+                    "min_prompt_tokens": 100000,
+                    "prompt": "0.000003",
+                    "input_cache_read": "0.0000003",
+                }
+            ],
+        },
+    )
+    args = make_args(min_context=0)
+    candidates, dropped = mc.build_candidates([model], args, {}, {"acme/model-a"}, [])
+    quality_by_id, quality_source_by_id = mc.resolve_quality(
+        candidates, {}, {}, {}, "AA API v2"
+    )
+    mc.compute_scores(candidates, args, quality_by_id)
+    doc = mc.build_catalog(
+        args,
+        [model],
+        candidates,
+        dropped,
+        [],
+        {},
+        quality_by_id,
+        "AA API v2",
+        {},
+        quality_source_by_id,
+    )
+    entry = doc["models"][0]
+    assert entry["max_output_tokens"] == 64000
+    assert entry["input_modalities"] == ["text", "image"]
+    assert entry["pricing"]["input_cache_read_per_1m"] == pytest.approx(0.1)
+    assert entry["pricing"]["input_cache_write_per_1m"] == pytest.approx(1.0)
+    assert entry["pricing"]["base"]["input_cache_read_per_1m"] == pytest.approx(0.1)
+    assert entry["pricing"]["tiers"][0]["input_cache_read_per_1m"] == pytest.approx(0.3)
+    assert entry["pricing"]["tiers"][0]["input_cache_write_per_1m"] == pytest.approx(
+        1.0
+    )
+
+
+def test_build_schedules_emits_cache_rates():
+    model = make_model(
+        id="acme/scheduled",
+        pricing={
+            "prompt": "0.000001",
+            "completion": "0.000002",
+            "input_cache_read": "0.0000001",
+            "input_cache_write": "0.000001",
+            "overrides": [
+                {
+                    "utc_start": 0,
+                    "utc_end": 1200,
+                    "prompt": "0.0000005",
+                    "completion": "0.000001",
+                    "input_cache_read": "0.00000005",
+                },
+                {
+                    "utc_start": 1200,
+                    "utc_end": 0,
+                    "prompt": "0.000001",
+                    "completion": "0.000002",
+                },
+            ],
+        },
+    )
+    entries = mc.build_schedules([model], make_args(min_context=0), {}, {}, {}, None)
+    entry = entries[0]
+    assert entry["peak"]["input_cache_read_per_1m"] == pytest.approx(0.1)
+    assert entry["offpeak"]["input_cache_read_per_1m"] == pytest.approx(0.05)
+    assert entry["schedule"][0]["input_cache_write_per_1m"] == pytest.approx(1.0)
 
 
 def test_build_candidates_zdr_null_under_no_zdr():
@@ -8405,11 +8714,17 @@ def test_catalog_entry_shape():
         # the producer emits it on every entry, but validate_catalog must
         # keep accepting pre-endpoint-shaped documents that lack it, so it
         # stays optional (outside the required set).
-        assert set(entry) == CATALOG_ENTRY_KEYS | {"steering"}
+        assert set(entry) == CATALOG_ENTRY_KEYS | {
+            "steering",
+            "max_output_tokens",
+            "input_modalities",
+        }
         assert set(entry["pricing"]) == {
             "input_per_1m",
             "output_per_1m",
             "blended_per_1m",
+            "input_cache_read_per_1m",
+            "input_cache_write_per_1m",
             "base",
             "tiers",
             "schedule",
@@ -8418,6 +8733,8 @@ def test_catalog_entry_shape():
             "input_per_1m",
             "output_per_1m",
             "blended_per_1m",
+            "input_cache_read_per_1m",
+            "input_cache_write_per_1m",
         }
         assert set(entry["scores"]) == {"price", "quality", "context", "age", "overall"}
         assert set(entry["scores"]["overall"]) == {"balanced", "price", "quality"}
@@ -8429,10 +8746,14 @@ def test_catalog_entry_shape():
         "input_per_1m": 1.0,
         "output_per_1m": 2.0,
         "blended_per_1m": 1.25,
+        "input_cache_read_per_1m": None,
+        "input_cache_write_per_1m": None,
         "base": {
             "input_per_1m": 1.0,
             "output_per_1m": 2.0,
             "blended_per_1m": 1.25,
+            "input_cache_read_per_1m": None,
+            "input_cache_write_per_1m": None,
         },
         "tiers": [],
         "schedule": None,
@@ -8550,6 +8871,8 @@ def test_catalog_tiered_pricing_block():
         "input_per_1m": pytest.approx(0.1),
         "output_per_1m": pytest.approx(0.5),
         "blended_per_1m": pytest.approx(0.2),
+        "input_cache_read_per_1m": None,
+        "input_cache_write_per_1m": None,
     }
     assert pricing["tiers"] == [
         {
@@ -8557,6 +8880,8 @@ def test_catalog_tiered_pricing_block():
             "input_per_1m": 0.5,
             "output_per_1m": 2.5,
             "blended_per_1m": 1.0,
+            "input_cache_read_per_1m": pytest.approx(0.05),
+            "input_cache_write_per_1m": pytest.approx(0.625),
         }
     ]
     assert pricing["schedule"] is None
@@ -9348,7 +9673,7 @@ def test_version_flag():
         check=True,
     )
     # Literal pin: a release that forgets to bump VERSION fails here.
-    assert proc.stdout.strip() == "model-compare 0.7.8"
+    assert proc.stdout.strip() == "model-compare 0.7.9"
 
 
 # ---------------------------------------------------------------------------

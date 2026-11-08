@@ -285,6 +285,7 @@ def _validate_window(window, label) -> None:
         value = window.get(key)
         if not _is_number(value) or value < 0:
             raise ValueError(f"{label} {key} must be a non-negative number")
+    _validate_optional_cache_rates(window, label)
 
 
 def _validate_schedule_list(schedule, label) -> None:
@@ -309,6 +310,16 @@ def _validate_schedule_list(schedule, label) -> None:
         raise ValueError(f"{label} coverages must sum to 1 (got {total})")
 
 
+def _validate_optional_cache_rates(block, label) -> None:
+    """Optional per-1M cache rates: null or a finite non-negative number."""
+    for key in ("input_cache_read_per_1m", "input_cache_write_per_1m"):
+        if key not in block:
+            continue
+        value = block[key]
+        if value is not None and (not _is_number(value) or value < 0):
+            raise ValueError(f"{label} {key} must be a non-negative number or null")
+
+
 def _validate_price_block(block, label) -> None:
     if not isinstance(block, dict) or any(
         key not in block for key in CATALOG_BASE_KEYS
@@ -319,6 +330,7 @@ def _validate_price_block(block, label) -> None:
     ]
     if bad:
         raise ValueError(f"{label} must hold non-negative numbers: " + ", ".join(bad))
+    _validate_optional_cache_rates(block, label)
 
 
 def _validate_catalog_endpoints(endpoints, label) -> None:
@@ -372,6 +384,27 @@ def _validate_catalog_endpoints(endpoints, label) -> None:
                 not isinstance(value, int) or isinstance(value, bool)
             ):
                 raise ValueError(f"{sub} {key} must be an integer or null")
+        max_completion = endpoint.get("max_completion_tokens")
+        if max_completion is not None and (
+            not isinstance(max_completion, int)
+            or isinstance(max_completion, bool)
+            or max_completion <= 0
+        ):
+            raise ValueError(
+                f"{sub} max_completion_tokens must be a positive integer or null"
+            )
+        for key in (
+            "input_cache_read",
+            "input_cache_write",
+            "input_cache_write_1h",
+        ):
+            if key not in pricing:
+                continue
+            value = pricing[key]
+            if value is not None and (not _is_number(value) or value < 0):
+                raise ValueError(
+                    f"{sub} pricing.{key} must be a non-negative number or null"
+                )
 
 
 def _validate_catalog_advertised_pricing(advertised, label) -> None:
@@ -770,6 +803,26 @@ def validate_catalog(document) -> None:
             raise ValueError(
                 f"models[{i}] pricing must hold non-negative numbers: "
                 + ", ".join(bad_pricing)
+            )
+        _validate_optional_cache_rates(pricing, f"models[{i}] pricing")
+        max_output = entry.get("max_output_tokens")
+        if max_output is not None and (
+            not isinstance(max_output, int)
+            or isinstance(max_output, bool)
+            or max_output <= 0
+        ):
+            raise ValueError(
+                f"models[{i}] max_output_tokens must be a positive integer or null"
+            )
+        modalities = entry.get("input_modalities")
+        if modalities is not None and (
+            not isinstance(modalities, list)
+            or any(
+                not isinstance(modality, str) or not modality for modality in modalities
+            )
+        ):
+            raise ValueError(
+                f"models[{i}] input_modalities must be a list of non-empty strings"
             )
         missing_tier_keys = [
             key for key in ("base", "tiers", "schedule") if key not in pricing

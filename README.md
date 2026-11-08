@@ -284,6 +284,71 @@ row's steering block with another variant's id. The
 [site FAQ](https://canonical.github.io/model-compare/faq.html) covers the
 same ground question by question.
 
+## LiteLLM rate card and steering
+
+The publish run also writes LiteLLM-shaped artifacts from the validated
+catalog:
+
+| file | what it is |
+|------|------------|
+| [`litellm_rate_card.json`](https://canonical.github.io/model-compare/litellm_rate_card.json) | a pure LiteLLM cost-map fragment, one entry per ranked candidate, keyed `openrouter/<catalog id>` |
+| [`litellm_steering.json`](https://canonical.github.io/model-compare/litellm_steering.json) | the OpenRouter preference object, a strict single-endpoint profile, the reasoning effort used for the ranking, and `_meta` provenance |
+| [`litellm.json`](https://canonical.github.io/model-compare/litellm.json) | LiteLLM's upstream map merged with our 81-entry fragment |
+| [`litellm_merge_status.json`](https://canonical.github.io/model-compare/litellm_merge_status.json) | whether the merged map was rebuilt, frozen on a collision, or skipped |
+
+The rate card is a fragment: LiteLLM rejects a custom map that is too small to
+be a full price list. Use the published merged map directly:
+
+```bash
+export LITELLM_MODEL_COST_MAP_URL=https://model-compare.dev/litellm.json
+```
+
+Or merge the fragment yourself when you want to pin upstream:
+
+```bash
+curl -sL https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json -o upstream.json
+curl -sL https://model-compare.dev/litellm_rate_card.json -o model-compare.json
+jq -s '.[0] + .[1]' upstream.json model-compare.json > merged.json
+```
+
+`+` is a shallow union: a model present in both maps is replaced whole by our
+entry, not field-merged.
+
+Set the URL in the proxy environment before startup, not under
+`environment_variables` in the config, and verify it loaded with
+`curl -s http://localhost:4000/model/cost_map/source -H "Authorization: Bearer $LITELLM_MASTER_KEY"`.
+If LiteLLM cannot fetch or validate the map it silently falls back to its
+bundled map, so alert on `fallback_reason`.
+
+`litellm_steering.json` is data, not a hook. A LiteLLM `CustomLogger` can read
+it in `async_pre_call_hook`: resolve the request alias to the
+`openrouter/<id>` key, choose `provider` (fallbacks allowed) or
+`provider_strict` (one endpoint, no fallbacks, `max_price` capped at the base
+price), inject it through `extra_body.provider`, and send
+`reasoning.preferred.effort` through `extra_body.reasoning`. Deployment
+policy (`zdr`, `data_collection`, `require_parameters`) stays in the proxy or
+hook config, not in the file.
+
+The strict profile fails when its one endpoint is unavailable. The preference
+profile can fall back to another eligible endpoint, so its price is a strong
+preference, not a guarantee. `reasoning.preferred` is the effort behind the
+published quality; `reasoning.model_default` is OpenRouter's own default. Do
+not send `none` when `mandatory` is true, and do not use LiteLLM's
+`reasoning_effort` field for a literal `max` -- LiteLLM rewrites it to
+`xhigh`. Use `extra_body={"reasoning": {"effort": "max"}}`.
+
+Known limits: the fragment covers the 81 ranked candidates, not the filtered
+models; it has no rank, score, quality or provenance fields; and LiteLLM can
+express only one off-peak rate level. A model with several distinct off-peak
+levels is published without `off_peak_pricing`, and a model with both tiers
+and a schedule keeps its tiers and loses the off-peak block. Both cases are
+recorded in `_meta.warnings`.
+
+The merged map is about 3.5 MB. If upstream ever adds an `openrouter/` key we
+also cover, the merged map freezes at its last good version while the
+fragment and the rest of the site keep publishing; the workflow opens or
+updates one `bug` issue titled "LiteLLM merged map needs attention".
+
 ## License
 
 GPL-3.0 — see [LICENSE](LICENSE).
