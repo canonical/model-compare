@@ -108,7 +108,7 @@ QUALITY_CATALOG_CACHE = "published-catalog"
 # A published catalog generated more than this many days ago is stale:
 # warn but use -- the records' as_of makes the staleness visible downstream.
 QUALITY_CATALOG_MAX_AGE_DAYS = 14
-VERSION = "0.7.7"
+VERSION = "0.7.8"
 USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 
 # opencode expects provider-qualified model ids: openrouter/<provider/model>.
@@ -2893,10 +2893,14 @@ def _pair_permaslug_payloads(valid, models, merge=None):
     wins per slug), then undated keys self-map, then an unambiguous dated
     strip. Returns ``{slug: (payload, date)}``.
 
-    ``merge`` changes only pass 1's same-slug resolution and is for
-    payloads that are turn-range maps (fetch_session_cost), not whole
-    records: same-slug snapshots union their range maps, each range
-    resolving to the latest date's cell (first wins on an equal date).
+    ``merge`` is for payloads that are turn-range maps (fetch_session_cost),
+    not whole records, and unions a slug's maps across all three passes:
+    pass 1's same-slug snapshots, an undated key naming an already-paired
+    slug (pass 2), and the single unambiguous dated strip onto an
+    already-paired id (pass 3) -- each range resolves to the latest date's
+    cell (first wins on an equal date), so one slug's data never silently
+    loses ranges because it arrived through different passes. An ambiguous
+    strip (several candidates) still drops rather than guesses.
     Whole-record payloads must keep the default, which replaces the
     payload wholesale -- a record is self-contained, so mixing snapshots
     would splice fields from different snapshots.
@@ -2914,28 +2918,37 @@ def _pair_permaslug_payloads(valid, models, merge=None):
 
     paired = {}
     claimed = set()
+    seen_range = {}
+
+    # merge mode only: union one turn-range-map payload into slug's map.
+    # Each range resolves to the latest date's cell (first wins on an
+    # equal date); the paired date tracks the latest contributing date.
+    # The merged map is always a fresh copy: an earlier pass may have
+    # stored a caller-owned payload by reference, and writing into it
+    # would corrupt the caller's ``valid`` payloads.
+    def merge_ranges(slug, payload, date):
+        merged, prev_date = paired.get(slug, ({}, ""))
+        merged = dict(merged)
+        for turn_range, median in payload.items():
+            rkey = (slug, turn_range)
+            if rkey in seen_range and seen_range[rkey] >= date:
+                continue
+            seen_range[rkey] = date
+            merged[turn_range] = median
+        paired[slug] = (merged, date if date > prev_date else prev_date)
 
     # Pass 1: permaslug keys pair with their own slug; same-slug
     # snapshots resolve to the latest date (first wins on an equal date).
     # In merge mode a payload is a turn-range map, not a whole record, so
     # same-slug snapshots union their maps per range instead of replacing.
     seen_date = {}
-    seen_range = {}
     for key, (payload, date) in valid.items():
         slug = permaslug_to_slug.get(key)
         if slug is None:
             continue
         if merge:
             claimed.add(slug)
-            merged, prev_date = paired.setdefault(slug, ({}, ""))
-            for turn_range, median in payload.items():
-                rkey = (slug, turn_range)
-                if rkey in seen_range and seen_range[rkey] >= date:
-                    continue
-                seen_range[rkey] = date
-                merged[turn_range] = median
-            if date > prev_date:
-                paired[slug] = (merged, date)
+            merge_ranges(slug, payload, date)
             continue
         if slug in seen_date and seen_date[slug] >= date:
             continue
@@ -2944,14 +2957,23 @@ def _pair_permaslug_payloads(valid, models, merge=None):
         claimed.add(slug)
 
     # Pass 2: undated keys self-map unless pass 1 claimed the id.
+    # In merge mode a claimed undated key that IS an already-paired slug
+    # unions its ranges into that slug's map instead of dropping -- one
+    # slug's data arriving through different passes must not lose ranges.
     for key, (payload, date) in valid.items():
-        if date or key in permaslug_to_slug or key in claimed:
+        if date or key in permaslug_to_slug:
+            continue
+        if key in claimed:
+            if merge and key in paired:
+                merge_ranges(key, payload, date)
             continue
         paired[key] = (payload, date)
         claimed.add(key)
 
     # Pass 3: unpaired dated keys strip, but only onto an unclaimed id
-    # and only when the strip is unambiguous.
+    # and only when the strip is unambiguous. In merge mode the single
+    # unambiguous candidate unions into an already-paired bare id instead
+    # of dropping; an ambiguous strip (several candidates) still drops.
     strip_candidates = {}
     for key, (payload, date) in valid.items():
         if not date or key in permaslug_to_slug:
@@ -2959,9 +2981,13 @@ def _pair_permaslug_payloads(valid, models, merge=None):
         stripped = strip_permaslug_date(key)
         strip_candidates.setdefault(stripped, []).append((date, payload))
     for bare, candidates in strip_candidates.items():
-        if bare in claimed or len(candidates) > 1:
+        if len(candidates) > 1:
             continue
         date, payload = candidates[0]
+        if bare in claimed:
+            if merge and bare in paired:
+                merge_ranges(bare, payload, date)
+            continue
         paired[bare] = (payload, date)
         claimed.add(bare)
 
@@ -4512,7 +4538,7 @@ LEGENDS = {
                 "AA intelligence index at the model's best measured selectable depth",
                 "{d:'-'} = unknown, scores 0",
                 "suffix after · names the effort used for QUAL; this view has no",
-                "DEPTH column or {y:*} marker",
+                'DEPTH column or {y:"*"} marker',
             ],
         ),
         (
@@ -4665,7 +4691,9 @@ def print_table(
         print(style.bold(label) + "  " + render_legend(lines[0], style))
         for extra in lines[1:]:
             print(" " * (width + 2) + render_legend(extra, style))
-    if depths:
+    if depths and top:
+        # The separator only prints when a depth section will follow:
+        # print_depth_detail returns early on an empty top.
         print()
         print_depth_detail(top, style)
 
@@ -4747,9 +4775,10 @@ def print_deals(rows, style=None, bare=False):
     if bare:
         return
     print()
-    width = max(len(term) for term, _ in DEALS_LEGEND)
+    width = max(len(legend_plain(term)) for term, _ in DEALS_LEGEND)
     for term, text in DEALS_LEGEND:
-        print(style.bold(term.ljust(width)) + "  " + text)
+        label = legend_plain(term).ljust(width)
+        print(style.bold(label) + "  " + render_legend(text, style))
 
 
 DEPTH_LEGEND = (
@@ -4971,9 +5000,10 @@ def print_depth_detail(top, style=None):
             emit_row(row)
 
     print()
-    width = max(len(term) for term, _ in DEPTH_LEGEND)
+    width = max(len(legend_plain(term)) for term, _ in DEPTH_LEGEND)
     for term, lines in DEPTH_LEGEND:
-        print(style.bold(term.ljust(width)) + "  " + render_legend(lines[0], style))
+        label = legend_plain(term).ljust(width)
+        print(style.bold(label) + "  " + render_legend(lines[0], style))
         for extra in lines[1:]:
             print(" " * (width + 2) + render_legend(extra, style))
 
