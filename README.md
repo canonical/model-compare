@@ -229,6 +229,61 @@ off-peak discount (`-38%`), or a sub-1% schedule (`SCHED`);
 `pricing.tiers`, `pricing.schedule` (with per-window `coverage` fractions
 for time-weighted pricing) and the top-level `schedules` deals index.
 
+## Precision and routing
+
+`PREC` is the quantization the ranked endpoint quotes, not a property of the
+model: one id can be served by several endpoints at different precisions and
+prices. The tool ranks at the cheapest eligible endpoint, so `PREC` names that
+endpoint's precision; a trailing `!` warns that OpenRouter's default routing
+would send more than half the traffic to cheaper sub-default endpoints. Hover
+the cell on the site, or read `quant_note` in `--json`, for the cheapest
+non-baseline endpoint and its price spread.
+
+That is why the price you pay can differ from the ranked price. The ranking
+uses the cheapest eligible endpoint, blended `--input-share` input/output;
+openrouter.ai shows the default endpoint. Tiered pricing and off-peak
+schedules move the bill too (see [Tiered pricing](#tiered-pricing)).
+
+To reproduce the ranked choice, pass the `steering` block that every `--json`
+row and every `catalog.json` model entry carries:
+
+```json
+{
+  "model": "deepseek/deepseek-v4.1-flash-1017",
+  "provider": {
+    "order": ["DeepInfra/fp8", "Baidu/bf16"],
+    "ignore": ["Morph/int4"],
+    "quantizations": ["bf16", "fp8"],
+    "allow_fallbacks": true
+  }
+}
+```
+
+`order` lists the baseline-eligible endpoints, cheapest first; `ignore` names
+every live endpoint that is not eligible; `quantizations` keeps precisions at
+or above the quoted one (`null` default precision omits the key);
+`allow_fallbacks` lets OpenRouter fall back when the ordered endpoints are
+unavailable.
+
+With the OpenAI SDK, pass the `provider` object through `extra_body` --
+unknown top-level parameters are dropped before the request is sent:
+
+```python
+client.chat.completions.create(
+    model="deepseek/deepseek-v4.1-flash-1017",
+    messages=messages,
+    extra_body={"provider": steering["provider"]},
+)
+```
+
+In OpenCode, the model-compare plugin applies the block for you, and its
+`body` option forwards a custom request body to the provider request.
+Reasoning depth is part of the id (`#max`, `#high`, ...), and `:free` and
+`:batch` ids are separate listings with their own prices; don't pair one
+row's steering block with another variant's id. The
+[site FAQ](https://canonical.github.io/model-compare/faq.html) covers the
+same ground question by question.
+
 ## License
 
 GPL-3.0 — see [LICENSE](LICENSE).
