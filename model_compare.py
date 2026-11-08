@@ -108,7 +108,7 @@ QUALITY_CATALOG_CACHE = "published-catalog"
 # A published catalog generated more than this many days ago is stale:
 # warn but use -- the records' as_of makes the staleness visible downstream.
 QUALITY_CATALOG_MAX_AGE_DAYS = 14
-VERSION = "0.7.4"
+VERSION = "0.7.5"
 USER_AGENT = f"model-compare/{VERSION} (https://github.com/canonical/model-compare)"
 
 # opencode expects provider-qualified model ids: openrouter/<provider/model>.
@@ -4429,27 +4429,57 @@ TABLE_COLUMNS = {
     "simple": ("RANK", "MODEL", "QUALITY", "IN $/M", "OUT $/M", "DISCOUNT", "AGE"),
 }
 
+# Legend text carries inline style markers so one rule set covers every
+# legend (main, depth, deals): {c:...} = CLI option/typed token (cyan),
+# {d:...} = literal value or unknown-data placeholder (dim), {y:...} =
+# symbol marker (yellow). Wanting another emphasis means adding a marker
+# kind here, never a one-off style call at a call site.
+LEGEND_MARKER_RE = re.compile(r"\{([bcdy]):([^{}]*)\}")
+
+
+def legend_plain(text: str) -> str:
+    """Legend text with its style markers stripped (for width maths)."""
+    return LEGEND_MARKER_RE.sub(r"\2", text)
+
+
+def render_legend(text: str, style) -> str:
+    """Expand a legend line's inline markers into the active Style."""
+    methods = {
+        "b": style.bold,
+        "c": style.cyan,
+        "d": style.dim,
+        "y": style.yellow,
+    }
+    out, pos = [], 0
+    for match in LEGEND_MARKER_RE.finditer(text):
+        out.append(text[pos : match.start()])
+        out.append(methods[match.group(1)](match.group(2)))
+        pos = match.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 LEGENDS = {
     "expert": (
         (
             "QUALITY",
             [
                 "AA intelligence index at the model's best measured selectable depth",
-                '(default; --reasoning-effort overrides); "-" = unknown, scores 0',
+                '({d:default}; {c:--reasoning-effort} overrides); {d:"-"} = unknown, scores 0',
             ],
         ),
         (
             "DEPTH",
             [
-                "reasoning effort QUAL was measured at; * = OpenRouter's default (informational)",
-                "- = no known effort; --no-depths hides the depth detail",
+                "reasoning effort QUAL was measured at; {y:*} = OpenRouter's default (informational)",
+                "{d:-} = no known effort; {c:--depths} shows the depth detail",
             ],
         ),
         (
             "$IN/$OUT",
             [
                 "USD per 1M tokens at the cheapest eligible endpoint, blended",
-                "{in_pct} input / {out_pct} output (--input-share); differs from the",
+                "{d:{in_pct}} input / {d:{out_pct}} output ({c:--input-share}); differs from the",
                 "openrouter.ai default-endpoint price by design. A higher rate",
                 "may apply once the prompt outgrows a model's short-context tier.",
             ],
@@ -4458,38 +4488,38 @@ LEGENDS = {
         (
             "PREC",
             [
-                'quoted precision ("!" = default routing favors cheaper',
+                'quoted precision ({y:"!"} = default routing favors cheaper',
                 "sub-default endpoints)",
             ],
         ),
         (
             "TIER",
             [
-                "how prices vary: >Nk = pricier above that prompt size; -N% =",
+                "how prices vary: {d:>Nk} = pricier above that prompt size; {d:-N%} =",
                 "scheduled off-peak discount (price shown: the standard rate);",
-                "SCHED = schedule with a discount under 1% (--off-peak lists them)",
+                "{d:SCHED} = schedule with a discount under 1% ({c:--off-peak} lists them)",
             ],
         ),
-        ("CTX", ["context window; AGE = days since listed on OpenRouter"]),
+        ("CTX", ["context window; {b:AGE} = days since listed on OpenRouter"]),
         ("SCORE", ["weighted blend of the four criteria above"]),
     ),
     "simple": (
         ("RANK", ["position in this ranking"]),
-        ("MODEL", ["provider/model id as listed; --best prefixes openrouter/"]),
+        ("MODEL", ["provider/model id as listed; {c:--best} prefixes openrouter/"]),
         (
             "QUALITY",
             [
                 "AA intelligence index at the model's best measured selectable depth",
-                "'-' = unknown, scores 0",
+                "{d:'-'} = unknown, scores 0",
                 "suffix after · names the effort used for QUAL; this view has no",
-                "DEPTH column or * marker",
+                "DEPTH column or {y:*} marker",
             ],
         ),
         (
             "IN/OUT $/M",
             [
                 "USD per 1M tokens at the cheapest eligible endpoint, blended",
-                "{in_pct} input / {out_pct} output (--input-share)",
+                "{d:{in_pct}} input / {d:{out_pct}} output ({c:--input-share})",
             ],
         ),
         ("DISCOUNT", ["active discount, if any"]),
@@ -4574,7 +4604,7 @@ def print_table(
     style=None,
     bare=False,
     input_share=0.75,
-    depth_detail=None,
+    depths=False,
 ):
     style = style or Style(False)
     columns = TABLE_COLUMNS[detail]
@@ -4613,22 +4643,27 @@ def print_table(
     warn = not quality_note or quality_note.get("warn")
     for line in quality_source_lines(quality_note):
         print(style.yellow(line) if warn else line)
-    if depth_detail is not None:
-        print()
-        depth_detail(top)
+    # The column legend sits right under the table it explains; the depth
+    # details follow it (issue #28).
     print()
     legend = LEGENDS[detail]
-    width = max(len(term) for term, _ in legend)
+    width = max(len(legend_plain(term)) for term, _ in legend)
     in_pct = f"{input_share:.0%}"
     out_pct = f"{1 - input_share:.0%}"
     for term, lines in legend:
+        # Percentages are substituted before the style markers are parsed,
+        # so {d:{in_pct}} becomes {d:75%}.
         lines = [
             line.replace("{in_pct}", in_pct).replace("{out_pct}", out_pct)
             for line in lines
         ]
-        print(style.bold(term.ljust(width)) + "  " + lines[0])
+        label = legend_plain(term).ljust(width)
+        print(style.bold(label) + "  " + render_legend(lines[0], style))
         for extra in lines[1:]:
-            print(" " * (width + 2) + extra)
+            print(" " * (width + 2) + render_legend(extra, style))
+    if depths:
+        print()
+        print_depth_detail(top, style)
 
 
 DEALS_COLUMNS = (
@@ -4713,7 +4748,40 @@ def print_deals(rows, style=None, bare=False):
         print(style.bold(term.ljust(width)) + "  " + text)
 
 
-def print_depth_detail(top):
+DEPTH_LEGEND = (
+    ("effort", ["reasoning effort this row measures (deepest first)"]),
+    (
+        "AA idx",
+        ['AA intelligence index at that effort; {d:"-"} = not measured'],
+    ),
+    (
+        "AA $/task",
+        [
+            "AA's measured benchmark cost at AA's reference price, not",
+            "the OR per-token price; it never enters the weighted score",
+        ],
+    ),
+    ("vs default", ["AA $/task as a ratio of the default effort's cost"]),
+    (
+        "select",
+        [
+            'the OpenCode variant suffix that pins the depth; {y:"-"} = not',
+            "selectable; {y:*} marks OpenRouter's default, and appending",
+            "{c:#effort} to the model id pins it in OpenCode",
+        ],
+    ),
+    ("OR $/M", ["constant across depths (the title line's per-listing price)"]),
+    (
+        "(no label)",
+        [
+            "an AA index measured without an effort label is a reference",
+            "only; it never fills QUAL",
+        ],
+    ),
+)
+
+
+def print_depth_detail(top, style=None):
     """Per-model AA depth detail: measured scores and selectable variants.
 
     One block per model in the given (rank) order, listing the union of
@@ -4842,41 +4910,70 @@ def print_depth_detail(top):
             for i, cell in enumerate(row):
                 widths[i] = max(widths[i], len(cell))
 
-    def emit(cells):
-        padded = [cell.ljust(width) for cell, width in zip(cells[:-1], widths[:-1])]
-        print("   " + "   ".join(padded + [cells[-1]]))
+    style = style or Style(False)
+    # Columns whose "-" means "no data" get dim; select's "-" is a value,
+    # not a placeholder, so that column is left plain (issue #28).
+    value_columns = {1, 2, 3}
 
-    print("depth detail  (AA index / AA $ per task; OR $/M is constant across depths)")
+    def pad_cells(cells):
+        return [
+            cell.ljust(width) if index < len(widths) - 1 else cell
+            for index, (cell, width) in enumerate(zip(cells, widths))
+        ]
+
+    def emit_header():
+        print("   " + "   ".join(style.bold(cell) for cell in pad_cells(headers)))
+
+    def emit_rule():
+        print("   " + style.dim("   ".join("-" * width for width in widths)))
+
+    def emit_row(row):
+        out = []
+        for index, (cell, padded) in enumerate(zip(row, pad_cells(row))):
+            if index == 0 and cell.endswith("*"):
+                # The default-effort marker is a symbol marker (yellow),
+                # like the main legend's.
+                body = padded[: len(cell) - 1]
+                out.append(body + style.yellow("*") + padded[len(cell) :])
+            elif index in value_columns and cell.strip() == "-":
+                out.append(style.dim(padded))
+            else:
+                out.append(padded)
+        print("   " + "   ".join(out))
+
+    print(style.bold("Depth details"))
     for position, block in enumerate(blocks):
         if position:
             print()
         cand = block["cand"]
+        pricing = (
+            f"OR ${cand['price_in']:.2f} in / ${cand['price_out']:.2f} out per 1M"
+        )
         print(
-            f"#{block['rank']} {cand['id']}   "
-            f"OR ${cand['price_in']:.2f} in / ${cand['price_out']:.2f} out per 1M   "
-            f"default: {block['default'] or '-'}"
+            f"#{block['rank']} {style.bold(cand['id'])}   "
+            f"{style.dim(pricing)}   "
+            f"{style.dim('default:')} {block['default'] or '-'}"
         )
         note = unlabeled_note(cand.get("quality_unlabeled"))
         if note:
-            print(f"   {note}")
+            print("   " + style.dim(note))
         if not block["has_records"]:
             if not note:
-                print("   no AA depth data")
+                print("   " + style.dim("no AA depth data"))
             continue
         if block["missing_default"]:
             print(f"   AA has no {block['default']} record for this model.")
-        emit(headers)
+        emit_header()
+        emit_rule()
         for row in block["rows"]:
-            emit(row)
+            emit_row(row)
 
     print()
-    print(
-        "* = OpenRouter default; append #effort to the model id in OpenCode; "
-        "- in select = not selectable; AA $/task is AA's measured benchmark "
-        "cost at AA's reference price, not the OR per-token price; it never "
-        "enters the weighted score. An AA index without an effort label is a "
-        "reference only: it never fills QUAL."
-    )
+    width = max(len(term) for term, _ in DEPTH_LEGEND)
+    for term, lines in DEPTH_LEGEND:
+        print(style.bold(term.ljust(width)) + "  " + render_legend(lines[0], style))
+        for extra in lines[1:]:
+            print(" " * (width + 2) + render_legend(extra, style))
 
 
 def print_best(top, args):
@@ -5321,6 +5418,9 @@ SGR_BOLD = "\x1b[1m"
 SGR_DIM = "\x1b[2m"
 SGR_GREEN = "\x1b[32m"
 SGR_YELLOW = "\x1b[33m"
+# CLI options own an attribute of their own: bold is already the term
+# label/header treatment, so a bold flag reads as another label.
+SGR_CYAN = "\x1b[36m"
 
 
 class Style:
@@ -5343,6 +5443,9 @@ class Style:
 
     def yellow(self, text: str) -> str:
         return self._wrap(text, SGR_YELLOW)
+
+    def cyan(self, text: str) -> str:
+        return self._wrap(text, SGR_CYAN)
 
 
 def color_enabled(mode: str, stream) -> bool:
@@ -5527,11 +5630,11 @@ def parse_args(argv=None):
         help="print just the table(s), no summary or legend",
     )
     output.add_argument(
-        "--no-depths",
+        "--depths",
         action="store_true",
         help=(
-            "hide the per-model depth detail below the table (the DEPTH and "
-            "QUAL columns stay)"
+            "also print the per-model depth detail below the table (the DEPTH "
+            "and QUAL columns are always shown)"
         ),
     )
     output.add_argument(
@@ -5809,6 +5912,12 @@ def run(args, models, or_cached) -> int:
         pager_argv = resolve_pager(args)
         style = Style(color_enabled(args.color, sys.stdout))
         err_style = Style(color_enabled(args.color, sys.stderr))
+        # The summary is stderr by contract (scripts pipe stdout), but a
+        # pager owns the screen: notes printed to stderr before it starts
+        # are painted over and never reach scrollback. So when paging, the
+        # whole human stream -- summary included -- goes through the pager
+        # (issue #28). Resolved here, printed below.
+        summary = []
         if not args.bare:
             source_note = []
             if or_cached:
@@ -5822,20 +5931,21 @@ def run(args, models, or_cached) -> int:
             if aa_cached and aa_source:
                 source_note.append("quality cached")
             if source_note:
-                print(
-                    f"note: {', '.join(source_note)} (use --no-cache to refresh)",
-                    file=sys.stderr,
+                summary.append(
+                    (f"note: {', '.join(source_note)} (use --no-cache to refresh)", False)
                 )
-            print(
-                f"{len(candidates)} of {len(models)} listed models ranked",
-                file=sys.stderr,
+            summary.append(
+                (f"{len(candidates)} of {len(models)} listed models ranked", False)
             )
             if dropped:
                 bits = ", ".join(
                     f"{v} {k}"
                     for k, v in sorted(dropped.items(), key=lambda kv: -kv[1])
                 )
-                print(err_style.dim(f"(dropped: {bits})"), file=sys.stderr)
+                summary.append((f"(dropped: {bits})", True))
+        if not pager_argv and summary:
+            for text, is_dim in summary:
+                print(err_style.dim(text) if is_dim else text, file=sys.stderr)
             print(file=sys.stderr)
         # The footer lists per-source counts, each source's own as_of and
         # the AA index version when known; unmatched candidates and drift
@@ -5845,6 +5955,13 @@ def run(args, models, or_cached) -> int:
         quality_note = quality_footer_note(quality_by_id, aa_index_version, unmatched)
         try:
             with paged_stdout(pager_argv):
+                # Paged runs carry the summary above the table; the pager's
+                # stream is stdout, so re-style dim lines for it.
+                if pager_argv:
+                    for text, is_dim in summary:
+                        print(style.dim(text) if is_dim else text)
+                    if summary:
+                        print()
                 print_table(
                     top,
                     weights,
@@ -5853,9 +5970,7 @@ def run(args, models, or_cached) -> int:
                     style=style,
                     bare=args.bare,
                     input_share=args.input_share,
-                    depth_detail=(
-                        None if args.bare or args.no_depths else print_depth_detail
-                    ),
+                    depths=bool(args.depths) and not args.bare,
                 )
                 if args.off_peak:
                     catalog_w = catalog_weights(candidates, quality_by_id)

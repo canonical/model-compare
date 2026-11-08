@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] - 2026-11-08
+
+### Changed
+
+- Tool version is `model-compare 0.7.5`.
+- The column legend now prints directly under the main table and its
+  `Weights`/`Quality source` footer instead of below every depth block, so
+  the definitions sit next to the columns they describe (issue #28).
+- Depth details are opt-in: the per-model blocks print only with
+  `--depths`, replacing `--no-depths`. The `DEPTH` and `QUAL` columns stay
+  in both modes.
+- Legends highlight by element type, consistently across the main, depth
+  and deals legends: term labels stay bold, CLI options and typed tokens
+  (`--depths`, `#effort`) are cyan -- bold is reserved for labels, so an
+  option never reads as another label -- literal values and the `-`
+  placeholder are dim, and symbol markers (`*`, `!`) are yellow.
+- The depth section is headed by a bold `Depth details`, and its legend is
+  chunked one term per line with hanging indents instead of a single
+  run-on sentence. The heading's "AA index / AA $ per task; OR $/M is
+  constant across depths" parenthetical is gone; its one non-obvious fact
+  lives in the legend's `OR $/M` entry.
+- The depth tables gained the styling the other tables already had: the
+  model id bold and the OR pricing plus `default:` label dim on each title
+  line, a bold header row over the dim dash rule, yellow `*` markers, and
+  dim `-` cells in the value columns. The `select` column stays plain.
+
+### Fixed
+
+- Under a pager the summary lines above the table no longer disappear:
+  the whole human stream is paged, so the cache note, the ranked count and
+  the dropped line are part of the pager's scrollback instead of being
+  painted over on stderr.
+
 ## [0.7.4] - 2026-11-08
 
 ### Fixed

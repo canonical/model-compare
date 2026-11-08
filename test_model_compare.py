@@ -71,8 +71,8 @@ def make_args(**overrides):
         # None means the keyless fast path in fetch_session_cost.
         openrouter_api_key=None,
         reasoning_effort="default",
-        # --no-depths arrives with the depth-output task; inert until then.
-        no_depths=False,
+        # Depth details are opt-in (--depths).
+        depths=False,
         detail="expert",
         off_peak=False,
         bare=False,
@@ -1917,7 +1917,7 @@ def test_pool_accounting_balances_with_endpoint_drops(monkeypatch, capsys):
 
 
 def test_catalog_schema_versions_are_in_lockstep():
-    assert mc.VERSION == "0.7.4"
+    assert mc.VERSION == "0.7.5"
     assert mc.CATALOG_QUALITY_SCHEMA_VERSION == mc.CATALOG_SCHEMA_VERSION == 6
     assert (
         mc.CATALOG_QUALITY_SCHEMA_VERSION
@@ -2645,8 +2645,11 @@ def test_run_auto_colors_when_streams_are_ttys(monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     assert mc.run(make_args(min_context=1_000_000), models, False) == 0
     (proc,) = procs  # the human path paged; bold header went to the pager
-    assert "\x1b[1m" in proc.stdin.getvalue()
-    assert "\x1b[2m(dropped: 1 context)\x1b[0m" in err.getvalue()
+    paged = proc.stdin.getvalue()
+    assert "\x1b[1m" in paged
+    # The dropped count travels through the pager too, still dim: notes on
+    # stderr would be painted over (issue #28 item 4).
+    assert "\x1b[2m(dropped: 1 context)\x1b[0m" in paged
 
 
 def test_run_auto_honors_no_color_when_streams_are_ttys(monkeypatch):
@@ -3145,7 +3148,7 @@ def test_run_pager_off_peak_and_bare(monkeypatch):
     assert "OFF-PEAK" in proc.stdin.getvalue()
 
 
-@pytest.mark.parametrize("flags", [{"bare": True}, {"no_depths": True}])
+@pytest.mark.parametrize("flags", [{"bare": True}, {"depths": True}])
 def test_run_pager_output_variants(monkeypatch, flags):
     models = [make_model(id="acme/model-a", name="Acme: A")]
     _stub_quality_run(monkeypatch, models, aa_raises=True)
@@ -3155,6 +3158,34 @@ def test_run_pager_output_variants(monkeypatch, flags):
     assert mc.run(make_args(min_context=1_000_000, **flags), models, False) == 0
     (proc,) = procs
     assert "RANK" in proc.stdin.getvalue()
+
+
+def test_run_pages_the_summary_with_the_table(monkeypatch):
+    # Issue #28 item 4: stderr notes printed before the pager starts get
+    # painted over and never reach scrollback, so the paged stream carries
+    # them above the table instead.
+    models = [make_model(id="acme/model-a", name="Acme: A")]
+    _stub_quality_run(monkeypatch, models, aa_raises=True)
+    procs = _stub_pager(monkeypatch)
+    err = _TTYStringIO()
+    monkeypatch.setattr(sys, "stdout", _TTYStringIO())
+    monkeypatch.setattr(sys, "stderr", err)
+    assert mc.run(make_args(min_context=1_000_000), models, False) == 0
+    (proc,) = procs
+    paged = proc.stdin.getvalue()
+    assert "listed models ranked" in paged
+    assert paged.index("listed models ranked") < paged.index("RANK")
+    assert "listed models ranked" not in err.getvalue()
+
+
+def test_run_keeps_summary_on_stderr_without_a_pager(monkeypatch, capsys):
+    models = [make_model(id="acme/model-a", name="Acme: A")]
+    _stub_quality_run(monkeypatch, models, aa_raises=True)
+    monkeypatch.setattr(mc, "resolve_pager", lambda args: None)
+    assert mc.run(make_args(min_context=1_000_000), models, False) == 0
+    captured = capsys.readouterr()
+    assert "listed models ranked" in captured.err
+    assert "listed models ranked" not in captured.out
 
 
 def test_run_interrupted_while_paging_exits_130(monkeypatch):
@@ -9270,7 +9301,7 @@ def test_version_flag():
         check=True,
     )
     # Literal pin: a release that forgets to bump VERSION fails here.
-    assert proc.stdout.strip() == "model-compare 0.7.4"
+    assert proc.stdout.strip() == "model-compare 0.7.5"
 
 
 # ---------------------------------------------------------------------------
@@ -10925,9 +10956,19 @@ def test_best_prints_bare_for_default(capsys):
 
 
 def test_parse_args_accepts_depth_flags():
-    args = mc.parse_args(["--reasoning-effort", "max", "--no-depths"])
+    args = mc.parse_args(["--reasoning-effort", "max", "--depths"])
     assert args.reasoning_effort == "max"
-    assert args.no_depths is True
+    assert args.depths is True
+
+
+def test_parse_args_depth_details_are_off_by_default():
+    assert mc.parse_args([]).depths is False
+
+
+def test_parse_args_rejects_removed_no_depths():
+    # The flag was flipped, not aliased: --no-depths no longer exists.
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--no-depths"])
 
 
 def test_depth_detail_empty_prints_nothing(capsys):
@@ -10935,12 +10976,22 @@ def test_depth_detail_empty_prints_nothing(capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_run_prints_depth_detail_by_default(monkeypatch, capsys):
+def test_run_omits_depth_detail_by_default(monkeypatch, capsys):
     models = [make_model(id="acme/model-a", name="Acme: A")]
     _stub_quality_run(monkeypatch, models, aa_raises=True)
     assert mc.run(make_args(), models, False) == 0
     out = capsys.readouterr().out
-    assert "depth detail" in out
+    assert "Depth details" not in out
+    assert "no AA depth data" not in out
+    assert "DEPTH" in out  # the column stays
+
+
+def test_run_depths_flag_shows_depth_detail(monkeypatch, capsys):
+    models = [make_model(id="acme/model-a", name="Acme: A")]
+    _stub_quality_run(monkeypatch, models, aa_raises=True)
+    assert mc.run(make_args(depths=True), models, False) == 0
+    out = capsys.readouterr().out
+    assert "Depth details" in out
     assert "no AA depth data" in out
 
 
@@ -10955,13 +11006,12 @@ def test_run_summary_moves_below_table(monkeypatch, capsys):
     assert out.index("RANK") < out.index("Weights:")
 
 
-def test_run_no_depths_suppresses_depth_detail(monkeypatch, capsys):
+def test_run_bare_suppresses_depth_detail(monkeypatch, capsys):
     models = [make_model(id="acme/model-a", name="Acme: A")]
     _stub_quality_run(monkeypatch, models, aa_raises=True)
-    assert mc.run(make_args(no_depths=True), models, False) == 0
+    assert mc.run(make_args(depths=True, bare=True), models, False) == 0
     out = capsys.readouterr().out
-    assert "depth detail  (AA index" not in out
-    assert "no AA depth data" not in out
+    assert "Depth details" not in out
     assert "DEPTH" in out  # the column stays
 
 
@@ -11074,14 +11124,86 @@ def test_depth_detail_vs_default_ratio_and_zero(capsys):
     assert zero_row.split()[3] == "-"  # zero default cost
 
 
-def test_run_prints_depth_detail_before_table_legend(monkeypatch, capsys):
+def test_legend_flags_are_cyan_and_not_bold(capsys):
+    # Issue #28 item 3: options must not reuse bold (the term-label/header
+    # treatment) -- they get their own attribute.
+    mc.print_table(
+        _scored_candidates()[:1],
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+    )
+    out = capsys.readouterr().out
+    assert f"{mc.SGR_CYAN}--input-share{mc.SGR_RESET}" in out
+    assert f"{mc.SGR_BOLD}--input-share" not in out
+
+
+def test_legend_literal_values_are_dim(capsys):
+    mc.print_table(
+        _scored_candidates()[:1],
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+        input_share=0.75,
+    )
+    out = capsys.readouterr().out
+    assert f"{mc.SGR_DIM}75%{mc.SGR_RESET}" in out
+    assert f"{mc.SGR_DIM}default{mc.SGR_RESET}" in out
+
+
+def test_legend_symbol_markers_are_yellow(capsys):
+    mc.print_table(
+        _scored_candidates()[:1],
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+    )
+    out = capsys.readouterr().out
+    # The * marker (OpenRouter default) and the ! precision marker.
+    assert f"{mc.SGR_YELLOW}*{mc.SGR_RESET}" in out
+    assert f'{mc.SGR_YELLOW}"!"{mc.SGR_RESET}' in out
+
+
+def test_legend_term_labels_stay_bold(capsys):
+    mc.print_table(
+        _scored_candidates()[:1],
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+    )
+    out = capsys.readouterr().out
+    assert f"{mc.SGR_BOLD}QUALITY" in out
+
+
+def test_legend_alignment_uses_plain_text_width(capsys):
+    # Markup must never throw off the label column or the wrap indent.
+    mc.print_table(
+        _scored_candidates()[:1],
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+    )
+    lines = capsys.readouterr().out.splitlines()
+    plain = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in lines]
+    terms = [
+        line for line in plain
+        if line.startswith("QUALITY") or line.startswith("$IN/$OUT")
+    ]
+    assert len(terms) == 2
+    label_col = terms[0].index("AA intelligence")
+    assert terms[1].index("USD per 1M") == label_col
+
+
+def test_run_prints_table_legend_before_depth_detail(monkeypatch, capsys):
+    # The column legend belongs next to the table it explains, not below
+    # every depth block (issue #28, item 1).
     models = [make_model(id="acme/model-a", name="Acme: A")]
     _stub_quality_run(monkeypatch, models, aa_raises=True)
-    assert mc.run(make_args(), models, False) == 0
+    assert mc.run(make_args(depths=True), models, False) == 0
     out = capsys.readouterr().out
-    depth_at = out.index("depth detail  (AA index")
     legend_at = out.index("best measured selectable depth")
-    assert depth_at < legend_at
+    depth_at = out.index("Depth details")
+    assert legend_at < depth_at
 
 
 def test_depth_detail_reports_missing_default_record(capsys):
@@ -11142,16 +11264,90 @@ def test_depth_detail_unlabeled_reference_without_cost(capsys):
     assert "$" not in note_line
 
 
+def test_depth_detail_heading_is_bold_and_capitalized(capsys):
+    mc.print_depth_detail([_cand("acme/model-a", 50.0)], style=mc.Style(True))
+    out = capsys.readouterr().out
+    assert f"{mc.SGR_BOLD}Depth details{mc.SGR_RESET}" in out
+    # The old lowercase heading and its parenthetical are gone (items 5, 7).
+    assert "depth detail" not in out
+    assert "AA index / AA $ per task" not in out
+
+
+def test_depth_detail_title_line_styles(capsys):
+    cand = _cand("acme/model-a", 50.0)
+    cand["reasoning"] = {"default_effort": "high", "supported_efforts": ["high"]}
+    cand["reasoning_depths"] = [
+        {"effort": "high", "index": 40.0, "cost_per_task_usd": 1.0, "as_of": "t1"},
+    ]
+    mc.print_depth_detail([cand], style=mc.Style(True))
+    out = capsys.readouterr().out
+    assert f"{mc.SGR_BOLD}acme/model-a{mc.SGR_RESET}" in out
+    assert f"{mc.SGR_DIM}OR $" in out
+    assert f"{mc.SGR_DIM}default:{mc.SGR_RESET} " in out
+
+
+def test_depth_detail_header_row_is_bold_over_dim_rule(capsys):
+    cand = _cand("acme/model-a", 50.0)
+    cand["reasoning"] = {"default_effort": "high", "supported_efforts": ["high"]}
+    cand["reasoning_depths"] = [
+        {"effort": "high", "index": 40.0, "cost_per_task_usd": 1.0, "as_of": "t1"},
+    ]
+    mc.print_depth_detail([cand], style=mc.Style(True))
+    lines = capsys.readouterr().out.splitlines()
+    header = next(line for line in lines if "AA idx" in line and "select" in line)
+    assert f"{mc.SGR_BOLD}effort" in header
+    assert f"{mc.SGR_BOLD}AA idx" in header
+    rule = next(
+        line for line in lines
+        if re.sub(r"\x1b\[[0-9;]*m", "", line).strip().startswith("-----")
+    )
+    assert mc.SGR_DIM in rule
+
+
+def test_depth_detail_default_marker_yellow_and_select_plain(capsys):
+    cand = _cand("acme/model-a", 50.0)
+    cand["reasoning"] = {"default_effort": "high", "supported_efforts": ["high", "max"]}
+    cand["reasoning_depths"] = [
+        {"effort": "high", "index": 40.0, "cost_per_task_usd": 1.0, "as_of": "t1"},
+        {"effort": "max", "index": 45.0, "cost_per_task_usd": 2.0, "as_of": "t1"},
+    ]
+    mc.print_depth_detail([cand], style=mc.Style(True))
+    out = capsys.readouterr().out
+    # The default marker is a symbol marker -> yellow.
+    assert f"{mc.SGR_YELLOW}*{mc.SGR_RESET}" in out
+    # The select column carries no styling of its own (issue #28 follow-up).
+    for code in (mc.SGR_YELLOW, mc.SGR_CYAN, mc.SGR_BOLD):
+        assert f"{code}#max" not in out
+        assert f"{code}#high" not in out
+
+
+def test_depth_detail_legend_is_chunked_one_term_per_line(capsys):
+    mc.print_depth_detail([_cand("acme/model-a", 50.0)])
+    lines = capsys.readouterr().out.splitlines()
+    terms = [line.split("  ")[0].strip() for line in lines if line[:1] != " "]
+    # Hanging-indent chunking: each term starts its own line.
+    for term in ("effort", "AA idx", "AA $/task", "vs default", "select", "OR $/M"):
+        assert term in terms, term
+    # The old single run-on sentence is gone.
+    assert not any("* = OpenRouter default; append #effort" in line for line in lines)
+
+
+def test_depth_detail_legend_uses_main_legend_highlighting(capsys):
+    mc.print_depth_detail([_cand("acme/model-a", 50.0)], style=mc.Style(True))
+    out = capsys.readouterr().out
+    assert f"{mc.SGR_CYAN}#effort{mc.SGR_RESET}" in out
+
+
 def test_best_and_json_print_no_depth_detail(monkeypatch, capsys):
     models = [make_model(id="acme/model-a", name="Acme: A")]
     _stub_quality_run(monkeypatch, models, aa_raises=True)
     assert mc.run(make_args(best=True), models, False) == 0
-    assert "depth detail" not in capsys.readouterr().out
+    assert "Depth details" not in capsys.readouterr().out
 
     _stub_quality_run(monkeypatch, models, aa_raises=True)
     assert mc.run(make_args(json=True), models, False) == 0
     out = capsys.readouterr().out
-    assert "depth detail" not in out
+    assert "Depth details" not in out
     assert json.loads(out)  # the JSON document is still the only output
 
 
