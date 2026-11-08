@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.7] - 2026-11-08
+
+### Fixed
+
+- Tool version is `model-compare 0.7.7`.
+- The `SCORE` column header is bold like every other header, in both the
+  ranked and the off-peak deals tables.
+- The `PREC` risk marker (`!`) is yellow in the table cell, matching the
+  legend, including inside the green #1 row.
+- Both legends quote the default-effort marker (`"*"`), consistent with
+  the quoted `"-"` placeholder.
+
 ## [0.7.6] - 2026-11-08
 
 ### Added
