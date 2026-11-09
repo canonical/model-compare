@@ -5,6 +5,31 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.10] - 2026-11-09
+
+### Added
+
+- Tool version is `model-compare 0.7.10`.
+- A pinned LiteLLM compatibility routine: fast artifact-contract tests plus
+  real-LiteLLM tests that load the generated `litellm.json` through
+  LiteLLM's own cost-map loader, price a tier boundary, and exercise a
+  steering pre-call hook. `litellm` is pinned in
+  `web/requirements-litellm.txt`; the `litellm-compat` workflow runs it on
+  relevant pull requests and weekly, and Renovate owns the pin bump.
+
+### Changed
+
+- The README no longer hardcodes the LiteLLM fragment's ranked-candidate
+  count; it points to the rate card's key count or the steering file's
+  `_meta.entries`.
+
+### Fixed
+
+- The steering consumer logic used by the contract and hook tests is now one
+  shared helper; the mandatory/none guard and bare-alias resolution are
+  pinned by mutation-covered tests, and the contract tests consume the
+  serialized artifact bytes a consumer would fetch.
+
 ## [0.7.9] - 2026-11-08
 
 ### Added
