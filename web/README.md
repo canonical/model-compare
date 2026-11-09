@@ -48,6 +48,28 @@ upstream fetch or an `openrouter/` key collision freezes only
 `web/report_litellm_merge.py` reports the condition through one deduplicated
 GitHub issue.
 
+## Testing the LiteLLM artifacts
+
+`web/test_litellm_contract.py` runs in the normal suite and checks the artifact
+shapes without installing LiteLLM: flat map, required keys, tier ranges,
+off-peak windows, steering parity/hash, and the intended steering application.
+
+`web/test_litellm_compat.py` loads the generated `litellm.json` through
+LiteLLM's own `LITELLM_MODEL_COST_MAP_URL` loader, prices a model at a tier
+boundary, and exercises a `CustomLogger` pre-call hook. It skips unless
+LiteLLM is installed:
+
+```console
+$ python3 -m pip install -r web/requirements-litellm.txt
+$ python3 -m pytest web/test_litellm_contract.py web/test_litellm_compat.py -q
+```
+
+LiteLLM currently requires Python `<3.15`, so the `litellm-compat` workflow
+uses Python 3.14 while the main suite stays on 3.15. The workflow runs on PRs
+that touch the LiteLLM/catalog/publish files and weekly. The pin lives in
+`web/requirements-litellm.txt`; Renovate proposes updates and the pinned
+workflow gates the bump.
+
 Repository secrets: `AA_API_KEY` enables the live AA API quality source and
 its per-effort rows (without it, quality hydrates from the published
 catalog), `OPENROUTER_API_KEY` enables LLM-written highlights — without it the site

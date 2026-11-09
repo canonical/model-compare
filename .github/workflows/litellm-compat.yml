@@ -1,0 +1,41 @@
+name: litellm-compat
+
+on:
+  pull_request:
+    paths:
+      - model_compare.py
+      - web/build_litellm_artifacts.py
+      - web/build_site_data.py
+      - web/publish.py
+      - web/test_build_litellm_artifacts.py
+      - web/test_litellm_contract.py
+      - web/test_litellm_compat.py
+      - web/requirements-litellm.txt
+      - .github/workflows/litellm-compat.yml
+  schedule:
+    # Weekly, independent of the 3-hour publish cron.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pinned:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # LiteLLM currently requires Python <3.15; the main test job uses 3.15.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.14"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install pytest -r web/requirements-litellm.txt
+
+      - name: Test LiteLLM consumption
+        run: |
+          python -m pytest web/test_litellm_contract.py web/test_litellm_compat.py -q

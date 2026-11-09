@@ -1,0 +1,4 @@
+# LiteLLM is a test-only dependency. It is pinned because its cost-map
+# loader, field names and Python floor are not a stable contract.
+# Renovate updates this pin; the litellm-compat workflow gates the bump.
+litellm==1.108.3
