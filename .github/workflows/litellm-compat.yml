@@ -8,6 +8,7 @@ on:
       - web/build_site_data.py
       - web/publish.py
       - web/test_build_litellm_artifacts.py
+      - web/test_build_site_data.py
       - web/test_litellm_contract.py
       - web/test_litellm_compat.py
       - web/requirements-litellm.txt

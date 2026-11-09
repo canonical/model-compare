@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import http.server
-import json
 import os
 import subprocess
 import sys
@@ -25,6 +24,7 @@ from litellm.integrations.custom_logger import CustomLogger
 
 import build_litellm_artifacts as bla
 from test_build_litellm_artifacts import _basic_catalog, _upstream_bytes
+from test_litellm_contract import apply_steering, resolve_key
 
 KEY = "openrouter/z-ai/glm-5.3"
 HAIKU = "openrouter/anthropic/claude-haiku-5.5"
@@ -121,21 +121,12 @@ class SteeringHook(CustomLogger):
         if call_type != "completion":
             return data
         model = data.get("model", "")
-        key = model if model in self.steering else "openrouter/" + model
-        entry = self.steering.get(key)
-        if entry is None:
+        key = resolve_key(model, self.steering)
+        if key is None:
             return data
-        provider = (
-            entry["provider_strict"] if key in self.strict_models else entry["provider"]
+        return apply_steering(
+            data, self.steering, model, strict=key in self.strict_models
         )
-        extra = data.setdefault("extra_body", {})
-        extra.setdefault("provider", provider)
-        preferred = entry["reasoning"]["preferred"]
-        if preferred is not None:
-            effort = preferred["effort"]
-            if not (entry["reasoning"]["mandatory"] and effort == "none"):
-                extra.setdefault("reasoning", preferred)
-        return data
 
 
 def _hook(artifacts, strict=False):
@@ -185,3 +176,57 @@ def test_steering_hook_ignores_unknown_models(artifacts):
         _hook(artifacts).async_pre_call_hook(None, None, data, "completion")
     )
     assert out == {"model": "unknown/model"}
+
+
+def test_steering_hook_matches_contract_helper(artifacts):
+    steering = artifacts["steering"]
+    for strict in (False, True):
+        via_hook = asyncio.run(
+            _hook(artifacts, strict=strict).async_pre_call_hook(
+                None, None, {"model": KEY}, "completion"
+            )
+        )
+        via_helper = apply_steering({"model": KEY}, steering, KEY, strict=strict)
+        assert via_hook["extra_body"] == via_helper["extra_body"]
+
+
+def test_steering_hook_resolves_bare_alias(artifacts):
+    via_bare = asyncio.run(
+        _hook(artifacts).async_pre_call_hook(
+            None, None, {"model": "z-ai/glm-5.3"}, "completion"
+        )
+    )
+    via_full = asyncio.run(
+        _hook(artifacts).async_pre_call_hook(None, None, {"model": KEY}, "completion")
+    )
+    assert via_bare["extra_body"] == via_full["extra_body"]
+    assert via_bare["extra_body"]["provider"] == artifacts["steering"][KEY]["provider"]
+    # Strict membership is keyed on the resolved key, so the bare alias
+    # must pick up the strict profile too.
+    strict_bare = asyncio.run(
+        _hook(artifacts, strict=True).async_pre_call_hook(
+            None, None, {"model": "z-ai/glm-5.3"}, "completion"
+        )
+    )
+    assert (
+        strict_bare["extra_body"]["provider"]
+        == artifacts["steering"][KEY]["provider_strict"]
+    )
+
+
+def test_steering_hook_skips_reasoning_for_mandatory_none(artifacts):
+    base = artifacts["steering"][KEY]
+    steering = {
+        KEY: {
+            "provider": base["provider"],
+            "provider_strict": base["provider_strict"],
+            "reasoning": {"preferred": {"effort": "none"}, "mandatory": True},
+        }
+    }
+    out = asyncio.run(
+        SteeringHook(steering).async_pre_call_hook(
+            None, None, {"model": KEY}, "completion"
+        )
+    )
+    assert out["extra_body"]["provider"] == base["provider"]
+    assert "reasoning" not in out["extra_body"]
