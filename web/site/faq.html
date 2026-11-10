@@ -96,9 +96,13 @@
   <span class="jk">extra_body</span><span class="jp">={</span><span class="js">"provider"</span><span class="jp">:</span> steering<span class="jp">[</span><span class="js">"provider"</span><span class="jp">]}</span><span class="jp">,</span>
 <span class="jp">)</span></pre>
     <p>
-      In OpenCode, the model-compare plugin applies the same block for
-      you; a custom request body can be supplied with its
-      <code>body</code> option, which is forwarded to the provider
+      In OpenCode, the
+      <a
+        href="https://github.com/canonical/model-compare-opencode-plugin#steering-and-served-endpoints"
+        >model-compare plugin</a
+      >
+      applies the same block for you; a custom request body can be supplied
+      with its <code>body</code> option, which is forwarded to the provider
       request — put the <code>provider</code> object there.
     </p>
 
@@ -122,7 +126,13 @@
       ranked <code>QUAL</code> is measured at the model's best measured
       selectable depth, and the depth detail row shows each effort's index,
       cost and the suffix that selects it. A pinned depth can cost more
-      than the default one.
+      than the default one. The plugin's
+      <a
+        href="https://github.com/canonical/model-compare-opencode-plugin#reasoning-depths"
+        >Reasoning depths</a
+      >
+      section explains how it pins the scored depth and reports the best
+      selectable alternative.
     </p>
     <p>
       <code>:free</code> and <code>:batch</code> ids are separate listings
