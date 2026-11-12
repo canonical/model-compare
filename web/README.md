@@ -56,15 +56,15 @@ off-peak windows, steering parity/hash, and the intended steering application.
 
 `web/test_litellm_compat.py` loads the generated `litellm.json` through
 LiteLLM's own `LITELLM_MODEL_COST_MAP_URL` loader, prices a model at a tier
-boundary, and exercises a `CustomLogger` pre-call hook. It skips unless
-LiteLLM is installed:
+boundary, and exercises a `CustomLogger` pre-call hook. It skips when
+LiteLLM cannot be imported:
 
 ```console
 $ python3 -m pip install -r web/requirements-litellm.txt
 $ python3 -m pytest web/test_litellm_contract.py web/test_litellm_compat.py -q
 ```
 
-The `litellm-compat` workflow runs this suite on the Python version pinned in
+The `litellm-compat` workflow runs this suite on the Python version set in
 `.github/workflows/litellm-compat.yml`, and gates the LiteLLM pin. The
 workflow runs on PRs that touch the LiteLLM/catalog/publish files and weekly.
 The pin lives in `web/requirements-litellm.txt`; Renovate proposes updates and

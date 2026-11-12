@@ -4,7 +4,7 @@ These tests validate the artifact shapes over the serialized bytes a
 consumer would fetch -- not producer internals: flat map, required LiteLLM
 keys, tier ranges, off-peak windows, steering parity/hash and the intended
 steering application. The real-LiteLLM loader and cost checks live in
-test_litellm_compat.py and skip when LiteLLM is not installed.
+test_litellm_compat.py and skip when LiteLLM cannot be imported.
 """
 
 from __future__ import annotations
