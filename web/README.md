@@ -64,10 +64,10 @@ $ python3 -m pip install -r web/requirements-litellm.txt
 $ python3 -m pytest web/test_litellm_contract.py web/test_litellm_compat.py -q
 ```
 
-LiteLLM currently requires Python `<3.15`, so the `litellm-compat` workflow
-uses Python 3.14 while the main suite stays on 3.15. The workflow runs on PRs
-that touch the LiteLLM/catalog/publish files and weekly. The pin lives in
-`web/requirements-litellm.txt`; Renovate proposes updates and the pinned
+The `litellm-compat` workflow runs this suite on Python 3.15, the same
+version as the main suite, and gates the LiteLLM pin. The workflow runs on
+PRs that touch the LiteLLM/catalog/publish files and weekly. The pin lives
+in `web/requirements-litellm.txt`; Renovate proposes updates and the pinned
 workflow gates the bump.
 
 Repository secrets: `AA_API_KEY` enables the live AA API quality source and
