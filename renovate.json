@@ -13,6 +13,19 @@
       ],
       "rangeStrategy": "pin",
       "groupName": "LiteLLM compatibility pin"
+    },
+    {
+      "description": "The litellm-compat job's Python version is bounded by litellm's Requires-Python ceiling. Stay inside it, and move this bound together with the LiteLLM pin.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchFileNames": [
+        ".github/workflows/litellm-compat.yml"
+      ],
+      "matchDepNames": [
+        "python"
+      ],
+      "allowedVersions": "<3.16"
     }
   ]
 }

@@ -30,7 +30,9 @@ jobs:
 
       # Gate the LiteLLM pin against a real LiteLLM release. The main test
       # job does not install LiteLLM, so this is the only place the loader,
-      # pricing and hook contracts are exercised.
+      # pricing and hook contracts are exercised. This Python version is
+      # bounded by litellm's Requires-Python ceiling, so move it together
+      # with the pin in web/requirements-litellm.txt, never on its own.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.15"
@@ -39,9 +41,10 @@ jobs:
         run: |
           python -m pip install pytest -r web/requirements-litellm.txt
 
-      # The compat module calls pytest.importorskip("litellm"), so a broken
-      # install would turn every compat test into a skip and still exit 0.
-      # Fail here instead, where the reason is unambiguous.
+      # The compat module calls pytest.importorskip("litellm"), so an import
+      # failure would turn every compat test into a skip and still exit 0.
+      # Fail here instead, where the reason is unambiguous. Other import-time
+      # errors already fail collection, so this covers the silent case.
       - name: Verify LiteLLM imports
         run: |
           python -c "import litellm; from litellm.integrations.custom_logger import CustomLogger"
