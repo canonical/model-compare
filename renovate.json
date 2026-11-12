@@ -13,6 +13,19 @@
       ],
       "rangeStrategy": "pin",
       "groupName": "LiteLLM compatibility pin"
+    },
+    {
+      "description": "The litellm-compat job pins Python below LiteLLM's floor on purpose. Bump it together with the LiteLLM pin, never on its own.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchFileNames": [
+        ".github/workflows/litellm-compat.yml"
+      ],
+      "matchDepNames": [
+        "python"
+      ],
+      "enabled": false
     }
   ]
 }
