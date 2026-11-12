@@ -1,9 +1,9 @@
 """Real-LiteLLM compatibility checks for litellm.json and steering.
 
 These tests are skipped when LiteLLM is not installed. The pinned CI job
-installs `web/requirements-litellm.txt` and runs them on Python 3.14 (LiteLLM
-currently caps Python at <3.15). The loader test uses a subprocess because
-LiteLLM reads LITELLM_MODEL_COST_MAP_URL at import time.
+installs `web/requirements-litellm.txt` and runs them on Python 3.15. The
+loader test uses a subprocess because LiteLLM reads
+LITELLM_MODEL_COST_MAP_URL at import time.
 """
 
 from __future__ import annotations
