@@ -1,15 +1,28 @@
       :root {
         color-scheme: light dark;
         /* dark is the base (default); light applies via prefers-color-scheme */
-        --bg: #181a1b;
+        /* Two layers: html paints the canvas, body paints the content
+           column. Without an explicit html background, body's would
+           propagate to the canvas and the frame would disappear. */
+        --canvas: #181a1b;
+        --bg: #131516;
         --text: #e8e6e3;
+        --heading: #f4f2ef;
+        --prose: #c4bfb6;
         --muted: #988f81;
         --btn-bg: #262a2b;
         --btn-border: var(--muted);
         --thead-border: var(--muted);
+        /* Site tab bar: one border colour everywhere, the tabs carry the
+           only different background. */
+        --tab-bg: #1e2223;
+        --tab-border: #3a3f41;
         /* Row borders sit well below --muted: a quiet separator line,
            not a second text color. */
         --row-border: #423e39;
+        /* Neutral inline monospace chip. */
+        --code-bg: #23282b;
+        --code-fg: #f2f0ec;
         /* Hover and the expanded detail rows share one color, so a
            clicked row and its dropdown read as one block. */
         --row-hover: var(--btn-bg);
@@ -20,16 +33,26 @@
       }
       @media (prefers-color-scheme: light) {
         :root {
+          --canvas: #f6f3ec;
           --bg: #f6f3ec;
           --text: #33302b;
-          --muted: #8a8175;
+          --heading: #22201c;
+          --prose: #4a453e;
+          --muted: #686056;
           --btn-bg: #e9e4d8;
           --row-border: #d5cfc3;
           --status: #b03a2a;
           --up: #2e7d4f;
           --down: #b0392b;
           --flat: #3a6ea5;
+          --tab-bg: #e9e4d8;
+          --tab-border: #d5cfc3;
+          --code-bg: #e9e4d8;
+          --code-fg: #22201c;
         }
+      }
+      html {
+        background: var(--canvas);
       }
       * {
         box-sizing: border-box;
@@ -43,26 +66,102 @@
         max-width: 120rem;
         width: calc(100% - 2 * clamp(1rem, 4vw, 4rem));
         margin: 2rem auto;
-        padding: 0.5rem clamp(1rem, 2vw, 2rem);
+        padding: 0.5rem clamp(1rem, 2vw, 2rem) 2rem;
         line-height: 1.45;
         background: var(--bg);
         color: var(--text);
       }
       h1 {
         font-size: 1.6rem;
-        margin-bottom: 0.25rem;
+        color: var(--heading);
+        margin: 0.25rem 0 0.2rem;
       }
-      /* Section headings share one size, below the page title: the
-         ranked table, the deals table and the OpenCode section are the
-         same structural level (the highlights sub-headings override
-         smaller). */
+      /* Section and page headings share one consistent scale across all
+         four pages; h2 sits tight above its .intro / .hint subtitle. */
       h2 {
-        font-size: 1.25rem;
+        font-size: 1.28rem;
+        color: var(--heading);
+        margin: 1.5rem 0 0.25rem;
+        line-height: 1.3;
+      }
+      h3 {
+        font-size: 1.08rem;
+        color: var(--heading);
+        margin: 1.65rem 0 0.45rem;
+        line-height: 1.35;
       }
       .sub {
         color: var(--muted);
-        margin-top: 0;
+        margin: 0;
         font-size: 0.95rem;
+      }
+      /* Page intro: the one-liner under a page's h2 (and under "Ranked
+         picks" on the landing). */
+      .intro {
+        color: var(--muted);
+        font-size: 0.88rem;
+        margin: 0 0 1.1rem;
+        max-width: 58rem;
+      }
+      /* Site tab bar — pure border geometry. Inactive tabs draw a 1px
+         border on all four sides and .sitenav::after draws the trailing
+         1px baseline; the active tab sets border-bottom: none with
+         align-items: stretch so no border ever exists underneath it and
+         no overlay box can mis-snap at fractional HiDPI scaling. */
+      .sitenav {
+        display: flex;
+        align-items: stretch;
+        gap: 0;
+        margin: 1.4rem 0 0;
+        font-size: 0.95rem;
+      }
+      .sitenav::after {
+        content: "";
+        flex: 1;
+        border-bottom: 1px solid var(--tab-border);
+      }
+      .sitenav a {
+        color: var(--muted);
+        text-decoration: none;
+        padding: 0.5rem 1.1rem;
+        background: var(--tab-bg);
+        border: 1px solid var(--tab-border);
+        border-radius: 8px 8px 0 0;
+      }
+      .sitenav a + a {
+        margin-left: -1px;
+      }
+      .sitenav a:hover {
+        color: var(--text);
+      }
+      .sitenav a:focus-visible {
+        position: relative;
+        z-index: 1;
+      }
+      .sitenav a.active {
+        background: var(--bg);
+        color: var(--heading);
+        font-weight: 600;
+        border-bottom: none;
+      }
+      /* Four labels need ~460px: below that the bar wraps into blocks and
+         drops the trailing baseline rather than widening the page. */
+      @media (max-width: 48rem) {
+        .sitenav {
+          flex-wrap: wrap;
+          gap: 4px;
+        }
+        .sitenav::after {
+          content: none;
+        }
+        .sitenav a,
+        .sitenav a.active {
+          border-bottom: 1px solid var(--tab-border);
+          border-radius: 8px;
+        }
+        .sitenav a + a {
+          margin-left: 0;
+        }
       }
       .tabs {
         display: flex;
@@ -127,14 +226,24 @@
       .hint {
         font-size: 0.85rem;
         color: var(--muted);
-        margin: 0.6rem 0 0;
+        margin: 0.5rem 0 0.65rem;
       }
+      /* Inline monospaced text stands out as a neutral rounded chip across
+         all four pages (including model IDs in Weekly highlights). */
       code {
-        font-family: ui-monospace, monospace;
-        font-size: 0.9em;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.87em;
+        background: var(--code-bg);
+        color: var(--code-fg);
+        padding: 0.12em 0.4em;
+        border-radius: 4px;
       }
-      #alias-hint {
-        color: var(--text);
+      pre code {
+        background: none;
+        padding: 0;
+        border-radius: 0;
+        color: inherit;
+        font-size: inherit;
       }
       .status {
         color: var(--status);
@@ -204,9 +313,6 @@
       }
       #table tr.endpoint-row td {
         padding: 0.15rem 0.6rem 0.3rem;
-        /* The expanded dropdown area wears the row hover color (see
-           --row-hover); --row-alt was never defined, so this used to
-           fall back to transparent. */
         background: var(--row-hover);
       }
       #table tr.depth-row td {
@@ -216,8 +322,6 @@
       #table .detail-heading {
         margin: 0.1rem 0;
         font-weight: 600;
-        /* The td is right-aligned like every data cell; the section
-           headings read better flush with the dropdown's left edge. */
         text-align: left;
       }
       #table tr.endpoint-row table {
@@ -272,9 +376,6 @@
         text-decoration: underline dotted;
         text-underline-offset: 3px;
       }
-      #deals-section h2 {
-        margin: 1rem 0 0.25rem;
-      }
       .main-actions button {
         float: right;
         margin: 0.9rem 0 0.7rem 1rem;
@@ -299,37 +400,67 @@
       .movement.new {
         color: var(--up);
       }
-      #highlights h2 {
-        font-size: 1.05rem;
-        margin: 1rem 0 0.25rem;
+      #highlights {
+        margin-top: 1.75rem;
+        max-width: 62rem;
+      }
+      #highlights h3 {
+        font-size: 1rem;
+        margin: 1.05rem 0 0.3rem;
       }
       #highlights p {
         margin: 0 0 0.5rem;
-        font-size: 0.9rem;
+        font-size: 0.92rem;
+        line-height: 1.65;
+        color: var(--prose);
       }
-      #use-opencode h3 {
-        font-size: 1rem;
-        margin: 1.1rem 0 0.35rem;
+      /* Prose container for the non-table pages (plugin, how-to-use, faq):
+         keeps line length comfortable while tables on Picks use full width. */
+      .prose {
+        max-width: 56rem;
+        line-height: 1.55;
       }
-      /* the copy tables keep the .actions button look outside .actions */
-      .copybuttons,
-      .copybuttons td {
-        border: none;
+      .prose p {
+        margin: 0 0 0.65rem;
       }
-      .copybuttons td:nth-child(2) {
-        padding-top: 0.7rem;
+      .prose p:not(.hint) {
+        color: var(--prose);
       }
-      /* v2 plugin snippet: static JSON syntax highlighting (tokens are
-         marked up by hand in the markup) */
+      .prose ul {
+        margin: 0.25rem 0 0.85rem;
+        padding-left: 1.35rem;
+        color: var(--prose);
+      }
+      .prose li + li {
+        margin-top: 0.35rem;
+      }
+      .prose strong {
+        color: var(--text);
+      }
+      .prose h3 + p {
+        margin-top: 0;
+      }
+      .faq-item + .faq-item {
+        border-top: 1px solid var(--row-border);
+        padding-top: 1.2rem;
+        margin-top: 1.35rem;
+      }
+      .faq-item h3 {
+        margin-top: 0;
+      }
+      /* Code and config blocks: static syntax highlighting (tokens marked
+         up by hand in the HTML). */
       .jsonbox {
-        background: var(--btn-bg);
-        border: 1px solid var(--muted);
+        background: var(--tab-bg);
+        border: 1px solid var(--tab-border);
         border-radius: 6px;
-        padding: 0.7rem 0.9rem;
-        font-family: ui-monospace, monospace;
-        font-size: 0.83rem;
+        padding: 0.7rem 0.95rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.84rem;
+        line-height: 1.5;
         overflow-x: auto;
-        margin: 0.6rem 0;
+        margin: 0.5rem 0 0.85rem;
+        color: var(--text);
       }
       .jsonbox .jk {
         color: var(--flat);
@@ -340,17 +471,127 @@
       .jsonbox .jp {
         color: var(--muted);
       }
+      /* Content tables on the plugin page (aliases, shortcuts). */
+      .info {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 0.55rem 0 0.85rem;
+        font-size: 0.9rem;
+      }
+      .info th,
+      .info td {
+        padding: 0.42rem 0.65rem;
+        text-align: left;
+        border-bottom: 1px solid var(--row-border);
+        vertical-align: top;
+        color: var(--prose);
+      }
+      .info th:first-child,
+      .info td:first-child {
+        white-space: nowrap;
+        padding-left: 0;
+      }
+      .info thead th {
+        border-bottom: 2px solid var(--thead-border);
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: var(--muted);
+      }
+      /* Clickable dialog thumbnails on the plugin page. */
+      .thumbs {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 320px));
+        align-items: start;
+        gap: 1rem;
+        margin: 0.75rem 0 1.1rem;
+      }
+      figure.shot {
+        margin: 0;
+      }
+      figure.shot .shot-link {
+        display: block;
+        cursor: zoom-in;
+      }
+      figure.shot img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border: 1px solid var(--tab-border);
+        border-radius: 6px;
+      }
+      figure.shot .shot-link:hover img {
+        border-color: var(--muted);
+      }
+      figure.shot figcaption {
+        font-size: 0.82rem;
+        color: var(--muted);
+        margin-top: 0.4rem;
+        line-height: 1.4;
+      }
+      /* Modal screenshot lightbox on the plugin page. Padding is placed on
+         .lightbox-body so ev.target === dlg matches only ::backdrop clicks. */
+      dialog.lightbox {
+        background: var(--bg);
+        color: var(--text);
+        border: 1px solid var(--tab-border);
+        border-radius: 8px;
+        padding: 0;
+        max-width: min(92vw, 62rem);
+        margin: auto;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+      }
+      dialog.lightbox::backdrop {
+        background: rgba(0, 0, 0, 0.72);
+      }
+      dialog.lightbox .lightbox-body {
+        padding: 0.9rem;
+      }
+      dialog.lightbox img {
+        display: block;
+        max-width: 100%;
+        max-height: calc(85vh - 4.5rem);
+        width: auto;
+        height: auto;
+        margin: 0 auto;
+        border-radius: 4px;
+      }
+      dialog.lightbox .lightbox-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        margin-top: 0.6rem;
+        font-size: 0.85rem;
+        color: var(--muted);
+      }
+      dialog.lightbox button {
+        border: 1px solid var(--btn-border);
+        background: var(--btn-bg);
+        color: var(--text);
+        padding: 0.25rem 0.75rem;
+        border-radius: 999px;
+        cursor: pointer;
+        font: inherit;
+      }
       footer {
-        margin-top: 1.5rem;
+        margin-top: 2rem;
+        padding-top: 0.85rem;
+        border-top: 1px solid var(--row-border);
         font-size: 0.85rem;
         color: var(--muted);
       }
       a {
         color: inherit;
       }
-      a:hover {
-        text-decoration: none;
-        color: var(--text);
+      a:not(.sitenav a) {
+        text-decoration: underline;
+        text-underline-offset: 2px;
+        text-decoration-color: var(--muted);
+      }
+      a:not(.sitenav a):hover {
+        color: var(--heading);
+        text-decoration-color: var(--heading);
       }
       /* Consent-first cookie dialog: a bottom-right overlay, shown only
          when no consent decision is stored (app.js gates it). */

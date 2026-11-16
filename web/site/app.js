@@ -1,7 +1,4 @@
       "use strict";
-      var BEST_URL = new URL("best.txt", window.location.href).href;
-      var OPENCODE_PREFIX = "opencode --model ";
-      var CURL_COMMAND = OPENCODE_PREFIX + '"$(curl -fsSL ' + BEST_URL + ')"';
 
       var els = {
         tbody: document.getElementById("tbody"),
@@ -10,13 +7,6 @@
         generatedTop: document.getElementById("generated-top"),
         revBlock: document.getElementById("rev-block"),
         revLink: document.getElementById("rev-link"),
-        copyModel: document.getElementById("copy-model"),
-        copyCommand: document.getElementById("copy-command"),
-        copyCurl: document.getElementById("copy-curl"),
-        modelValue: document.getElementById("model-value"),
-        commandValue: document.getElementById("command-value"),
-        aliasHint: document.getElementById("alias-hint"),
-        curlValue: document.getElementById("curl-value"),
       };
       var data = null;
       var historyData = null;
@@ -571,13 +561,6 @@
         );
       }
 
-      function topModel() {
-        var rows = data && data.priorities[current];
-        if (!rows || !rows.length) return null;
-        // provider-qualified id (opencode-ready); fall back for stale data
-        return rows[0].opencode_model || rows[0].model;
-      }
-
       function copyText(text) {
         if (navigator.clipboard && navigator.clipboard.writeText) {
           return navigator.clipboard.writeText(text).then(
@@ -1101,13 +1084,6 @@
             els.tbody.appendChild(endpointRow(entry, catalogData));
           }
         });
-        var model = topModel();
-        var hasTop = model !== null;
-        els.copyModel.disabled = !hasTop;
-        els.copyCommand.disabled = !hasTop;
-        els.modelValue.textContent = model === null ? "—" : model;
-        els.commandValue.textContent =
-          model === null ? "—" : OPENCODE_PREFIX + model;
         renderDeals();
       }
 
@@ -1272,18 +1248,6 @@
       }
 
       function init() {
-        els.aliasHint.textContent = "alias oc-best='" + CURL_COMMAND + "'";
-        els.curlValue.textContent = CURL_COMMAND;
-        els.copyCurl.disabled = false;
-        wireCopy(els.copyModel, topModel);
-        wireCopy(els.copyCommand, function () {
-          var model = topModel();
-          return model === null ? null : OPENCODE_PREFIX + model;
-        });
-        wireCopy(els.copyCurl, function () {
-          return CURL_COMMAND;
-        });
-
         Array.prototype.forEach.call(
           document.querySelectorAll("#tabs button[data-priority]"),
           function (btn) {

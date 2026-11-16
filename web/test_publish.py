@@ -3,6 +3,7 @@
 import hashlib
 import http.client
 import json
+import re
 import subprocess
 import urllib.error
 from pathlib import Path
@@ -658,13 +659,18 @@ PUBLISH_ARTIFACTS = (
     "highlights.json",
     "best.txt",
     "index.html",
+    "plugin.html",
+    "how-to-use.html",
     "faq.html",
     "style.css",
     "app.js",
+    "plugin.js",
     "favicon.svg",
     "favicon-16x16.png",
     "favicon-32x32.png",
     "apple-touch-icon.png",
+    "picks-dialog.png",
+    "report-dialog.png",
 )
 
 # The favicon set copies with the site assets; pinned here and in
@@ -804,27 +810,35 @@ def test_publish_copies_the_faq_page(tmp_path, monkeypatch):
 def test_faq_page_is_linked_from_the_index_footer_and_answers_routing():
     site = Path(__file__).resolve().parent / "site"
     faq = (site / "faq.html").read_text(encoding="utf-8")
+    howto = (site / "how-to-use.html").read_text(encoding="utf-8")
     index = (site / "index.html").read_text(encoding="utf-8")
-    # Linked from the footer, not buried in the OpenCode section.
-    footer_at = index.index("<footer>")
-    assert 'href="faq.html"' in index[footer_at:]
+    # Linked from the tab bar on every page, not buried in a section.
+    nav_at = index.index('<nav class="sitenav"')
+    assert 'href="faq.html"' in index[nav_at : index.index("</nav>", nav_at)]
+    assert 'href="how-to-use.html"' in index[nav_at : index.index("</nav>", nav_at)]
     # Same shell as the index page: shared stylesheet, same CSP posture.
     assert 'href="style.css"' in faq
     assert "Content-Security-Policy" in faq
     assert "default-src 'none'" in faq
-    # The four questions the issue asks for, plus depths and variants.
+    # Conceptual table questions are on FAQ (without unexplained CLI flags);
+    # procedural guides (OpenCode, steering, endpoint verification, published
+    # JSON feeds, and LiteLLM) are on How to use.
+    for needle in ("PREC", "cheapest", "#max", ":free", "ZDR", "model_compare.py"):
+        assert needle in faq, needle
+    for cli_jargon in ("--input-share", "--min-context", "--exclude-free"):
+        assert cli_jargon not in faq, cli_jargon
     for needle in (
-        "PREC",
-        "cheapest",
+        "best.txt",
+        "data.json",
+        "catalog.json",
         "steering",
         "extra_body",
         "provider",
-        "--json",
-        "catalog.json",
-        "#max",
-        ":free",
+        "litellm.json",
+        "LITELLM_MODEL_COST_MAP_URL",
     ):
-        assert needle in faq, needle
+        assert needle in howto, needle
+    assert "copy-model" not in howto
 
 
 def test_publish_healthy_aa_v5_fixture(tmp_path, monkeypatch):
@@ -1115,3 +1129,100 @@ def _raise(exc):
         raise exc
 
     return _run
+
+
+# ---------------------------------------------------------------------------
+# The four pages and their shared tab bar
+
+PAGE_FILES = ("index.html", "plugin.html", "how-to-use.html", "faq.html")
+
+
+def _sitenav(html):
+    return re.search(r'<nav class="sitenav".*?</nav>', html, re.DOTALL).group(0)
+
+
+def test_all_pages_share_one_tab_bar():
+    site = Path(__file__).resolve().parent / "site"
+    seen = set()
+    for name in PAGE_FILES:
+        block = re.sub(r"\s+", " ", _sitenav((site / name).read_text(encoding="utf-8")))
+        block = re.sub(r"\s+>", ">", block)
+        seen.add(
+            block.replace(' class="active"', "").replace(' aria-current="page"', "")
+        )
+    assert len(seen) == 1
+
+
+def test_each_page_marks_its_own_tab():
+    site = Path(__file__).resolve().parent / "site"
+    for name in PAGE_FILES:
+        block = _sitenav((site / name).read_text(encoding="utf-8"))
+        assert block.count('aria-current="page"') == 1
+        active = re.search(
+            r'<a class="active" href="([^"]+)" aria-current="page"', block
+        )
+        assert active and active.group(1) == name
+
+
+def test_each_page_carries_the_shared_header():
+    site = Path(__file__).resolve().parent / "site"
+    for name in PAGE_FILES:
+        html = (site / name).read_text(encoding="utf-8")
+        assert "<h1>model-compare</h1>" in html
+        assert "Best value-for-money LLM on OpenRouter" in html
+
+
+def test_plugin_page_answers_the_plugin_questions():
+    plugin = (Path(__file__).resolve().parent / "site" / "plugin.html").read_text(
+        encoding="utf-8"
+    )
+    for needle in (
+        "<h3>Installation</h3>",
+        "<h3>The aliases</h3>",
+        "<h3>TUI features</h3>",
+        "model-compare-opencode-plugin",
+        "openrouter/model-compare/balanced",
+        "openrouter/model-compare/price",
+        "openrouter/model-compare/quality",
+        "opencode run --model",
+        'alt="',
+        "picks-dialog.png",
+        "report-dialog.png",
+        'id="lightbox"',
+        "alt+m",
+        "alt+u",
+        "alt+e",
+        "alt+shift+m",
+    ):
+        assert needle in plugin, needle
+    assert "What it is for" not in plugin
+
+
+def test_every_published_site_file_exists():
+    site = Path(__file__).resolve().parent / "site"
+    missing = [name for name in publish.SITE_FILES if not (site / name).is_file()]
+    assert missing == []
+
+
+def test_publish_copies_every_page(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run(calls))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    out = tmp_path / "site"
+    publish.build_site(out)
+    for name in publish.SITE_FILES:
+        assert (out / name).is_file(), name
+
+
+def test_every_asset_the_pages_reference_is_published():
+    # The anti-goal: a page or asset the pages request but SITE_FILES omits
+    # 404s in production while every other test stays green (issue #20).
+    site = Path(__file__).resolve().parent / "site"
+    refs = set()
+    for name in PAGE_FILES:
+        html = (site / name).read_text(encoding="utf-8")
+        for ref in re.findall(r'(?:href|src)="([^"]+)"', html):
+            if ref.startswith(("http://", "https://", "#", "mailto:")):
+                continue
+            refs.add(ref)
+    assert sorted(refs - set(publish.SITE_FILES)) == []

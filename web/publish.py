@@ -5,8 +5,9 @@ Runs the standalone model_compare.py, then the web-side generators
 (generate_highlights.py, build_site_data.py), and assembles the deploy
 directory: data.json, catalog.json, history.json, highlights.json,
 litellm_rate_card.json, litellm_steering.json, litellm_merge_status.json,
-best.txt, index.html, faq.html and its style.css/app.js/favicon
-assets. Fails loudly on any unexpected result -- including
+best.txt, and the static site (index.html, plugin.html, how-to-use.html,
+faq.html, style.css, app.js, plugin.js, the favicon set and the two dialog
+screenshots). Fails loudly on any unexpected result -- including
 data.json/history.json stamps that disagree with catalog.json's
 generated_at, or a best.txt that is not catalog.json's balanced rank 1 --
 so a broken run never deploys a broken site.
@@ -35,9 +36,7 @@ USER_AGENT = "model-compare (https://github.com/canonical/model-compare)"
 PRIORITIES = ("balanced", "price", "quality")
 PREV_HISTORY_URL = "https://canonical.github.io/model-compare/history.json"
 PREV_HIGHLIGHTS_URL = "https://canonical.github.io/model-compare/highlights.json"
-PREV_LITELLM_MERGED_URL = (
-    "https://canonical.github.io/model-compare/litellm.json"
-)
+PREV_LITELLM_MERGED_URL = "https://canonical.github.io/model-compare/litellm.json"
 PREV_LITELLM_STATUS_URL = (
     "https://canonical.github.io/model-compare/litellm_merge_status.json"
 )
@@ -51,6 +50,25 @@ LITELLM_REQUIRED = (
     "litellm_merge_status.json",
 )
 LITELLM_MERGED = "litellm.json"
+# The static site: every file copied verbatim from web/site/ into the deploy
+# directory. Named here so the tests can assert each one exists before a
+# publish, rather than duplicating the list (a page missing from it 404s in
+# production while every local test stays green -- issue #20).
+SITE_FILES = (
+    "index.html",
+    "plugin.html",
+    "how-to-use.html",
+    "faq.html",
+    "style.css",
+    "app.js",
+    "plugin.js",
+    "favicon.svg",
+    "favicon-16x16.png",
+    "favicon-32x32.png",
+    "apple-touch-icon.png",
+    "picks-dialog.png",
+    "report-dialog.png",
+)
 # Endpoint-stage failures are normal churn (provider outages, gating), but a
 # mass exodus means the catalog is no longer comparable to previous runs.
 # publish imports nothing from model_compare/build_site_data (subprocess-only
@@ -439,9 +457,7 @@ def check_litellm(output_dir: Path, catalog: dict) -> None:
     merged_path = output_dir / LITELLM_MERGED
     if state == "skipped":
         if merged_path.exists():
-            raise RuntimeError(
-                "publish: litellm.json exists but status says skipped"
-            )
+            raise RuntimeError("publish: litellm.json exists but status says skipped")
         return
     if state not in ("ok", "frozen"):
         raise RuntimeError(f"publish: unknown merged status {state!r}")
@@ -449,8 +465,7 @@ def check_litellm(output_dir: Path, catalog: dict) -> None:
     digest = hashlib.sha256(raw).hexdigest()
     if merged.get("sha256") != digest:
         raise RuntimeError(
-            "publish: litellm_merge_status.json merged hash does not match "
-            "litellm.json"
+            "publish: litellm_merge_status.json merged hash does not match litellm.json"
         )
     merged_doc = _artifact_object(raw, LITELLM_MERGED)
     if state == "ok":
@@ -574,16 +589,7 @@ def build_site(output_dir: Path) -> None:
             ],
         )
 
-        for name in (
-            "index.html",
-            "faq.html",
-            "style.css",
-            "app.js",
-            "favicon.svg",
-            "favicon-16x16.png",
-            "favicon-32x32.png",
-            "apple-touch-icon.png",
-        ):
+        for name in SITE_FILES:
             shutil.copyfile(WEB_DIR / "site" / name, output_dir / name)
 
     artifacts = (
@@ -593,14 +599,7 @@ def build_site(output_dir: Path) -> None:
         "highlights.json",  # ditto via PREV_HIGHLIGHTS_URL
         *LITELLM_REQUIRED,
         "best.txt",
-        "index.html",
-        "faq.html",
-        "style.css",
-        "app.js",
-        "favicon.svg",
-        "favicon-16x16.png",
-        "favicon-32x32.png",
-        "apple-touch-icon.png",
+        *SITE_FILES,
     )
     missing = [name for name in artifacts if not (output_dir / name).is_file()]
     if missing:

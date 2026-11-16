@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'"
+    />
+    <title>model-compare — OpenCode plugin</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <h1>model-compare</h1>
+    <p class="sub">Best value-for-money LLM on OpenRouter</p>
+    <nav class="sitenav" aria-label="Site">
+      <a href="index.html">Picks</a>
+      <a class="active" href="plugin.html" aria-current="page"
+        >OpenCode plugin</a
+      >
+      <a href="how-to-use.html">How to use</a>
+      <a href="faq.html">FAQ</a>
+    </nav>
+
+    <h2>OpenCode plugin</h2>
+    <p class="intro">
+      Adds three live aliases to OpenCode v2 that follow
+      <code>model-compare</code> ranking, steer requests to OpenRouter to the
+      ranked endpoint, and pin the scored reasoning depth.
+    </p>
+
+    <div class="prose">
+      <h3>Installation</h3>
+      <p>
+        Add <code>model-compare-opencode-plugin</code> to
+        <code>opencode.jsonc</code> (project or global). OpenCode installs and
+        loads the npm package automatically:
+      </p>
+      <pre class="jsonbox"><span class="jp">{</span>
+  <span class="jk">"$schema"</span><span class="jp">:</span> <span class="js">"https://opencode.ai/config.json"</span><span class="jp">,</span>
+  <span class="jk">"plugins"</span><span class="jp">:</span> <span class="jp">[</span>
+    <span class="jp">{</span>
+      <span class="jk">"package"</span><span class="jp">:</span> <span class="js">"model-compare-opencode-plugin"</span><span class="jp">,</span>
+      <span class="jk">"options"</span><span class="jp">:</span> <span class="jp">{</span> <span class="jk">"source"</span><span class="jp">:</span> <span class="js">"auto"</span><span class="jp">,</span> <span class="jk">"defaultPriority"</span><span class="jp">:</span> <span class="js">"balanced"</span> <span class="jp">}</span>
+    <span class="jp">}</span>
+  <span class="jp">]</span>
+<span class="jp">}</span></pre>
+      <p class="hint">
+        All options are optional. See
+        <a href="https://github.com/canonical/model-compare-opencode-plugin"
+          >the plugin README</a
+        >
+        for <code>fallback</code>, custom <code>weights</code>,
+        <code>pinDays</code>, and <code>minLead</code>.
+      </p>
+
+      <h3>The aliases</h3>
+      <p>
+        Each priority registers as a model inside the
+        <code>openrouter</code> provider and refreshes every 30 minutes while
+        OpenCode runs:
+      </p>
+      <table class="info">
+        <thead>
+          <tr>
+            <th>Alias</th>
+            <th>Resolves to</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>openrouter/model-compare/balanced</code></td>
+            <td>best all-round value pick</td>
+          </tr>
+          <tr>
+            <td><code>openrouter/model-compare/price</code></td>
+            <td>best price pick (bulk or mechanical work)</td>
+          </tr>
+          <tr>
+            <td><code>openrouter/model-compare/quality</code></td>
+            <td>best quality pick (planning or code review)</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        Set one as your root <code>"model"</code> in
+        <code>opencode.jsonc</code>, switch an open session with
+        <code>alt+u</code> (or <code>/use-best [priority]</code>), or bind
+        specific agents and headless runs:
+      </p>
+      <p class="hint">
+        For agents, use the alias in the agent's <code>.md</code> frontmatter:
+      </p>
+      <pre class="jsonbox"><span class="jp">---</span>
+<span class="jk">description</span><span class="jp">:</span> Reviews changes for correctness
+<span class="jk">mode</span><span class="jp">:</span> subagent
+<span class="jk">model</span><span class="jp">:</span> <span class="js">openrouter/model-compare/quality</span>
+<span class="jp">---</span></pre>
+      <p class="hint">Headless:</p>
+      <pre
+        class="jsonbox"
+      >opencode run --model <span class="js">"openrouter/model-compare/price"</span> <span class="js">"Summarize test failures"</span></pre>
+
+      <h3>TUI features</h3>
+      <p>Two dialogs let you inspect or switch picks.</p>
+      <div class="thumbs">
+        <figure class="shot">
+          <a
+            class="shot-link"
+            href="picks-dialog.png"
+            data-caption="alt+m — current pick for balanced, price, and quality"
+          >
+            <img
+              src="picks-dialog.png"
+              alt="The picks dialog: balanced, price, and quality, each with its current pick"
+            />
+          </a>
+          <figcaption>
+            <code>alt+m</code> — current pick for each priority;
+            <code>return</code> switches to it.
+          </figcaption>
+        </figure>
+        <figure class="shot">
+          <a
+            class="shot-link"
+            href="report-dialog.png"
+            data-caption="alt+shift+m (or /model-compare) — top 5 per priority with quality, variant, and prices"
+          >
+            <img
+              src="report-dialog.png"
+              alt="The report dialog: the top five per priority with quality, variant, and prices"
+            />
+          </a>
+          <figcaption>
+            <code>alt+shift+m</code> (or <code>/model-compare</code>) — top 5
+            per priority with quality, variant, and prices.
+          </figcaption>
+        </figure>
+      </div>
+
+      <table class="info">
+        <thead>
+          <tr>
+            <th>Shortcut</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>alt+m</code></td>
+            <td>open the current-picks dialog</td>
+          </tr>
+          <tr>
+            <td><code>alt+shift+m</code></td>
+            <td>
+              open the top-5 report dialog (also <code>/model-compare</code>)
+            </td>
+          </tr>
+          <tr>
+            <td><code>alt+u</code></td>
+            <td>
+              switch the session to your <code>defaultPriority</code> pick (same
+              as <code>/use-best</code>)
+            </td>
+          </tr>
+          <tr>
+            <td><code>alt+e</code></td>
+            <td>
+              show a toast with the endpoint that served the last alias response
+            </td>
+          </tr>
+          <tr>
+            <td><code>return</code> / <code>esc</code></td>
+            <td>pick the highlighted row / close the dialog</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <dialog class="lightbox" id="lightbox" aria-label="Screenshot preview">
+      <div class="lightbox-body">
+        <img id="lightbox-img" alt="" />
+        <div class="lightbox-bar">
+          <span id="lightbox-cap"></span>
+          <button type="button" id="lightbox-close">Close</button>
+        </div>
+      </div>
+    </dialog>
+
+    <footer>
+      plugin:
+      <a href="https://github.com/canonical/model-compare-opencode-plugin"
+        >canonical/model-compare-opencode-plugin</a
+      >
+      · source:
+      <a href="https://github.com/canonical/model-compare"
+        >canonical/model-compare</a
+      >
+    </footer>
+
+    <script src="plugin.js" defer></script>
+  </body>
+</html>

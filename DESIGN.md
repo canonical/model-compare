@@ -1,7 +1,7 @@
 # Design
 
-How the tool works under the hood. End-user docs live in the
-[README](README.md), the site's docs in [web/README.md](web/README.md).
+How the tool works under the hood. End-user docs are in the
+[README](README.md), and the site's docs are in [web/README.md](web/README.md).
 
 ## Data sources
 
@@ -232,7 +232,7 @@ when the AA API returned usable entries (a keyed run whose fetch failed
 publishes `none`), `catalog` when an unkeyed run hydrated the published
 catalog (the branch fires on the counts alone, so hydrated rows still
 credit the catalog when its `generated_at` was unusable), `none` when
-neither tier produced data. OpenRouter is never a mode — its count lives
+neither tier produced data. OpenRouter is never a mode — its count is recorded
 in `matched_openrouter`. The three counts are disjoint buckets (strict rank
 gives every candidate at most one record); their sum is exactly the number
 of entries with a non-null `quality_match`, an invariant
@@ -347,9 +347,19 @@ is unset or empty — the built-in pager counts as the terminal it feeds —;
 `on` forces it and `off` never does. Column widths are computed from the raw
 text before any escape codes are added, so color never shifts alignment.
 
-`--json`, `--catalog` and `--best` are unaffected by `--color`, `--detail`,
-`--off-peak` and `--bare`: they keep their documented output byte-for-byte,
-and `--best` still prints only the opencode id.
+`--json`, `--catalog`, and `--best` are unaffected by `--color`, `--detail`,
+`--off-peak`, and `--bare`: they keep their documented output byte-for-byte,
+and `--best` still prints only the opencode id (`openrouter/<model>`, built
+from a single provider prefix constant in `model_compare.py`). `--json` rows
+carry both `model` (bare catalog id) and `opencode_model` (provider-qualified
+id), `discount_pct` (the `DISC` column's display string, e.g., `25%` or `--`),
+the quality provenance fields (`quality_source`, `quality_as_of`,
+`quality_drift`, `quality_or_index`, `quality_or_as_of`, `quality_effort`,
+`default_effort`), `quant_note` (cheapest non-baseline endpoint and price
+spread), `steering`, and the tiered/schedule fields
+(`pricing_tier_prompt_tokens`, `base_input_usd_per_m`,
+`base_output_usd_per_m`, `tier_note`, `sched_note`, `sched_detail`, and
+`time_schedule`).
 
 On a terminal the human output runs through a pager: `$PAGER` verbatim when
 set (an empty value counts as unset), else
@@ -712,6 +722,38 @@ allowed to differ from the current rate card; only an `ok` map must be a
 superset. `web/publish.py` fetches the previous merged map and status from
 the live site, the same way it fetches history and highlights.
 
+Consumer notes and representation limits:
+
+- **Loading the cost map:** `litellm_rate_card.json` is a fragment — LiteLLM
+  rejects a custom cost map that is too small to be a full price list. Point
+  `LITELLM_MODEL_COST_MAP_URL` at `https://model-compare.dev/litellm.json` (~3.5
+  MB) in the proxy's process environment before startup (not under
+  `environment_variables` in the proxy config), or merge upstream and the
+  fragment yourself with `jq -s '.[0] + .[1]' upstream.json
+  litellm_rate_card.json > merged.json` (a shallow union: overlapping keys are
+  replaced whole by our entry). Verify loading via
+  `GET /model/cost_map/source` and alert on `fallback_reason`, since LiteLLM
+  silently falls back to its bundled map on fetch or validation errors.
+- **Applying `litellm_steering.json` in a hook:** `litellm_steering.json` is
+  pure data, consumed from a LiteLLM `CustomLogger.async_pre_call_hook`.
+  Resolve the request alias to `openrouter/<id>`, select `provider` (allows
+  fallbacks across eligible endpoints; strong preference, not a hard price cap)
+  or `provider_strict` (single endpoint, no fallbacks, `max_price` capped at
+  the base rate; fails when that endpoint is down), and pass it via
+  `extra_body.provider`. Send `reasoning.preferred.effort` via
+  `extra_body={"reasoning": {"effort": ...}}` — never use LiteLLM's top-level
+  `reasoning_effort` for `max` (LiteLLM rewrites `max` to `xhigh`), and never
+  send `none` when `reasoning.mandatory` is `true`. Deployment policy (`zdr`,
+  `data_collection`, `require_parameters`) belongs in proxy or hook config, not
+  in the published file.
+- **Representation limits:** the fragment covers ranked candidates only (never
+  filtered models), and candidate count moves with the live pool — read key
+  count or `_meta.entries` rather than assuming a fixed size. LiteLLM can
+  express only one off-peak rate level per model: a model with multiple
+  distinct off-peak levels is published without `off_peak_pricing`, and a model
+  with both long-context tiers and an off-peak schedule keeps its tiers and
+  omits `off_peak_pricing`. Both cases are recorded in `_meta.warnings`.
+
 On the published site the catalog is the ranking and timestamping authority.
 It carries the ranking itself in `rankings`, and everything else projects it
 or is checked against it: the `data.json` table rows are reordered to it (and
@@ -763,7 +805,7 @@ effort table is re-verified against it then.
    download:
    `raw.githubusercontent.com/canonical/model-compare/vX.Y.Z/model_compare.py`.
 6. Never rename the catalog `tool` literal or remove schema fields without
-   bumping `schema_version`. The version gates live in three files —
+   bumping `schema_version`. The version gates are defined in three files —
    `model_compare.py` (`CATALOG_SCHEMA_VERSION`),
    `web/build_site_data.py` (`CATALOG_SCHEMA_VERSION`, `DATA_SCHEMA_VERSION`,
    `HISTORY_SCHEMA_VERSION`) and `web/publish.py` (`check_stamps`' pinned

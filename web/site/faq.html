@@ -7,7 +7,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'"
     />
-    <title>model-compare — FAQ: precision, price and routing</title>
+    <title>model-compare — FAQ: precision, price, and variants</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
@@ -15,137 +15,197 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
-    <h1>model-compare FAQ</h1>
-    <p class="sub">
-      Precision, price and routing, explained for the numbers on
-      <a href="index.html">the picks page</a>. The column definitions live in
-      the table's header tooltips; this page covers what to do when the
-      numbers differ from your bill.
+    <h1>model-compare</h1>
+    <p class="sub">Best value-for-money LLM on OpenRouter</p>
+    <nav class="sitenav" aria-label="Site">
+      <a href="index.html">Picks</a>
+      <a href="plugin.html">OpenCode plugin</a>
+      <a href="how-to-use.html">How to use</a>
+      <a class="active" href="faq.html" aria-current="page">FAQ</a>
+    </nav>
+
+    <h2>FAQ</h2>
+    <p class="intro">
+      How to read the numbers on <a href="index.html">the picks page</a> — and
+      why your OpenRouter bill can sometimes tell a slightly different story.
+      For practical setup and routing guides, head over to
+      <a href="how-to-use.html">How to use</a>.
     </p>
 
-    <h2>What do PREC and the "!" marker mean?</h2>
-    <p>
-      <code>PREC</code> is the quantization the ranked endpoint quotes
-      (<code>fp8</code>, <code>bf16</code>, <code>int4</code>, …), not a
-      property of the model. One model id can be served by several endpoints
-      at different precisions and prices.
-    </p>
-    <p>
-      The tool ranks at the <strong>cheapest eligible</strong> endpoint, so
-      <code>PREC</code> names that endpoint's precision. A trailing
-      <code>!</code> is a warning: OpenRouter's default routing weights
-      endpoints by price, and cheaper endpoints below the quoted precision
-      would take more than half the traffic. In other words, without
-      steering, a call may land on a lower-precision endpoint than the row
-      claims. Hover the cell for the cheapest non-baseline endpoint
-      (quantization, provider and price).
-    </p>
+    <div class="prose faq-list">
+      <div class="faq-item">
+        <h3>What do PREC and the "!" marker mean?</h3>
+        <p>
+          On OpenRouter, a single model name isn't necessarily tied to one
+          company's servers. Several backend providers ("endpoints") can host
+          the exact same open-weight model at different prices and compression
+          levels.
+        </p>
+        <p>
+          <i
+            >That compression is called quantization: converting a model's
+            high-precision weights (such as <code>bf16</code>) into smaller
+            number formats (such as <code>fp8</code> or <code>int4</code>). It
+            cuts memory use and speeds up replies — though pushing it too far
+            can chip away at answer quality.</i
+          >
+        </p>
+        <p>
+          Rather than taking OpenRouter's headline number at face value,
+          <code>model-compare</code> checks every live endpoint for a model and
+          ranks it using the <strong>cheapest eligible</strong> one that meets
+          (or beats) the model's baseline precision. The
+          <code>PREC</code> column shows that baseline precision — the model
+          maker's disclosed format, the best format disclosed across live
+          providers, or <code>n/a</code> when none is disclosed.
+        </p>
+        <p>
+          A trailing <code>!</code> (for example, <code>fp8!</code>) is a
+          heads-up. Left to its own devices, OpenRouter weights traffic toward
+          whichever provider is cheapest overall — and the <code>!</code> means
+          even cheaper, lower-precision endpoints exist and would soak up more
+          than half of your requests by default.
+        </p>
+        <p>
+          The upshot: without routing rules, your calls can quietly land on a
+          more heavily compressed version of the model than the row describes.
+          Hover the <code>PREC</code> cell (or click the row) to inspect the
+          competing endpoints, their precisions, and their prices — and see
+          <a href="how-to-use.html">How to use</a> for how to lock routing down.
+        </p>
+      </div>
 
-    <h2>Why can the price I pay differ from the ranked price?</h2>
-    <p>
-      Prices here are the cheapest eligible endpoint's, blended 75% input /
-      25% output (the <code>--input-share</code> default). openrouter.ai
-      shows the default endpoint's listed rate. Neither is wrong: one
-      answers "what is the best value available", the other "what does the
-      default route cost".
-    </p>
-    <p>
-      Three things move the actual bill: default routing sending traffic to
-      a different endpoint, long prompts crossing a tier threshold into a
-      pricier rate (<code>TIER</code> shows <code>&gt;Nk</code>), and
-      scheduled off-peak windows (<code>TIER</code> shows
-      <code>-N%</code>). The ranked price is deterministic at
-      <code>--min-context</code>, which is why it makes a fair comparison
-      across models.
-    </p>
+      <div class="faq-item">
+        <h3>Why can the price I pay differ from the ranked price?</h3>
+        <p>
+          If you compare a row here against the model's page on
+          <code>openrouter.ai</code>, the two prices often won't match. That's
+          by design: OpenRouter's page shows the rate for its default route,
+          while this site quotes the <strong>cheapest eligible</strong>
+          endpoint.
+        </p>
+        <p>
+          To judge overall value for money, <code>model-compare</code> blends
+          input and output prices at a 75% / 25% split. Coding sessions tend to
+          send plenty of file context in and get comparatively short patches
+          back, so weighting input heavier reflects real usage much better than
+          a 50 / 50 average.
+        </p>
+        <p>
+          In practice, three things can nudge your actual bill away from the
+          table price:
+        </p>
+        <ul>
+          <li>
+            <strong>Default routing:</strong> if you don't pin your provider
+            list, OpenRouter may route a call to a pricier (or cheaper) backend
+            than the one ranked here.
+          </li>
+          <li>
+            <strong>Long-context tiers</strong> (<code>TIER</code> shows
+            <code>&gt;200k</code>, <code>&gt;272k</code>, and similar): some
+            providers charge more per token once a conversation grows past a
+            prompt-size threshold. To avoid bait-and-switch starter rates,
+            <code>model-compare</code> always evaluates prices at a 1M-token
+            prompt size — what a long coding session actually pays.
+          </li>
+          <li>
+            <strong>Off-peak discounts</strong> (<code>TIER</code> shows
+            <code>-38%</code>, and similar): a few providers cut rates during
+            quieter UTC hours. The main table sticks to standard rates so the
+            ranking stays predictable, while the
+            <strong>Off-peak deals</strong> table highlights those scheduled
+            windows separately.
+          </li>
+        </ul>
+      </div>
 
-    <h2>How do I pin routing with the steering block?</h2>
-    <p>
-      Every <code>--json</code> row and every <code>catalog.json</code>
-      model entry carries a <code>steering</code> object: the exact
-      OpenRouter <code>provider</code> routing block that reproduces the
-      ranked choice.
-    </p>
-    <pre class="jsonbox"><span class="jp">{</span>
-  <span class="jk">"model"</span><span class="jp">:</span> <span class="js">"deepseek/deepseek-v4.1-flash-1017"</span><span class="jp">,</span>
-  <span class="jk">"provider"</span><span class="jp">:</span> <span class="jp">{</span>
-    <span class="jk">"order"</span><span class="jp">:</span> <span class="jp">[</span><span class="js">"DeepInfra/fp8"</span><span class="jp">,</span> <span class="js">"Baidu/bf16"</span><span class="jp">]</span><span class="jp">,</span>
-    <span class="jk">"ignore"</span><span class="jp">:</span> <span class="jp">[</span><span class="js">"Morph/int4"</span><span class="jp">]</span><span class="jp">,</span>
-    <span class="jk">"quantizations"</span><span class="jp">:</span> <span class="jp">[</span><span class="js">"bf16"</span><span class="jp">,</span> <span class="js">"fp8"</span><span class="jp">]</span><span class="jp">,</span>
-    <span class="jk">"allow_fallbacks"</span><span class="jp">:</span> <span class="js">true</span>
-  <span class="jp">}</span>
-<span class="jp">}</span></pre>
-    <p>
-      <code>order</code> lists baseline-eligible endpoints, cheapest first;
-      <code>ignore</code> names every live endpoint that is not eligible
-      (lower-precision, unknown, or price-tier gated);
-      <code>quantizations</code> keeps only precisions at or above the
-      quoted one (the key is omitted when the default precision is
-      unknown); <code>allow_fallbacks</code> lets OpenRouter fall back when
-      the ordered endpoints are unavailable. Pass the
-      <code>provider</code> object with your request, as-is.
-    </p>
-    <p>
-      With the OpenAI SDK, add it through <code>extra_body</code> —
-      unknown top-level parameters are dropped before the request is
-      sent:
-    </p>
-    <pre class="jsonbox"><span class="jk">client.chat.completions.create</span><span class="jp">(</span>
-  <span class="jk">model</span><span class="jp">=</span><span class="js">"deepseek/deepseek-v4.1-flash-1017"</span><span class="jp">,</span>
-  <span class="jk">messages</span><span class="jp">=[…]</span><span class="jp">,</span>
-  <span class="jk">extra_body</span><span class="jp">={</span><span class="js">"provider"</span><span class="jp">:</span> steering<span class="jp">[</span><span class="js">"provider"</span><span class="jp">]}</span><span class="jp">,</span>
-<span class="jp">)</span></pre>
-    <p>
-      In OpenCode, the
-      <a
-        href="https://github.com/canonical/model-compare-opencode-plugin#steering-and-served-endpoints"
-        >model-compare plugin</a
-      >
-      applies the same block for you; a custom request body can be supplied
-      with its <code>body</code> option, which is forwarded to the provider
-      request — put the <code>provider</code> object there.
-    </p>
+      <div class="faq-item">
+        <h3>What about reasoning depths and model variants?</h3>
+        <p>
+          Many newer "thinking" models let you dial in how much effort they
+          spend reasoning before they answer — levels like
+          <code>minimal</code>, <code>low</code>, <code>medium</code>,
+          <code>high</code>, or <code>max</code>. More thinking generally lifts
+          answer quality, at the cost of extra internal tokens and a higher bill
+          per task.
+        </p>
+        <p>
+          Quality scores (<code>QUAL</code>) come from the
+          <a href="https://artificialanalysis.ai/models">Artificial Analysis</a>
+          intelligence index, which often benchmarks the same model across
+          several thinking levels. Each row here is scored at the model's
+          <strong>highest-rated depth that OpenRouter actually lets you
+          select</strong>, and <code>DEPTH</code> tells you which one won (an
+          asterisk like <code>max*</code> just notes that it also happens to be
+          OpenRouter's default).
+        </p>
+        <p>
+          Click any row on the Picks page to unfold its full depth table —
+          quality score, benchmark cost, and a button to copy the ready-to-use
+          ID. In OpenCode, you pick a depth by tacking <code>#&lt;depth&gt;</code>
+          onto the model ID, such as
+          <code>openrouter/deepseek/deepseek-v4.1-flash-1017#max</code> (or
+          <code>#xhigh</code>, <code>#high</code>, <code>#medium</code>,
+          <code>#low</code>, <code>#minimal</code>, or <code>#none</code>). If
+          you use the <a href="plugin.html">OpenCode plugin</a>, it pins that
+          scored depth automatically.
+        </p>
+        <p>
+          One more wrinkle: suffixes like <code>:free</code> (rate-limited free
+          tier) and <code>:batch</code> (asynchronous batch jobs) are separate
+          listings on OpenRouter with their own limits, context windows, and
+          pricing. The rankings skip <code>:batch</code> listings because
+          interactive coding tools need live replies, and include
+          <code>:free</code> listings when they pass every other check. Treat
+          them as distinct models — don't pair a variant ID with another row's
+          routing block.
+        </p>
+      </div>
 
-    <h2>How do I verify which endpoint served a call?</h2>
-    <p>
-      The completion response carries the serving endpoint's
-      <code>provider</code> field; compare it with the row's
-      <code>PREC</code> and, for the ranked choice, with
-      <code>steering.order[0]</code>. The OpenRouter dashboard's activity
-      view shows per-request provider, price and latency, which is the
-      ground truth for what you were billed.
-    </p>
-
-    <h2>What about depths and variants?</h2>
-    <p>
-      Reasoning depth is part of the model id in OpenCode: append
-      <code>#max</code>, <code>#high</code>, <code>#medium</code>,
-      <code>#low</code>, <code>#minimal</code> or <code>#none</code> to pin
-      the effort (for example
-      <code>openrouter/deepseek/deepseek-v4.1-flash-1017#max</code>). The
-      ranked <code>QUAL</code> is measured at the model's best measured
-      selectable depth, and the depth detail row shows each effort's index,
-      cost and the suffix that selects it. A pinned depth can cost more
-      than the default one. The plugin's
-      <a
-        href="https://github.com/canonical/model-compare-opencode-plugin#reasoning-depths"
-        >Reasoning depths</a
-      >
-      section explains how it pins the scored depth and reports the best
-      selectable alternative.
-    </p>
-    <p>
-      <code>:free</code> and <code>:batch</code> ids are separate listings
-      with their own prices, context and eligibility; the ranked picks
-      exclude <code>:batch</code> by default and exclude <code>:free</code>
-      only with <code>--exclude-free</code>, and the
-      <code>steering.ignore</code> list already names the live variants
-      that were not eligible. Do not mix a variant id with another row's
-      steering block.
-    </p>
+      <div class="faq-item">
+        <h3>Why are some popular models missing from the main table?</h3>
+        <p>
+          The main ranking applies a few strict filters up front so every pick
+          is practical (and safe) for day-to-day coding work:
+        </p>
+        <ul>
+          <li>
+            <strong>Zero-data-retention (ZDR) only:</strong> a model must have
+            at least one live ZDR endpoint — a provider committed to not storing
+            or training on your prompts and completions.
+          </li>
+          <li>
+            <strong>1M-token context window:</strong> models with smaller
+            context limits are filtered out so long agent sessions don't hit a
+            wall mid-task.
+          </li>
+          <li>
+            <strong>Tool calling:</strong> models that can't call functions or
+            tools aren't usable in coding agents and are excluded.
+          </li>
+        </ul>
+        <p>
+          Need something looser for your own workflow? Every one of those
+          filters is configurable when you run <code>model_compare.py</code> on
+          the command line — you can lower the context-window floor, include
+          non-ZDR providers, or drop the tool-calling check. See the
+          <a href="https://github.com/canonical/model-compare"
+            >repository README</a
+          >
+          for the options.
+        </p>
+        <p>
+          And if you spot a model in <strong>Off-peak deals</strong> that doesn't
+          appear in the main ranking above it, that's expected: the deals table
+          is a straight index of scheduled discounts across OpenRouter and
+          deliberately skips the ZDR and context-window filters.
+        </p>
+      </div>
+    </div>
 
     <footer>
-      <a href="index.html">← back to the picks</a> · source:
+      source:
       <a href="https://github.com/canonical/model-compare"
         >canonical/model-compare</a
       >

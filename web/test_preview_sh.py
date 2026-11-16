@@ -14,6 +14,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import publish
+
 SCRIPT = Path(__file__).parent / "preview.sh"
 
 
@@ -99,3 +101,23 @@ def test_preview_sh_serves_synthetic_fallback(tmp_path):
     finally:
         os.killpg(proc.pid, signal.SIGTERM)
         proc.wait(timeout=10)
+
+
+def test_preview_serves_the_same_files_as_publish():
+    # A page added to publish.SITE_FILES but not to preview.sh 404s in the
+    # local preview with no test failing.
+    line = next(
+        line
+        for line in SCRIPT.read_text().splitlines()
+        if line.startswith("SITE_FILES=")
+    )
+    names = line.split("=", 1)[1].strip().strip('"').split()
+    assert set(names) == set(publish.SITE_FILES)
+
+
+def test_preview_fetches_companion_json_artifacts_when_live_succeeds(tmp_path):
+    # Without highlights.json, history.json and catalog.json, local preview
+    # hides Weekly highlights, blanks 7-DAY, and shows a red catalog error.
+    text = SCRIPT.read_text()
+    for artifact in ("highlights.json", "history.json", "catalog.json"):
+        assert f"$LIVE_URL/{artifact}" in text, artifact
