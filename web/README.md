@@ -1,151 +1,74 @@
-# model-compare — the picks site
+# model-compare — the web site
 
-[canonical.github.io/model-compare](https://canonical.github.io/model-compare/)
-is a static GitHub Pages site, rebuilt from scratch on every push to `main`
-by the `publish` workflow (plus 3-hour cron refreshes and manual runs).
-Everything it needs lives in this
-directory; the ranking itself always comes from the standalone
-[`model_compare.py`](../model_compare.py) at the repo root, invoked as a
-subprocess.
+[model-compare.dev](https://model-compare.dev/) is a static GitHub Pages site rebuilt on every push to `main`, every 3 hours on a cron schedule, and on manual workflow dispatch.
+
+All web assets, generators, and site tests are maintained in this directory. The ranking logic itself stays in [`model_compare.py`](../model_compare.py) at the repository root, invoked as a subprocess during each build.
 
 ## What gets published
 
-| file | what it is |
-|------|------------|
-| `faq.html` | the FAQ page: precision and the `!` marker, price versus bill, pinning routing with the `steering` block or the plugin, verifying the serving endpoint, depths and variants |
-| `index.html` | the picks page: top-20 table per priority tab (10 shown, "Show more" expands) with copy buttons, a 7-day movement column, best-selectable-depth QUAL, the DEPTH column with a per-model depth detail row, the TIER column and the Off-peak deals table (dark theme by default, light when the system or browser reports light) |
-| `favicon.svg` + `favicon-16x16.png` / `favicon-32x32.png` / `apple-touch-icon.png` | the icon: the SVG adapts its tile background to the browser theme (`prefers-color-scheme` inside the file — cream tile on dark chrome, dark tile on light chrome, and engines that skip the media query fall back to the dark base rule, matching the site's dark-by-default pages); the static PNGs are Safari/iOS fallbacks with the dark tile (#181a1b) baked in and the rounded corners cut out as real transparency, re-renderable with `web/make_favicon.py` (run it with `--check` to fail on stale committed output) |
-| `data.json` | the rendered rows: per-priority top 20 plus the current best id, the off-peak `schedules` rows, and `generated_at` (ISO timestamp shown as "last refresh: …" between the tab and layout toggles); schema-versioned (`schema_version`, currently 3) and stamped with the `source_revision` (short commit hash) that built it — the footer links it to the exact commit |
-| `best.txt` | the current *balanced* #1 as a plain `opencode --model`-ready id |
-| `catalog.json` | the full `--catalog` document (stable contract, see [DESIGN.md](../DESIGN.md)) |
-| `history.json` | rolling 10-day snapshot history feeding the 7-day column |
-| `highlights.json` | the three prose sections at the bottom of the page |
-| `litellm_rate_card.json` | pure LiteLLM cost-map fragment, one entry per ranked candidate keyed `openrouter/<catalog id>` |
-| `litellm_steering.json` | routing/effort companion keyed like the rate card, with `_meta` provenance and the rate-card hash |
-| `litellm.json` | LiteLLM's upstream map merged with the fragment (optional when the merged map is skipped) |
-| `litellm_merge_status.json` | merge provenance, collisions, upstream failure count and reporting state |
+| File                                                                                           | Description                                                                                                                                                                                                                                |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `index.html`                                                                                   | Landing page (**Picks**): top-20 table per priority (`balanced`, `price`, `quality`), Simple / Expert column toggle, expandable per-model depth and endpoint rows, Off-peak deals table, and Weekly highlights                             |
+| `plugin.html`                                                                                  | **OpenCode plugin** page: installation config, alias reference with agent and headless examples, clickable TUI dialog thumbnails, and keyboard shortcuts                                                                                   |
+| `how-to-use.html`                                                                              | **How to use** page: OpenCode v1 shell alias, OpenCode v2 plugin pointer, OpenRouter `steering` guide, endpoint verification, JSON feed examples, and LiteLLM setup                                                                        |
+| `faq.html`                                                                                     | **FAQ** page: `PREC` and the `!` warning, why billed prices differ from table prices, reasoning depths and variants, and default pool filters                                                                                              |
+| `style.css`, `app.js`, `plugin.js`                                                             | Shared stylesheet (dark by default, light via `prefers-color-scheme`) and the two scripts: `app.js` drives **Picks**, and `plugin.js` drives the `<dialog>` lightbox on **OpenCode plugin** (`how-to-use.html` and `faq.html` run zero JS) |
+| `picks-dialog.png`, `report-dialog.png`                                                        | TUI dialog screenshots shown on `plugin.html`                                                                                                                                                                                              |
+| `favicon.svg`, `favicon-16x16.png`, `favicon-32x32.png`, `apple-touch-icon.png`                | Theme-adaptive SVG mark plus PNG fallbacks generated by `web/make_favicon.py` (`--check` verifies committed PNGs are fresh)                                                                                                                |
+| `best.txt`                                                                                     | Current _balanced_ #1 as a plain `openrouter/<model>` string                                                                                                                                                                               |
+| `data.json`                                                                                    | Rendered top-20 rows per priority, off-peak schedule rows, `generated_at` timestamp, and `source_revision` commit hash (schema v3)                                                                                                         |
+| `catalog.json`                                                                                 | Complete `--catalog` output (schema v6; contract in [DESIGN.md](../DESIGN.md))                                                                                                                                                             |
+| `history.json`                                                                                 | Rolling 10-day snapshot history powering the `7-DAY` movement column                                                                                                                                                                       |
+| `highlights.json`                                                                              | Prose summaries rendered under **Weekly highlights** on `index.html`                                                                                                                                                                       |
+| `litellm_rate_card.json`, `litellm_steering.json`, `litellm.json`, `litellm_merge_status.json` | LiteLLM cost-map fragment, steering companion, merged upstream cost map, and merge health status                                                                                                                                           |
 
-## Pipeline
+## Local preview
 
-The workflow runs the pytest suite, then a single command:
+Preview the site locally at `http://127.0.0.1:8734`:
 
 ```console
-$ python web/publish.py            # assembles ./_site/ and fails loudly
+$ web/preview.sh                # pull live JSON feeds from model-compare.dev (offline synthetic fallback)
+$ web/preview.sh --build        # run the full publish.py pipeline locally instead
 ```
 
-`web/publish.py` runs `model_compare.py --catalog` first (priming the shared
-caches), then `--best` and the per-priority `--json` runs, fetches the
-previously published `history.json` / `highlights.json` / LiteLLM merged map
-/ LiteLLM status (missing files are fine — first run), and fetches LiteLLM's
-upstream cost map. It regenerates highlights with
-`web/generate_highlights.py`, writes the LiteLLM artifacts with
-`web/build_litellm_artifacts.py`, regenerates `data.json` with
-`web/build_site_data.py`, and assembles the deploy directory. The table rows,
-history tabs and highlights diff are all projections of the catalog's
-`rankings`. Every payload is validated; a broken run never deploys. A bad
-upstream fetch or an `openrouter/` key collision freezes only
-`litellm.json`; the rest of the site still deploys, and
-`web/report_litellm_merge.py` reports the condition through one deduplicated
-GitHub issue.
+Note that `--build` fetches previous history/highlights from the live site and, if `OPENROUTER_API_KEY` is set in your environment, may make one real OpenRouter call to generate prose highlights.
 
-## Testing the LiteLLM artifacts
+## Publishing pipeline
 
-`web/test_litellm_contract.py` runs in the normal suite and checks the artifact
-shapes without installing LiteLLM: flat map, required keys, tier ranges,
-off-peak windows, steering parity/hash, and the intended steering application.
+The GitHub Actions workflow runs `pytest` first, then builds `./_site/` in one step:
 
-`web/test_litellm_compat.py` loads the generated `litellm.json` through
-LiteLLM's own `LITELLM_MODEL_COST_MAP_URL` loader, prices a model at a tier
-boundary, and exercises a `CustomLogger` pre-call hook. It skips when
-LiteLLM cannot be imported:
+```console
+$ python3 web/publish.py
+```
+
+`web/publish.py` runs `model_compare.py --catalog` first to prime the local HTTP cache, followed by `--best` and per-priority `--json` runs. It then fetches the previous `history.json`, `highlights.json`, and LiteLLM artifacts from the live site, builds fresh highlights (`web/generate_highlights.py`), builds the LiteLLM files (`web/build_litellm_artifacts.py`), writes `data.json` (`web/build_site_data.py`), and copies `publish.SITE_FILES` into the output directory.
+
+Every output is gated before deploy: mismatched timestamps, a `best.txt` that disagrees with `catalog.json`'s balanced #1, an empty AA run when keyed, or a `>5%` endpoint drop-rate spike aborts the build loudly so a broken run never overwrites the live site. Upstream LiteLLM collisions or fetch failures freeze only `litellm.json` while keeping the rest of the site publishing, and `web/report_litellm_merge.py` opens or updates a single deduplicated GitHub issue.
+
+Optional repository secrets:
+
+- `AA_API_KEY` — queries the live Artificial Analysis v2 API and its per-effort rows (without it, quality hydrates from the published catalog).
+- `OPENROUTER_API_KEY` — enables LLM-written weekly highlights (reused while younger than 24 hours; `generate_highlights.py` tries listed `:free` models best-first and falls back to deterministic templates on any error) and session-cost medians (`TASK$`).
+
+## Tests
+
+Run the main test suite (including the Node-backed JS harness in `web/test_site_js.py` and the static LiteLLM contract checks in `web/test_litellm_contract.py`) from the repository root:
+
+```console
+$ python3 -m pytest
+```
+
+`web/test_litellm_compat.py` loads the generated `litellm.json` through LiteLLM's own `LITELLM_MODEL_COST_MAP_URL` loader, prices a model at a tier boundary, and exercises a `CustomLogger` pre-call hook. It skips when LiteLLM cannot be imported; install the pinned requirement to run it locally:
 
 ```console
 $ python3 -m pip install -r web/requirements-litellm.txt
 $ python3 -m pytest web/test_litellm_contract.py web/test_litellm_compat.py -q
 ```
 
-The `litellm-compat` workflow runs this suite on the Python version set in
-`.github/workflows/litellm-compat.yml`, and gates the LiteLLM pin. The
-workflow runs on PRs that touch the LiteLLM/catalog/publish files and weekly.
-The pin lives in `web/requirements-litellm.txt`; Renovate proposes updates and
-the pinned workflow gates the bump.
+The `litellm-compat` workflow runs this suite on the Python version configured in `.github/workflows/litellm-compat.yml` (on PRs touching LiteLLM/catalog/publish files, and weekly) and gates Renovate's updates to `web/requirements-litellm.txt`.
 
-Repository secrets: `AA_API_KEY` enables the live AA API quality source and
-its per-effort rows (without it, quality hydrates from the published
-catalog), `OPENROUTER_API_KEY` enables LLM-written highlights — without it the site
-serves deterministic templates. Only LLM highlights younger than 24 h are
-reused between runs.
+## Frontend notes
 
-## Local preview
-
-```console
-$ web/preview.sh                # serve with the live site's data
-$ web/preview.sh --build        # run the full pipeline locally instead
-```
-
-`--build` fetches the deployed site's previous history/highlights and, if
-`OPENROUTER_API_KEY` is set, may make one real OpenRouter call for the
-highlights.
-
-## Details
-
-- **7-day column** — each row is compared against the history snapshot dated
-  exactly one week back: `▴N` if the model climbed, `▾N` if it slipped, `•` if
-  it held rank, `new` if it was not in the top 20 then. Blank during the first
-  week of data collection — also deliberately true for one week after each
-  history reset: the catalog-v2 deploy (old snapshots priced at base-tier
-  baselines not diffable against effective-tier prices), the history-v3
-  cutover (old snapshots priced at advertised models-API scalars not diffable
-  against baseline-endpoint prices), the history-v4 cutover (old snapshots
-  carry max-effort quality scores not comparable with default-effort ones) and
-  the history-v5 cutover (old snapshots carry default-effort quality and ranks,
-  which are not comparable with best-selectable-depth quality and ranks).
-- **Depth detail** — QUAL is scored at the model's best measured selectable
-  effort by default; ties go to the deeper effort, and missing or empty
-  `supported_efforts` falls back to all measured efforts. `QUAL -` means no
-  measured selectable effort and no non-reasoning `none` fallback score. An
-  explicit CLI `--reasoning-effort` selects exactly that effort and filters
-  models that
-  cannot run it. The DEPTH column and each row's expanded Depth section read
-  the model's `reasoning` block from
-  `catalog.json`: the AA index and AA `$/task` at every measured effort, the
-  cost ratio against the default depth, and copy buttons for
-  `openrouter/<id>#<effort>`. `*` marks OpenRouter's effective default for
-  information only; it does not choose QUAL. An AA row for an effort
-  OpenRouter does not support says `not selectable` and offers no copy button.
-  An AA row with no effort label cannot fill QUAL: the Depth section shows
-  its index as a reference and says it may not be the quality the user gets
-  at a selectable effort. AA `$/task` is AA's measured benchmark cost at AA's
-  reference price, not the TASK$ session cost. Without a catalog fetch the
-  section says the details are unavailable.
-- **Simple / Expert layout toggle** — the two buttons on the right of the tab
-  line switch the ranked table between the full expert layout (14 columns:
-  rank, 7-day, model, depth, quality, in, out, discount, precision, tier,
-  context, age, score, task cost) and the simple summary (rank, 7-day,
-  model, quality, in, out, discount, age, with unabbreviated headers; the
-  depth detail stays one row-click away). The legend under the
-  table hides the entries that explain columns absent from the simple view.
-  The choice persists via a consent-first preference cookie
-  (`model-compare-view=simple`, one year, scoped to this page's
-  directory): the cookie is only written after the dialog's OK — Reject
-  (or Escape) keeps the choice for the current page load but stores
-  nothing, so the dialog stays closed until the next page load, while a
-  stored consent that Expert later removes re-opens the dialog the next
-  time Simple is picked. Nothing else is ever stored.
-- **Off-peak deals** — the second table lists the top 10 models with
-  scheduled discount windows (sub-1% discounts excluded), ranked by discount size; prices shown are the discounted
-  off-peak rates. It is built from the catalog's `schedules` index, which is
-  deliberately unfiltered (it may list non-ZDR or sub-floor-context models
-  that the ranked pool excludes). Each row's QUAL carries the schedule
-  entry's best measured selectable effort and provenance, so the Deals
-  tooltip shows the entry's effort tag and provenance. Schedule entries carry
-  no OpenRouter reference, so the main-table "not like-for-like" drift note
-  does not apply to them.
-- **Published picks consider ZDR models only**, matching the tool's default;
-  `best.txt` always serves the *balanced* #1 regardless of the visible tab.
-- **Highlights generation** walks the currently listed `:free` OpenRouter
-  models best-first by their published intelligence index (the lineup rotates,
-  so nothing is hardcoded) and falls back to deterministic templates on any
-  failure — a broken LLM never fails the deploy.
-- **Theming** — palettes and the dark-default/light-follows-system mechanism
-  are CSS variables at the top of `site/index.html`.
+- **Theming and navigation:** palettes are defined as CSS variables at the top of `web/site/style.css` (`--canvas: #181a1b` on `html`, `--bg: #131516` on `body` in dark mode; unified `#f6f3ec` in light mode). All four HTML files share one header and `.sitenav` tab bar, enforced by `test_all_pages_share_one_tab_bar` in `web/test_publish.py`.
+- **Simple / Expert preference cookie:** layout choice is stored only after explicit consent (`model-compare-view=simple`, 1-year `max-age`, scoped to the page's directory path). Rejecting or pressing `Escape` keeps Simple view for the current page load without writing a cookie; switching back to Expert clears any stored cookie.
+- **Schema and history contracts:** catalog, `data.json`, `history.json`, and LiteLLM invariants are documented in [DESIGN.md](../DESIGN.md).

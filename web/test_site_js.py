@@ -32,10 +32,13 @@ from pathlib import Path
 import pytest
 
 WEB = Path(__file__).parent
+SITE_DIR = WEB / "site"
 SITE_HTML = WEB / "site" / "index.html"
 SITE_CSS = WEB / "site" / "style.css"
 SCRIPT_JS = WEB / "site" / "app.js"
+PLUGIN_JS = WEB / "site" / "plugin.js"
 STUBS_JS = WEB / "js_stubs.js"
+PAGE_FILES = ("index.html", "plugin.html", "how-to-use.html", "faq.html")
 
 sys.path.insert(0, str(WEB.parent))
 import model_compare as mc  # noqa: E402
@@ -47,16 +50,20 @@ pytestmark = pytest.mark.skipif(
 NODE_TIMEOUT = 30
 
 
-def run_js(expression: str):
-    """Evaluate stubs + app.js + expression under node; return JSON."""
+def _run_node(scripts, expression: str):
+    """Evaluate the stubs, the given scripts and an expression under node."""
     program = "\n".join(
-        [
-            STUBS_JS.read_text(),
-            SCRIPT_JS.read_text(),
+        [STUBS_JS.read_text()]
+        + [path.read_text() for path in scripts]
+        + [
             f"var __out = ({expression});",
             "console.log(JSON.stringify(__out));",
         ]
     )
+    return _run_program(program, expression)
+
+
+def _run_program(program: str, expression: str):
     path = None
     try:
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
@@ -81,6 +88,25 @@ def run_js(expression: str):
             f"node driver printed no JSON for expression {expression!r}: "
             f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
         ) from None
+
+
+def run_js(expression: str):
+    """Evaluate stubs + app.js + expression under node; return JSON."""
+    return _run_node([SCRIPT_JS], expression)
+
+
+def run_plugin_js(setup: str, expression: str):
+    """Evaluate stubs + setup + plugin.js + expression under node."""
+    program = "\n".join(
+        [
+            STUBS_JS.read_text(),
+            setup,
+            PLUGIN_JS.read_text(),
+            f"var __out = ({expression});",
+            "console.log(JSON.stringify(__out));",
+        ]
+    )
+    return _run_program(program, expression)
 
 
 # ---------------------------------------------------------------------------
@@ -303,10 +329,13 @@ def test_simple_view_hidden_columns_and_header_tooltips():
 
 
 def test_opencode_headings_keep_version_text_drop_badge():
-    html = SITE_HTML.read_text()
+    # The OpenCode instructions moved to their own page; the headings keep
+    # their exact text so the section is recognisable across the move.
+    html = (SITE_DIR / "how-to-use.html").read_text()
     assert "verbadge" not in html
     assert "<h3>OpenCode v1 — Launch flag, shell alias</h3>" in html
     assert "<h3>OpenCode v2 — model-compare plugin</h3>" in html
+    assert "use-opencode" not in SITE_HTML.read_text()
 
 
 def test_cookie_dialog_markup():
@@ -2075,3 +2104,208 @@ def test_render_footer_stamps_generated_time():
     )
     assert isinstance(out["generated"], str) and out["generated"]
     assert isinstance(out["generatedTop"], str) and out["generatedTop"]
+
+
+# ---------------------------------------------------------------------------
+# Site pages: background layers, tab bar, shared content rules
+
+
+def test_background_layers_are_explicit():
+    css = SITE_CSS.read_text()
+    dark = re.search(r":root\s*\{([^}]*)\}", css).group(1)
+    assert "--canvas: #181a1b;" in dark
+    assert "--bg: #131516;" in dark
+    assert "--heading: #f4f2ef;" in dark
+    assert "--prose: #c4bfb6;" in dark
+    assert "--code-bg: #23282b;" in dark
+    assert "--code-fg: #f2f0ec;" in dark
+    light = re.search(
+        r"@media \(prefers-color-scheme: light\)\s*\{\s*:root\s*\{([^}]*)\}", css
+    ).group(1)
+    assert "--canvas: #f6f3ec;" in light
+    assert "--bg: #f6f3ec;" in light
+    assert "--heading: #22201c;" in light
+    assert "--prose: #4a453e;" in light
+    assert "--muted: #686056;" in light
+    assert "--code-bg: #e9e4d8;" in light
+    assert "--code-fg: #22201c;" in light
+    assert re.search(r"html\s*\{[^}]*background:\s*var\(--canvas\)", css)
+
+
+def test_sitenav_css():
+    css = SITE_CSS.read_text()
+    # Pure border geometry: .sitenav itself carries NO border-bottom and there
+    # is no a.active::after eraser overlay (which mis-snaps at fractional DPI).
+    nav = re.search(r"\.sitenav\s*\{([^}]*)\}", css).group(1)
+    assert "align-items: stretch" in nav
+    assert "gap: 0" in nav
+    assert "border-bottom" not in nav
+    nav_after = re.search(r"\.sitenav::after\s*\{([^}]*)\}", css).group(1)
+    assert "flex: 1" in nav_after
+    assert "border-bottom: 1px solid var(--tab-border)" in nav_after
+    link = re.search(r"\.sitenav a\s*\{([^}]*)\}", css).group(1)
+    assert "border: 1px solid var(--tab-border)" in link
+    assert "border-radius: 8px 8px 0 0" in link
+    assert "border-bottom: none" not in link
+    assert re.search(r"\.sitenav a \+ a\s*\{[^}]*margin-left:\s*-1px", css)
+    active = re.search(r"\.sitenav a\.active\s*\{([^}]*)\}", css).group(1)
+    assert "background: var(--bg)" in active
+    assert "border-bottom: none" in active
+    assert ".sitenav a.active::after" not in css
+    assert "@media (max-width: 48rem)" in css
+    mobile = css[css.index("@media (max-width: 48rem)") :][:450]
+    assert "flex-wrap: wrap" in mobile
+    assert "content: none" in mobile
+
+
+def test_shared_content_rules_for_the_new_pages():
+    css = SITE_CSS.read_text()
+    assert "#use-opencode" not in css
+    assert ".copybuttons" not in css
+    assert "#alias-hint" not in css
+    # Inline code gets a neutral rounded chip; pre code resets it.
+    code_rule = re.search(r"(^|\n)\s*code\s*\{([^}]*)\}", css).group(2)
+    assert "background: var(--code-bg)" in code_rule
+    assert "color: var(--code-fg)" in code_rule
+    assert "border-radius: 4px" in code_rule
+    pre_code = re.search(r"pre code\s*\{([^}]*)\}", css).group(1)
+    assert "background: none" in pre_code
+    assert re.search(r"(^|\n)\s*h3\s*\{[^}]*font-size:\s*1\.08rem", css)
+    assert re.search(r"\.intro\s*\{[^}]*color:\s*var\(--muted\)", css)
+    assert re.search(r"\.prose\s*\{[^}]*max-width:\s*56rem", css)
+    assert re.search(r"\.prose p:not\(\.hint\)\s*\{[^}]*color:\s*var\(--prose\)", css)
+    assert re.search(r"\.prose ul\s*\{[^}]*color:\s*var\(--prose\)", css)
+    body_rule = re.search(r"(^|\n)\s*body\s*\{([^}]*)\}", css).group(2)
+    assert "padding: 0.5rem clamp(1rem, 2vw, 2rem) 2rem;" in body_rule
+    assert re.search(r"\.faq-item \+ \.faq-item\s*\{[^}]*border-top:", css)
+    assert re.search(r"\.info\s*\{[^}]*border-collapse:\s*collapse", css)
+    assert re.search(r"\.thumbs\s*\{[^}]*display:\s*grid", css)
+    assert re.search(r"dialog\.lightbox\s*\{[^}]*padding:\s*0;", css)
+    assert re.search(
+        r"dialog\.lightbox \.lightbox-body\s*\{[^}]*padding:\s*0\.9rem", css
+    )
+    assert re.search(r"dialog\.lightbox img\s*\{[^}]*max-height:", css)
+    assert re.search(r"\.sitenav a:focus-visible\s*\{[^}]*z-index:\s*1", css)
+    assert re.search(
+        r"footer\s*\{[^}]*border-top:\s*1px solid var\(--row-border\)", css
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scripts: self-contained app.js on Picks, lightbox plugin.js on Plugin
+
+
+def test_app_js_is_self_contained_without_removed_scripts():
+    assert not (SITE_DIR / "copy.js").exists()
+    assert not (SITE_DIR / "how-to-use.js").exists()
+    landing = SCRIPT_JS.read_text()
+    for name in ("copyText", "legacyCopy", "flash", "wireCopy"):
+        assert f"function {name}(" in landing
+    for name in ("topModel", "BEST_URL", "OPENCODE_PREFIX", "CURL_COMMAND"):
+        assert name not in landing
+
+
+_PLUGIN_SETUP = """
+var thumbImg = stubElement();
+thumbImg.alt = "The picks dialog";
+var thumbLink = stubElement();
+thumbLink.href = "picks-dialog.png";
+thumbLink.dataset = {caption: "alt+m — current picks"};
+thumbLink.querySelector = function (sel) { return sel === "img" ? thumbImg : null; };
+document.querySelectorAll = function (sel) {
+  return sel === ".shot-link" ? [thumbLink] : [];
+};
+"""
+
+
+def test_plugin_lightbox_opens_on_plain_click_and_closes():
+    out = run_plugin_js(
+        _PLUGIN_SETUP,
+        "(function () {"
+        "  var prevented = false;"
+        "  thumbLink.dispatchEvent('click', {"
+        "    button: 0,"
+        "    preventDefault: function () { prevented = true; }"
+        "  });"
+        "  var dlg = document.getElementById('lightbox');"
+        "  var opened = dlg.open;"
+        "  var src = document.getElementById('lightbox-img').src;"
+        "  var alt = document.getElementById('lightbox-img').alt;"
+        "  var cap = document.getElementById('lightbox-cap').textContent;"
+        "  document.getElementById('lightbox-close').dispatchEvent('click');"
+        "  return {prevented: prevented, opened: opened, closed: !dlg.open,"
+        "          src: src, alt: alt, cap: cap};"
+        "})()",
+    )
+    assert out == {
+        "prevented": True,
+        "opened": True,
+        "closed": True,
+        "src": "picks-dialog.png",
+        "alt": "The picks dialog",
+        "cap": "alt+m — current picks",
+    }
+
+
+def test_plugin_lightbox_ignores_modified_clicks_and_closes_on_backdrop():
+    out = run_plugin_js(
+        _PLUGIN_SETUP,
+        "(function () {"
+        "  var prevented = false;"
+        "  thumbLink.dispatchEvent('click', {"
+        "    button: 0, ctrlKey: true,"
+        "    preventDefault: function () { prevented = true; }"
+        "  });"
+        "  var dlg = document.getElementById('lightbox');"
+        "  var afterCtrl = dlg.open;"
+        "  thumbLink.dispatchEvent('click', {button: 0});"
+        "  thumbLink.dispatchEvent('click', {button: 0});"
+        "  dlg.dispatchEvent('click', {target: document.getElementById('lightbox-img')});"
+        "  var afterInnerClick = dlg.open;"
+        "  dlg.dispatchEvent('click', {target: dlg});"
+        "  return {prevented: prevented, afterCtrl: afterCtrl,"
+        "          afterInnerClick: afterInnerClick, afterBackdrop: dlg.open};"
+        "})()",
+    )
+    assert out == {
+        "prevented": False,
+        "afterCtrl": False,
+        "afterInnerClick": True,
+        "afterBackdrop": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Every page: tight CSP, relative paths, only the scripts it needs
+
+
+def test_every_page_has_the_tight_csp():
+    for name in PAGE_FILES:
+        html = (SITE_DIR / name).read_text()
+        assert '<link rel="stylesheet" href="style.css" />' in html, name
+        assert "Content-Security-Policy" in html, name
+        assert "default-src 'none'" in html, name
+        assert "unsafe-inline" not in html, name
+        assert html.count("<style") == 0, name
+        # every <script> carries a src: no inline script blocks
+        assert re.search(r"<script(?![^>]*\bsrc=)", html) is None, name
+        # CSP tripwires: inline handlers and inline styles
+        assert re.search(r"<[^>]*\son[a-z]+\s*=", html) is None, name
+        assert re.search(r"<[^>]*\sstyle\s*=", html) is None, name
+        assert "javascript:" not in html, name
+        # relative paths only: the pages must work from any directory
+        assert re.search(r'(?:href|src)="/', html) is None, name
+        # empty src="" / href="" causes browsers to re-fetch the document URL
+        assert re.search(r'(?:href|src)=""', html) is None, name
+
+
+def test_pages_load_only_the_scripts_they_need():
+    index = (SITE_DIR / "index.html").read_text()
+    assert '<script src="app.js" defer></script>' in index
+    assert "copy.js" not in index
+    assert "<h2>Weekly highlights</h2>" in index
+    assert "<h3>News from OpenRouter</h3>" in index
+    plugin = (SITE_DIR / "plugin.html").read_text()
+    assert '<script src="plugin.js" defer></script>' in plugin
+    for name in ("how-to-use.html", "faq.html"):
+        assert "<script" not in (SITE_DIR / name).read_text(), name

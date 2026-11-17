@@ -1,356 +1,101 @@
 # model-compare
 
-A single-file Python CLI that picks the best value-for-money LLM on
-[OpenRouter](https://openrouter.ai/) before you start a coding agent. It queries
-the OpenRouter catalog, scores every candidate on quality, price, context
-window and freshness, and prints the winners — either as a ranked table or as a
-single parseable `provider/model` id.
+A single-file Python CLI that finds the best value-for-money LLM on [OpenRouter](https://openrouter.ai/) before you start a coding session. It pulls OpenRouter's live catalog, pairs it with benchmark scores from [Artificial Analysis](https://artificialanalysis.ai/models), filters out impractical listings, and ranks the survivors on quality, real endpoint price, context window, and freshness.
 
-Built by an AI coding agent (opencode, powered mostly by GLM 5.3 Flash).
+Don't want to run anything locally? Browse the live tables at **[model-compare.dev](https://model-compare.dev/)** — rebuilt every 3 hours by GitHub Actions — or install [`model-compare-opencode-plugin`](https://github.com/canonical/model-compare-opencode-plugin) in OpenCode v2.
 
-## Quick start
+
+## Use the published picks
+
+You don't need to clone this repo to use the rankings. Every 3 hours, the site workflow publishes ready-to-consume files over HTTPS:
+
+- **Web tables, plugin docs, and FAQ:** [model-compare.dev](https://model-compare.dev/)
+- **OpenCode v2 plugin:** [`model-compare-opencode-plugin`](https://model-compare.dev/plugin.html) adds live `balanced`, `price`, and `quality` aliases straight into OpenCode's model picker, steers requests to the ranked provider, and pins reasoning depth automatically.
+- **OpenCode v1 shell alias:** [`best.txt`](https://model-compare.dev/best.txt) always holds the current *balanced* #1 as a single `openrouter/<provider>/<model>` line:
+
+  ```sh
+  alias oc-best='opencode --model "$(curl -fsSL https://model-compare.dev/best.txt)"'
+  ```
+
+- **JSON feeds for scripts:** [`data.json`](https://model-compare.dev/data.json) (top-20 tables and off-peak deals) and [`catalog.json`](https://model-compare.dev/catalog.json) (the complete scored dataset, drop reasons, per-endpoint pricing, reasoning depths, and OpenRouter `steering` blocks).
+- **LiteLLM cost map and routing:** point `LITELLM_MODEL_COST_MAP_URL` at [`https://model-compare.dev/litellm.json`](https://model-compare.dev/litellm.json) before starting your proxy, or consume [`litellm_rate_card.json`](https://model-compare.dev/litellm_rate_card.json) and [`litellm_steering.json`](https://model-compare.dev/litellm_steering.json) directly.
+
+Practical setup examples (including OpenAI SDK `extra_body` steering and LiteLLM usage) are available on the [How to use](https://model-compare.dev/how-to-use.html) page; architectural contracts and LiteLLM hook details are documented in [DESIGN.md](DESIGN.md).
+
+
+## Run the CLI
+
+`model_compare.py` needs only Python 3.10+ (standard library, zero third-party packages):
 
 ```console
 $ ./model_compare.py                          # top 5, balanced
-$ ./model_compare.py --best                   # only "#1 model" as an opencode id
-$ MODEL=$(./model_compare.py --best)          # shell integration
-$ opencode --model $MODEL
-$ ./model_compare.py --priority price --top 3
-$ ./model_compare.py --reasoning-effort max  # re-rank at max reasoning effort
+$ ./model_compare.py --best                   # print only the #1 model ID for scripting
+$ ./model_compare.py --priority price --top 3 # three cheapest sensible picks
+$ ./model_compare.py --reasoning-effort max   # rank strictly at max thinking effort
+$ ./model_compare.py --off-peak --depths      # include off-peak deals and per-depth scores
 ```
 
-`--best` prints the pick ready to use: provider-qualified as opencode
-expects, e.g. `openrouter/z-ai/glm-5.3-flash` (`openrouter/` comes from a
-single constant in the script, so other providers can be supported later).
-The `--json` output carries both forms: `model` (catalog id) and
-`opencode_model` (qualified id), plus `discount_pct`, the `DISC` column's
-display string (e.g. `25%` or `--`).
+Exit codes: `0` on success, `1` on network/fetch failure, `2` when no models survive the filters, and `130` on `Ctrl-C`.
 
-No dependencies beyond Python 3.10+ (stdlib only). Exit codes: `0` success,
-`1` fetch failure, `2` no candidates survive the filters, `130` interrupted
-(Ctrl-C while paging).
-
-## Sample output
-
-The table goes to stdout; the summary goes to stderr. The numbers below are
-illustrative, not current data. The stderr lines come first:
+A typical terminal run (illustrative numbers, legend footer omitted; summary lines go to `stderr`, the table to `stdout`, paged automatically through `$PAGER` — default `less` — when output exceeds one screen):
 
 ```console
 $ ./model_compare.py --top 4
 74 of 468 listed models ranked
 (dropped: 275 context, 61 not ZDR, 47 batch, 6 pricing, 5 tool calling)
 
-RANK  MODEL               QUAL  $IN/M  $OUT/M  DISC  PREC  TIER   CTX    AGE  SCORE
-----  ------------------  ----  -----  ------  ----  ----  -----  -----  ---  -----
-   1  z-ai/glm-5.3-flash  58.0  0.120   0.400    --   fp8     --  1.00M  42d  0.812
-   2  acme/coder-mini     51.0  0.250    1.00   25%  bf16  >200k  1.05M  3mo  0.744
-   3  moonshot/kimi-lite  49.0  0.300    1.20    --   fp8     --  1.00M  5mo  0.701
-   4  deepseek/v3-turbo      -  0.180   0.550    --   fp8   -38%  1.00M  20d  0.655
-
-Weights: quality 40%, price 40%, context 10%, age 10%
-Quality source: AA index v4.3 - live AA (2 models, checked 13:15Z) |
-                our published catalog (1 model, as of 2026-10-23 13:15Z);
-                1 model unmatched (no quality data; quality score 0)
-
-QUALITY   AA intelligence index at the model's best measured selectable depth
-          (default; --reasoning-effort overrides); "-" = unknown, scores 0
-$IN/$OUT  USD per 1M tokens at the cheapest eligible endpoint, blended
-          75% input / 25% output (--input-share); differs from the
-          openrouter.ai default-endpoint price by design. A higher rate
-          may apply once the prompt outgrows a model's short-context tier.
-DISC      active discount
-PREC      quoted precision ("!" = default routing favors cheaper
-          sub-default endpoints)
-TIER      how prices vary: >Nk = pricier above that prompt size; -N% =
-          scheduled off-peak discount (price shown: the standard rate);
-          SCHED = schedule with a discount under 1% (--off-peak lists them)
-CTX       context window; AGE = days since listed on OpenRouter
-SCORE     weighted blend of the four criteria above
+RANK  MODEL               DEPTH  QUAL  $IN/M  $OUT/M  DISC  PREC  TIER   CTX    AGE  SCORE
+----  ------------------  -----  ----  -----  ------  ----  ----  -----  -----  ---  -----
+   1  z-ai/glm-5.3-flash  high*  58.0  0.120   0.400    --   fp8     --  1.00M  42d  0.812
+   2  acme/coder-mini     max    51.0  0.250    1.00   25%  bf16  >200k  1.05M  3mo  0.744
+   3  moonshot/kimi-lite   high  49.0  0.300    1.20    --   fp8     --  1.00M  5mo  0.701
+   4  deepseek/v3-turbo       -     -  0.180   0.550    --   fp8   -38%  1.00M  20d  0.655
 ```
 
-On a terminal, the table header (except SCORE) and rank numbers are bold, the
-#1 row is green (its rank stays bold), and the dropped line and the `-`
-quality placeholders are dim. A `Quality source:` block that has unmatched
-models turns yellow. Piped output is plain under `auto`. On a terminal the
-table runs through a pager (`$PAGER`, default `less`); `--no-pager` prints
-directly. The `less` fallback exits immediately when the output fits one
-screen, and any pager is spawned with `LESS=FRX` when `$LESS` is unset — a
-convention only `less` honors — so a bare `PAGER=less` renders colors
-instead of showing as escape codes. Color stays on through the pager under
-`auto`; `--color off` turns it off everywhere.
 
-`--detail simple` shows RANK, MODEL, QUALITY, IN $/M, OUT $/M, DISCOUNT and
-AGE; `--bare` drops the summary, the weights line, the quality block and the
-legend, leaving only the table(s).
+## CLI options
 
-## Options
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--priority {balanced,price,quality}` | `balanced` | Weighting preset (`balanced` 40/40, `price` 20/60, or `quality` 60/20 for quality vs. price; context and age get 10% each) |
+| `--top N` | `5` | Number of ranked models to display |
+| `--best` | off | Print only the #1 `openrouter/<model>` ID |
+| `--json` | off | Print the ranked candidates as JSON (includes per-model `steering` blocks) |
+| `--catalog` | off | Print the full evaluation (ranked candidates, filtered models with reasons, schedules, and per-priority rankings) as one JSON document |
+| `--detail {simple,expert}` | `expert` | Table density (`simple` hides `DEPTH`, `PREC`, `TIER`, `CTX`, and `SCORE`) |
+| `--off-peak` | off | Append a second table of scheduled off-peak discounts |
+| `--depths` | off | Print per-effort benchmark scores, task costs, and `#<effort>` suffixes below the table |
+| `--bare` | off | Print only the table(s), omitting summaries and legends |
+| `--color {auto,on,off}` | `auto` | ANSI color mode (`auto` respects `NO_COLOR` and TTY detection) |
+| `--no-pager` | off | Print straight to stdout without paging |
+| `--reasoning-effort E` | `default` | `default` scores each model at its best measured selectable depth; `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` filters and ranks at that exact depth |
+| `--min-context N` | `1000000` | Minimum context window in tokens |
+| `--input-share F` | `0.75` | Input-token weight in the blended price (`0`–`1`) |
+| `--quality-ref N` | `70` | AA intelligence index treated as a full `1.0` quality score |
+| `--recency-half-life D` | `120` | Listing-age decay half-life in days |
+| `--max-age-days D` | off | Drop models listed more than `D` days ago |
+| `--no-zdr` | off | Include providers without zero-data-retention (ZDR) guarantees |
+| `--no-require-tools` | off | Include models that don't support tool/function calling |
+| `--exclude-free` | off | Drop zero-cost `:free` listings |
+| `--include-batch` | off | Keep asynchronous `:batch` variants (requires `--no-zdr` in practice) |
+| `--discount` | off | List only models with an active discount |
+| `--aa-api-key KEY` | `$AA_API_KEY` | Artificial Analysis API key (free at [artificialanalysis.ai](https://artificialanalysis.ai)); without one, local runs hydrate quality from `model-compare.dev/catalog.json` |
+| `--openrouter-api-key KEY` | `$OPENROUTER_API_KEY` | OpenRouter API key (optional; lets `--json` and `--catalog` include OpenRouter's session-cost medians) |
+| `--no-cache` / `--cache-ttl S` | `21600` (`6h`) | Bypass or adjust the local HTTP response cache |
+| `--version` | off | Print version and exit |
 
-| flag | default | meaning |
-|------|---------|---------|
-| `--priority` | `balanced` | `price`, `quality` or `balanced` |
-| `--top N` | 5 | how many models to list |
-| `--best` | off | print only the #1 model id (for scripting) |
-| `--json` | off | machine-readable output |
-| `--catalog` | off | print the full model catalog (ranked candidates + filtered, with reasons, plus the per-priority model ranking) as one JSON document |
-| `--detail {simple,expert}` | `expert` | table density; `simple` hides PREC, TIER, CTX and SCORE and uses the web page's labels (QUALITY, IN $/M, OUT $/M, DISCOUNT) |
-| `--off-peak` | off | also list scheduled off-peak deals, ranked by discount size (capped at 10) |
-| `--bare` | off | print just the table(s), no summary or legend |
-| `--color {auto,on,off}` | `auto` | colorize the table; `auto` colors only on a terminal (including through the built-in pager) and `NO_COLOR` disables it, `on` forces color (e.g. `less -R`, ignoring `NO_COLOR`), `off` never colors |
-| `--no-pager` | off | never page the table output even on a terminal |
-| `--min-context N` | 1000000 | hard context-window floor (tokens) |
-| `--input-share F` | 0.75 | input share of the blended price (0–1) |
-| `--recency-half-life D` | 120 | age decay half-life (days) |
-| `--max-age-days D` | off | drop models listed more than N days ago |
-| `--quality-ref N` | 70 | index counting as full quality score |
-| `--reasoning-effort E` | `default` | choices: `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; `default` scores each model at its best measured selectable effort; an explicit effort selects exactly that effort and drops models that cannot run it (it never substitutes another effort) |
-| `--depths` | off | also print the per-model depth detail below the table (the `DEPTH` and `QUAL` columns are always shown) |
-| `--aa-api-key KEY` | `$AA_API_KEY` | Artificial Analysis API key |
-| `--exclude-free` | off | drop `:free` variants |
-| `--include-batch` | off | keep `:batch` (async completion) variants; no effect without `--no-zdr`, as the ZDR list has no `:batch` ids today |
-| `--discount` | off | only models with an active discount |
-| `--no-zdr` | off | rank all models, not just zero-data-retention ones |
-| `--no-require-tools` | off | allow models without tool calling |
-| `--no-cache` / `--cache-ttl S` | 6h | cache control |
-| `--version` | off | print `model-compare <VERSION>` and exit |
 
-## Published picks
+## How rankings work
 
-No need to run anything: a [GitHub Actions workflow](web/README.md) refreshes
-[the picks](https://canonical.github.io/model-compare/) every 3 hours, and
-`best.txt` always serves the current *balanced* #1 as a plain model id:
+Out of the box, `model_compare.py` filters for models suitable for day-to-day coding agents: text output, tool-calling support, at least a **1M-token context window**, no asynchronous `:batch` listings, and at least one live **zero-data-retention (ZDR)** endpoint. Every one of those checks can be relaxed with the flags above.
 
-```console
-$ opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"
-$ alias oc-best='opencode --model "$(curl -fsSL https://canonical.github.io/model-compare/best.txt)"'
-```
+Surviving models are scored across four normalized dimensions — **quality**, **price**, **context headroom**, and **listing age**:
 
-The site also serves the machine-readable `catalog.json` (`--catalog` output)
-plus weekly `history.json` and `highlights.json`. How that pipeline works:
-[web/README.md](web/README.md).
+- **Quality (`QUAL` and `DEPTH`):** sourced from the Artificial Analysis intelligence index (`0`–`100`). With `AA_API_KEY` set, scores come straight from the live AA v2 API; without a key, local runs hydrate from [`model-compare.dev/catalog.json`](https://model-compare.dev/catalog.json) so your terminal matches the website out of the box. Because reasoning models score differently depending on thinking budget, each model is scored at its **best measured depth that OpenRouter lets you select** (shown in `DEPTH`).
+- **Endpoint pricing and steering (`PREC` and `TIER`):** one model ID on OpenRouter is often hosted by multiple providers at different quantizations and rates. Rather than trusting OpenRouter's headline number, `model_compare.py` quotes the **cheapest baseline-eligible endpoint** at the **1M-token prompt tier**, blended 75% input / 25% output. A trailing `!` on `PREC` warns that OpenRouter's unsteered routing would send most traffic to cheaper, more heavily quantized providers — pass the per-model `steering` block from `--json` or `catalog.json` to lock routing down.
 
-## How it works
+For the full scoring formulas, quality-source reconciliation rules, `catalog.json` v6 schema contract, and LiteLLM integration internals, see [DESIGN.md](DESIGN.md) and the [site FAQ](https://model-compare.dev/faq.html). For the static site pipeline, see [web/README.md](web/README.md).
 
-OpenRouter's public catalog provides prices, context windows and listing
-dates; model quality comes from the Artificial Analysis intelligence index
-at each model's best measured selectable reasoning effort by default, resolved
-through a three-source hierarchy with visible provenance (see
-[Model quality](#model-quality) below). An explicit `--reasoning-effort`
-selects that exact effort and filters models that cannot run it. Each
-candidate is scored on quality, blended price, context headroom and listing
-age with weights depending on `--priority`, after hard filters (context floor,
-text-only, tool-calling, ZDR by default). The full scoring formulas, filter list, the `--catalog`
-JSON contract and the test setup are in [DESIGN.md](DESIGN.md).
-
-## Model quality
-
-Quality is the [Artificial Analysis](https://artificialanalysis.ai/models)
-intelligence index (0–100). Each model's value is resolved through three
-sources in a strict order — rank, not freshness: a higher-ranked source
-always wins, even when a lower-ranked one is newer.
-
-1. **Live AA API** — with `--aa-api-key` (or `AA_API_KEY`) set, the AA v2
-   API is consulted first; this is the live index.
-2. **Our published catalog** — without a key, quality hydrates from
-   [model-compare.dev/catalog.json](https://model-compare.dev/catalog.json),
-   the artifact this repo's keyed CI runs publish, joined by exact model id.
-3. **OpenRouter snapshot** — the AA indices OpenRouter republishes per
-   listing, used only as a fallback for known non-reasoning models at effort
-   `none` when neither AA path covers them.
-
-Every quality value carries its provenance end to end: `--json` rows carry
-`quality_source`, `quality_as_of` and `quality_effort`, `catalog.json`
-entries and the site's QUAL tooltips show them, and the CLI's footer note
-lists how many models came from each source and when each was checked.
-
-AA measures a model at several reasoning efforts, and the scores differ. By
-default, headline `QUAL` is the highest AA intelligence index among the
-model's measured efforts that OpenRouter can run (`supported_efforts`). If
-scores tie, the deeper effort wins. When `supported_efforts` is missing or
-empty, all measured efforts are considered. The OpenRouter-default marker
-(`*`) is informational; it does not determine the default score. An explicit
-`--reasoning-effort <effort>` (`none`, `minimal`, `low`, `medium`, `high`,
-`xhigh` or `max`) selects exactly that effort and drops models that cannot
-run it. It never substitutes another effort. If AA has no measurement at
-the selected effort, `QUAL` is `-` unless the known non-reasoning `none`
-OpenRouter fallback supplies a score. Truly unknown quality (no usable AA
-data) scores 0.
-
-The `DEPTH` column names the effort behind `QUAL` (`high*` marks OpenRouter's
-default for information only). In Simple view the effort appears after the
-quality as `· <effort>`. Below the table, a depth block per top-N model lists
-every supported and measured effort with its AA index, its AA cost per
-benchmark task, the cost ratio against the default depth, and the OpenCode
-variant suffix that selects it (`#max`). The block is off by default;
-`--depths` turns it on, and the `DEPTH` and `QUAL` columns are always
-shown. AA `$/task` is AA's measured benchmark cost
-at AA's reference price, not the OpenRouter per-token price, and it never
-enters the score. An AA row with no effort label (some models AA ranks only
-once) cannot fill `QUAL`: the depth block shows that index as a reference
-and says it may not be the quality you get at a selectable effort. In
-OpenCode, append `#<effort>` to the model id
-(`openrouter/anthropic/claude-sonnet-5.5#max`) to select a depth; the
-model-compare OpenCode plugin pins each alias to its scored effort using
-`quality_effort` in the schema-6 catalog.
-
-**Why our QUAL can differ from openrouter.ai:** OpenRouter republishes a
-**frozen copy** of the intelligence index per dated listing, while the AA
-API is live — a model whose index has moved since OpenRouter's snapshot
-will legitimately show different numbers here. The comparison is only
-like-for-like when both sides are non-reasoning: OpenRouter's snapshot
-reports no effort, so a reasoning model keeps the snapshot as reference
-(`quality_or_index` and `quality_or_as_of` name it) but is not flagged as
-drift. For a non-reasoning model, when the winning value and OpenRouter's
-snapshot differ by 3 or more index points, the row is flagged as drift
-(`quality_drift`) — visible as a tooltip note on the site and counted in the
-CLI footer. Prices can differ from the website too, for a different reason:
-this tool ranks at the
-cheapest eligible endpoint, not the default one (see
-[Tiered pricing](#tiered-pricing)). Provenance — the source plus its as-of —
-makes every such discrepancy explainable instead of mysterious; the
-background is in issues
-[#17](https://github.com/canonical/model-compare/issues/17) and
-[#18](https://github.com/canonical/model-compare/issues/18).
-
-## Tiered pricing
-
-OpenRouter publishes conditional price overrides per model
-(`pricing.overrides`): long-context tiers that charge more above a prompt
-threshold, and off-peak schedules that charge less during certain UTC
-windows. This tool ranks every model at **the tier in effect at a prompt
-size of `min_context` tokens** — with the default 1M context that is the
-worst case, which is what a long coding session actually pays. Time-windowed
-models are ranked at their peak window (deterministic) and annotated; models
-whose windows do not tile the week exactly are dropped (`schedule` drop
-reason). The table's TIER column marks a token threshold (`>100k`), an
-off-peak discount (`-38%`), or a sub-1% schedule (`SCHED`);
-`--json` carries `pricing_tier_prompt_tokens`, `base_input_usd_per_m`,
-`base_output_usd_per_m`, `tier_note`, `sched_note`, `sched_detail` and
-`time_schedule`. `catalog.json` publishes the full picture: `pricing.base`,
-`pricing.tiers`, `pricing.schedule` (with per-window `coverage` fractions
-for time-weighted pricing) and the top-level `schedules` deals index.
-
-## Precision and routing
-
-`PREC` is the quantization the ranked endpoint quotes, not a property of the
-model: one id can be served by several endpoints at different precisions and
-prices. The tool ranks at the cheapest eligible endpoint, so `PREC` names that
-endpoint's precision; a trailing `!` warns that OpenRouter's default routing
-would send more than half the traffic to cheaper sub-default endpoints. Hover
-the cell on the site, or read `quant_note` in `--json`, for the cheapest
-non-baseline endpoint and its price spread.
-
-That is why the price you pay can differ from the ranked price. The ranking
-uses the cheapest eligible endpoint, blended `--input-share` input/output;
-openrouter.ai shows the default endpoint. Tiered pricing and off-peak
-schedules move the bill too (see [Tiered pricing](#tiered-pricing)).
-
-To reproduce the ranked choice, pass the `steering` block that every `--json`
-row and every `catalog.json` model entry carries:
-
-```json
-{
-  "model": "deepseek/deepseek-v4.1-flash-1017",
-  "provider": {
-    "order": ["DeepInfra/fp8", "Baidu/bf16"],
-    "ignore": ["Morph/int4"],
-    "quantizations": ["bf16", "fp8"],
-    "allow_fallbacks": true
-  }
-}
-```
-
-`order` lists the baseline-eligible endpoints, cheapest first; `ignore` names
-every live endpoint that is not eligible; `quantizations` keeps precisions at
-or above the quoted one (`null` default precision omits the key);
-`allow_fallbacks` lets OpenRouter fall back when the ordered endpoints are
-unavailable.
-
-With the OpenAI SDK, pass the `provider` object through `extra_body` --
-unknown top-level parameters are dropped before the request is sent:
-
-```python
-client.chat.completions.create(
-    model="deepseek/deepseek-v4.1-flash-1017",
-    messages=messages,
-    extra_body={"provider": steering["provider"]},
-)
-```
-
-In OpenCode, the model-compare plugin applies the block for you, and its
-`body` option forwards a custom request body to the provider request.
-Reasoning depth is part of the id (`#max`, `#high`, ...), and `:free` and
-`:batch` ids are separate listings with their own prices; don't pair one
-row's steering block with another variant's id. The
-[site FAQ](https://canonical.github.io/model-compare/faq.html) covers the
-same ground question by question.
-
-## LiteLLM rate card and steering
-
-The publish run also writes LiteLLM-shaped artifacts from the validated
-catalog:
-
-| file | what it is |
-|------|------------|
-| [`litellm_rate_card.json`](https://canonical.github.io/model-compare/litellm_rate_card.json) | a pure LiteLLM cost-map fragment, one entry per ranked candidate, keyed `openrouter/<catalog id>` |
-| [`litellm_steering.json`](https://canonical.github.io/model-compare/litellm_steering.json) | the OpenRouter preference object, a strict single-endpoint profile, the reasoning effort used for the ranking, and `_meta` provenance |
-| [`litellm.json`](https://canonical.github.io/model-compare/litellm.json) | LiteLLM's upstream map merged with our fragment |
-| [`litellm_merge_status.json`](https://canonical.github.io/model-compare/litellm_merge_status.json) | whether the merged map was rebuilt, frozen on a collision, or skipped |
-
-The rate card is a fragment: LiteLLM rejects a custom map that is too small to
-be a full price list. Use the published merged map directly:
-
-```bash
-export LITELLM_MODEL_COST_MAP_URL=https://model-compare.dev/litellm.json
-```
-
-Or merge the fragment yourself when you want to pin upstream:
-
-```bash
-curl -sL https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json -o upstream.json
-curl -sL https://model-compare.dev/litellm_rate_card.json -o model-compare.json
-jq -s '.[0] + .[1]' upstream.json model-compare.json > merged.json
-```
-
-`+` is a shallow union: a model present in both maps is replaced whole by our
-entry, not field-merged.
-
-Set the URL in the proxy environment before startup, not under
-`environment_variables` in the config, and verify it loaded with
-`curl -s http://localhost:4000/model/cost_map/source -H "Authorization: Bearer $LITELLM_MASTER_KEY"`.
-If LiteLLM cannot fetch or validate the map it silently falls back to its
-bundled map, so alert on `fallback_reason`.
-
-`litellm_steering.json` is data, not a hook. A LiteLLM `CustomLogger` can read
-it in `async_pre_call_hook`: resolve the request alias to the
-`openrouter/<id>` key, choose `provider` (fallbacks allowed) or
-`provider_strict` (one endpoint, no fallbacks, `max_price` capped at the base
-price), inject it through `extra_body.provider`, and send
-`reasoning.preferred.effort` through `extra_body.reasoning`. Deployment
-policy (`zdr`, `data_collection`, `require_parameters`) stays in the proxy or
-hook config, not in the file.
-
-The strict profile fails when its one endpoint is unavailable. The preference
-profile can fall back to another eligible endpoint, so its price is a strong
-preference, not a guarantee. `reasoning.preferred` is the effort behind the
-published quality; `reasoning.model_default` is OpenRouter's own default. Do
-not send `none` when `mandatory` is true, and do not use LiteLLM's
-`reasoning_effort` field for a literal `max` -- LiteLLM rewrites it to
-`xhigh`. Use `extra_body={"reasoning": {"effort": "max"}}`.
-
-Known limits: the fragment covers the ranked candidates only, not the
-filtered models. The candidate count changes with the pool; read the rate
-card's key count or `_meta.entries` in the steering file rather than assuming
-a fixed size. The fragment has no rank, score, quality or provenance fields,
-and LiteLLM can express only one off-peak rate level. A model with several
-distinct off-peak levels is published without `off_peak_pricing`, and a model
-with both tiers
-and a schedule keeps its tiers and loses the off-peak block. Both cases are
-recorded in `_meta.warnings`.
-
-The merged map is about 3.5 MB. If upstream ever adds an `openrouter/` key we
-also cover, the merged map freezes at its last good version while the
-fragment and the rest of the site keep publishing; the workflow opens or
-updates one `bug` issue titled "LiteLLM merged map needs attention".
 
 ## License
 

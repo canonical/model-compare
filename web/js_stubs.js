@@ -95,6 +95,14 @@ function stubElement() {
     },
     remove: function () {},
     select: function () {},
+    open: false,
+    showModal: function () {
+      if (this.open) throw new Error("InvalidStateError: dialog already open");
+      this.open = true;
+    },
+    close: function () {
+      this.open = false;
+    },
   };
 }
 

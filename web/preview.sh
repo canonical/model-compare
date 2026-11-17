@@ -15,12 +15,13 @@ set -euo pipefail
 
 PORT=8734
 BUILD=0
-LIVE_URL="https://canonical.github.io/model-compare"
+LIVE_URL="https://model-compare.dev"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SITE_DIR="$SCRIPT_DIR/site"
-# The site's static files: index.html plus its external CSS/JS assets
-# (the deploy dir carries the same set; keep publish.py in sync).
-SITE_FILES="index.html style.css app.js"
+# The site's static files: the four pages, their external CSS/JS assets, the
+# two dialog screenshots and the favicon set. This is publish.SITE_FILES
+# verbatim; test_preview_sh.py fails if the two lists drift.
+SITE_FILES="index.html plugin.html how-to-use.html faq.html style.css app.js plugin.js picks-dialog.png report-dialog.png favicon.svg favicon-16x16.png favicon-32x32.png apple-touch-icon.png"
 SRV_PID=""
 
 die_usage() {
@@ -110,6 +111,9 @@ if [ "$BUILD" -eq 1 ]; then
 elif command -v curl >/dev/null &&
 	curl -fsSL --max-time 10 "$LIVE_URL/data.json" -o "$PREVIEW_DIR/data.json" &&
 	curl -fsSL --max-time 10 "$LIVE_URL/best.txt" -o "$PREVIEW_DIR/best.txt"; then
+	curl -fsSL --max-time 10 "$LIVE_URL/highlights.json" -o "$PREVIEW_DIR/highlights.json" 2>/dev/null || true
+	curl -fsSL --max-time 10 "$LIVE_URL/history.json" -o "$PREVIEW_DIR/history.json" 2>/dev/null || true
+	curl -fsSL --max-time 15 "$LIVE_URL/catalog.json" -o "$PREVIEW_DIR/catalog.json" 2>/dev/null || true
 	echo "using live data from $LIVE_URL"
 else
 	echo "live data unavailable; using synthetic placeholder data" >&2

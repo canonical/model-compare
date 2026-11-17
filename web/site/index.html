@@ -16,14 +16,21 @@
   </head>
   <body>
     <h1>model-compare</h1>
-    <p class="sub">
-      Best value-for-money LLM on OpenRouter, refreshed every 3 hrs by
+    <p class="sub">Best value-for-money LLM on OpenRouter</p>
+    <nav class="sitenav" aria-label="Site">
+      <a class="active" href="index.html" aria-current="page">Picks</a>
+      <a href="plugin.html">OpenCode plugin</a>
+      <a href="how-to-use.html">How to use</a>
+      <a href="faq.html">FAQ</a>
+    </nav>
+
+    <h2>Ranked picks</h2>
+    <p class="intro">
+      Refreshed every 3 hrs by
       <a href="https://github.com/canonical/model-compare"
         >canonical/model-compare</a
       >. Hover any column header or dotted-underlined cell for details.
     </p>
-
-    <h2>Ranked picks</h2>
     <div class="tabs" id="tabs">
       <button
         type="button"
@@ -52,7 +59,7 @@
         type="button"
         id="view-simple"
         aria-pressed="false"
-        title="Fewer columns: rank, 7-day movement, model, quality, prices, discount and age."
+        title="Fewer columns: rank, 7-day movement, model, quality, prices, discount, and age."
       >
         Simple
       </button>
@@ -61,7 +68,7 @@
         id="view-expert"
         class="active"
         aria-pressed="true"
-        title="All columns, including depth, precision, tier, context, score and task cost."
+        title="All columns, including depth, precision, tier, context, score, and task cost."
       >
         Expert
       </button>
@@ -179,94 +186,19 @@
     </div>
 
     <div id="highlights" hidden>
-      <h2>News from OpenRouter</h2>
+      <h2>Weekly highlights</h2>
+      <h3>News from OpenRouter</h3>
       <p id="hl-week"></p>
-      <h2>Quality moves</h2>
+      <h3>Quality moves</h3>
       <p id="hl-intelligence"></p>
-      <h2>Price movements &amp; deals</h2>
+      <h3>Price movements &amp; deals</h3>
       <p id="hl-prices"></p>
-    </div>
-
-    <div id="use-opencode">
-      <h2>Use it with OpenCode</h2>
-
-      <div class="actions">
-        <p class="hint">Copy to clipboard:</p>
-        <table id="copybuttons" class="copybuttons">
-          <tr>
-            <td>
-              <button type="button" id="copy-model" disabled>#1 model</button>
-            </td>
-            <td><code id="model-value">—</code></td>
-          </tr>
-        </table>
-      </div>
-
-      <h3>OpenCode v1 — Launch flag, shell alias</h3>
-      <div class="actions">
-        <table class="copybuttons">
-          <tr>
-            <td>
-              <button type="button" id="copy-command" disabled>
-                OpenCode with #1
-              </button>
-            </td>
-            <td><code id="command-value">—</code></td>
-          </tr>
-          <tr>
-            <td>
-              <button type="button" id="copy-curl" disabled>
-                OpenCode with curl
-              </button>
-            </td>
-            <td>
-              <code id="curl-value"></code>
-            </td>
-          </tr>
-        </table>
-      </div>
-      <p class="hint">
-        Tip: save the <code>curl</code> variant as a shell alias, so every
-        launch picks up the fresh value:
-      </p>
-      <p class="hint">
-        <code id="alias-hint"></code>
-      </p>
-      <p class="hint">
-        <code>best.txt</code> always serves the <em>balanced</em> #1, regardless
-        of the tab shown above.
-      </p>
-
-      <h3>OpenCode v2 — model-compare plugin</h3>
-      <p class="hint">
-        (OpenCode v2 has no <code>--model</code> for TUI launches.) Add the
-        plugin to <code>opencode.jsonc</code> (project or global):
-      </p>
-      <pre class="jsonbox"><span class="jp">{</span>
-  <span class="jk">"$schema"</span><span class="jp">:</span> <span class="js">"https://opencode.ai/config.json"</span><span class="jp">,</span>
-  <span class="jk">"plugins"</span><span class="jp">:</span> <span class="jp">[</span>
-    <span class="jp">{</span>
-      <span class="jk">"package"</span><span class="jp">:</span> <span class="js">"model-compare-opencode-plugin"</span><span class="jp">,</span>
-      <span class="jk">"options"</span><span class="jp">:</span> <span class="jp">{</span> <span class="jk">"source"</span><span class="jp">:</span> <span class="js">"auto"</span><span class="jp">,</span> <span class="jk">"defaultPriority"</span><span class="jp">:</span> <span class="js">"balanced"</span> <span class="jp">}</span>
-    <span class="jp">}</span>
-  <span class="jp">]</span>
-<span class="jp">}</span></pre>
-      <p class="hint">
-        It registers three aliases in the model picker —
-        <code>model-compare/balanced</code>, <code>/price</code>,
-        <code>/quality</code> — always resolving to the current best. Point your
-        default at one, or switch any session with <code>/use-best</code>. For
-        options, keyboard shortcuts, weights, and pins, see
-        <a href="https://github.com/canonical/model-compare-opencode-plugin"
-          >model-compare-opencode-plugin on GitHub</a
-        >.
-      </p>
     </div>
 
     <footer>
       data generated <span id="generated">—</span><span id="rev-block" hidden>
         · rev <a id="rev-link" href="#">—</a></span
-      > · <a href="faq.html">FAQ: precision, price and routing</a> · source:
+      > · source:
       <a href="https://github.com/canonical/model-compare"
         >canonical/model-compare</a
       >
