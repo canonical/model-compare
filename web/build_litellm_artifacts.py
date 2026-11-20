@@ -4,15 +4,20 @@
 Reads and validates the published catalog, writes a pure LiteLLM map
 fragment, a keyed steering companion, a merged upstream map (when one can be
 built safely) and a merge-status document. Fails loudly on a catalog or
-mapping defect; a bad upstream fetch or a key collision only freezes the
-merged map.
+mapping defect; a bad upstream fetch or a price-conflicting key collision
+only freezes the merged map. Collisions whose price schedules agree are merged
+automatically (keeping upstream's richer entry), and a reviewed override file
+can resolve conflicts in favor of either the fragment or upstream.
 """
 
 from __future__ import annotations
 
 import argparse
+from decimal import Decimal
 import hashlib
 import json
+import math
+import re
 import sys
 from pathlib import Path
 
@@ -23,7 +28,36 @@ STEERING_NAME = "litellm_steering.json"
 MERGED_NAME = "litellm.json"
 STATUS_NAME = "litellm_merge_status.json"
 STATUS_SCHEMA_VERSION = 1
+OVERRIDES_NAME = "litellm_collision_overrides.json"
 MIN_UPSTREAM_ENTRIES = 1000
+PRICE_FIELDS = (
+    "input_cost_per_token",
+    "output_cost_per_token",
+    "cache_read_input_token_cost",
+    "cache_creation_input_token_cost",
+)
+ABOVE_RE = re.compile(
+    r"^(" + "|".join(PRICE_FIELDS) + r")_above_(\d+(?:\.\d+)?)(k?)_tokens$"
+)
+WEEKDAY_ALIASES = {
+    "mon": 1,
+    "monday": 1,
+    "tue": 2,
+    "tues": 2,
+    "tuesday": 2,
+    "wed": 3,
+    "wednesday": 3,
+    "thu": 4,
+    "thur": 4,
+    "thurs": 4,
+    "thursday": 4,
+    "fri": 5,
+    "friday": 5,
+    "sat": 6,
+    "saturday": 6,
+    "sun": 7,
+    "sunday": 7,
+}
 UPSTREAM_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/"
     "model_prices_and_context_window.json"
@@ -57,6 +91,421 @@ def _positive_int(value) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     return value
+
+
+def _numeric(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _same_price(left, right) -> bool:
+    return math.isclose(left, right, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def _token_bound(value) -> int | None:
+    if not _numeric(value) or not math.isfinite(value) or value < 0:
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return int(value)
+
+
+def _parse_above_threshold(number_text: str, suffix: str) -> int | None:
+    if not math.isfinite(float(number_text)):
+        return None
+    scaled = Decimal(number_text) * (1000 if suffix == "k" else 1)
+    rounded = round(scaled)
+    if scaled != rounded:
+        return None
+    return int(rounded)
+
+
+def _tiered_schedule(entry: dict) -> list[tuple[int, dict]] | None:
+    tiers = entry.get("tiered_pricing")
+    if not isinstance(tiers, list) or not tiers:
+        return None
+    top_output = (
+        entry["output_cost_per_token"]
+        if _numeric(entry.get("output_cost_per_token"))
+        else 0.0
+    )
+    points: dict[int, dict] = {}
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            continue
+        span = tier.get("range")
+        if not isinstance(span, (list, tuple)) or len(span) != 2:
+            continue
+        start = _token_bound(span[0])
+        if start is None or not _numeric(span[1]):
+            continue
+        tier_input = (
+            tier["input_cost_per_token"]
+            if _numeric(tier.get("input_cost_per_token"))
+            else 0.0
+        )
+        tier_output = (
+            tier["output_cost_per_token"]
+            if _numeric(tier.get("output_cost_per_token"))
+            else top_output
+        )
+        tier_cache_read = (
+            tier["cache_read_input_token_cost"]
+            if _numeric(tier.get("cache_read_input_token_cost"))
+            else tier_input
+        )
+        tier_cache_creation = (
+            tier["cache_creation_input_token_cost"]
+            if _numeric(tier.get("cache_creation_input_token_cost"))
+            else tier_input
+        )
+        points[start] = {
+            "input_cost_per_token": tier_input,
+            "output_cost_per_token": tier_output,
+            "cache_read_input_token_cost": tier_cache_read,
+            "cache_creation_input_token_cost": tier_cache_creation,
+        }
+    if not points:
+        return None
+    return [(start, points[start]) for start in sorted(points)]
+
+
+def _price_schedule(entry: dict) -> list[tuple[int, dict]]:
+    """Return (start tokens, effective price fields) points for an entry.
+
+    LiteLLM's two threshold encodings have distinct lookup and fallback rules:
+
+    - A non-empty `tiered_pricing` table with at least one valid range takes
+      precedence over base and `*_above_*` fields. Each tier resolves omitted
+      rates independently (input -> 0.0, output -> top-level output -> 0.0,
+      cache read/creation -> that tier's input), without carrying values forward
+      from earlier tiers.
+    - Otherwise, base fields and `*_above_<N>[k]_tokens` thresholds are read
+      and carried forward across boundaries.
+    """
+    tiered = _tiered_schedule(entry)
+    if tiered is not None:
+        return tiered
+
+    points: dict[int, dict] = {}
+
+    def add(start: int, values: dict) -> None:
+        points.setdefault(start, {}).update(values)
+
+    add(
+        0, {field: entry[field] for field in PRICE_FIELDS if _numeric(entry.get(field))}
+    )
+    for field, value in entry.items():
+        if not _numeric(value):
+            continue
+        match = ABOVE_RE.match(field)
+        if match is not None:
+            threshold = _parse_above_threshold(match.group(2), match.group(3))
+            if threshold is not None:
+                add(threshold, {match.group(1): value})
+
+    schedule = []
+    current: dict = {}
+    for start in sorted(points):
+        current.update(points[start])
+        schedule.append((start, dict(current)))
+    return schedule
+
+
+def _price_at(schedule: list[tuple[int, dict]], start: int) -> dict:
+    current: dict = {}
+    for point_start, prices in schedule:
+        if point_start > start:
+            break
+        current.update(prices)
+    return current
+
+
+def _canonical_hours(value) -> tuple[str, ...] | None:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return (cleaned,) if cleaned else None
+    if isinstance(value, (list, tuple)):
+        items = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                return None
+            items.append(item.strip())
+        return tuple(sorted(set(items)))
+    return None
+
+
+def _canonical_weekdays(value) -> tuple[int, ...] | None:
+    if value is None:
+        return tuple(range(1, 8))
+    if isinstance(value, (list, tuple)):
+        days = []
+        for item in value:
+            if isinstance(item, bool):
+                return None
+            if isinstance(item, int):
+                if not 1 <= item <= 7:
+                    return None
+                days.append(item)
+            elif isinstance(item, str):
+                day = WEEKDAY_ALIASES.get(item.strip().lower())
+                if day is None:
+                    return None
+                days.append(day)
+            else:
+                return None
+        return tuple(sorted(set(days)))
+    return None
+
+
+def _canonical_off_peak(block) -> dict | None:
+    if not isinstance(block, dict):
+        return None
+    allowed = set(PRICE_FIELDS) | {"hours_utc", "windows", "weekday_timezone"}
+    if any(key not in allowed for key in block):
+        return None
+    prices: dict = {}
+    for field in PRICE_FIELDS:
+        if field not in block or block[field] is None:
+            continue
+        if not _numeric(block[field]):
+            return None
+        prices[field] = block[field]
+    hours = _canonical_hours(block.get("hours_utc"))
+    if hours is None:
+        return None
+    raw_windows = block.get("windows")
+    grouped: dict[tuple[int, ...], set[str]] = {}
+    if raw_windows is not None:
+        if not isinstance(raw_windows, (list, tuple)):
+            return None
+        for rule in raw_windows:
+            if not isinstance(rule, dict):
+                return None
+            if any(key not in ("hours_utc", "weekdays") for key in rule):
+                return None
+            rule_hours = _canonical_hours(rule.get("hours_utc"))
+            rule_days = _canonical_weekdays(rule.get("weekdays"))
+            if rule_hours is None or rule_days is None:
+                return None
+            if rule_hours and rule_days:
+                grouped.setdefault(rule_days, set()).update(rule_hours)
+    tz = block.get("weekday_timezone")
+    if tz is None:
+        canonical_tz = "UTC"
+    elif isinstance(tz, str) and tz.strip():
+        canonical_tz = "UTC" if tz.strip().upper() == "UTC" else tz.strip()
+    else:
+        return None
+    return {
+        "prices": prices,
+        "hours_utc": hours,
+        "windows": tuple(
+            sorted((days, tuple(sorted(hrs))) for days, hrs in grouped.items())
+        ),
+        "weekday_timezone": canonical_tz,
+    }
+
+
+def _off_peak_equal(ours_off_peak, upstream_off_peak) -> bool:
+    if ours_off_peak == upstream_off_peak:
+        return True
+    ours_canon = _canonical_off_peak(ours_off_peak)
+    upstream_canon = _canonical_off_peak(upstream_off_peak)
+    if ours_canon is None or upstream_canon is None:
+        return False
+    if (
+        ours_canon["hours_utc"] != upstream_canon["hours_utc"]
+        or ours_canon["windows"] != upstream_canon["windows"]
+        or ours_canon["weekday_timezone"] != upstream_canon["weekday_timezone"]
+    ):
+        return False
+    ours_prices = ours_canon["prices"]
+    upstream_prices = upstream_canon["prices"]
+    if set(ours_prices) != set(upstream_prices):
+        return False
+    return all(
+        _same_price(ours_prices[field], upstream_prices[field]) for field in ours_prices
+    )
+
+
+def _off_peak_difference(ours: dict, upstream: dict) -> dict | None:
+    ours_off_peak = ours.get("off_peak_pricing")
+    upstream_off_peak = upstream.get("off_peak_pricing")
+    if ours_off_peak is None and upstream_off_peak is None:
+        return None
+    if (
+        ours_off_peak is not None
+        and upstream_off_peak is not None
+        and _off_peak_equal(ours_off_peak, upstream_off_peak)
+    ):
+        return None
+    return {
+        "field": "off_peak_pricing",
+        "from_tokens": "off-peak",
+        "model_compare": "present" if ours_off_peak is not None else "absent",
+        "upstream": "present" if upstream_off_peak is not None else "absent",
+    }
+
+
+def _price_differences(
+    ours: dict, upstream: dict
+) -> tuple[list[dict], int, str | None]:
+    """Return (differences, comparable field count, note).
+
+    A collision is price-equivalent only when both base `input_cost_per_token`
+    and `output_cost_per_token` are present and match, every price present in
+    ours at any tier boundary is present and matches upstream, and any off-peak
+    schedule agrees. Representation differences (`tiered_pricing` vs
+    `*_above_...`) are not differences. Off-peak schedules are compared
+    semantically on prices/hours/weekdays; other structural differences are
+    reported conservatively rather than guessed at.
+    """
+    ours_schedule = _price_schedule(ours)
+    upstream_schedule = _price_schedule(upstream)
+    ours_base = _price_at(ours_schedule, 0)
+    upstream_base = _price_at(upstream_schedule, 0)
+    if not (
+        "input_cost_per_token" in ours_base
+        and "output_cost_per_token" in ours_base
+        and "input_cost_per_token" in upstream_base
+        and "output_cost_per_token" in upstream_base
+    ):
+        return [], 0, "no comparable base price"
+
+    starts = sorted(
+        {start for start, _ in ours_schedule}
+        | {start for start, _ in upstream_schedule}
+    )
+    differences = []
+    comparable = 0
+    for start in starts:
+        ours_prices = _price_at(ours_schedule, start)
+        upstream_prices = _price_at(upstream_schedule, start)
+        for field in PRICE_FIELDS:
+            if field not in ours_prices:
+                continue
+            comparable += 1
+            if field not in upstream_prices:
+                differences.append(
+                    {
+                        "field": field,
+                        "from_tokens": start,
+                        "model_compare": ours_prices[field],
+                        "upstream": "absent",
+                    }
+                )
+                continue
+            if not _same_price(ours_prices[field], upstream_prices[field]):
+                differences.append(
+                    {
+                        "field": field,
+                        "from_tokens": start,
+                        "model_compare": ours_prices[field],
+                        "upstream": upstream_prices[field],
+                    }
+                )
+    note = None
+    off_peak = _off_peak_difference(ours, upstream)
+    if off_peak is not None:
+        differences.append(off_peak)
+        comparable += 1
+        note = "off-peak pricing differs"
+
+    def field_order(field: str) -> int:
+        return PRICE_FIELDS.index(field) if field in PRICE_FIELDS else len(PRICE_FIELDS)
+
+    def start_order(value) -> tuple[int, int | str]:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return (0, value)
+        return (1, str(value))
+
+    differences.sort(
+        key=lambda item: (field_order(item["field"]), start_order(item["from_tokens"]))
+    )
+    return differences, comparable, note
+
+
+def _validate_overrides(overrides) -> dict:
+    if not isinstance(overrides, dict):
+        raise ValueError("collision overrides must be an object")
+    for key, value in overrides.items():
+        if not isinstance(key, str) or not key.startswith("openrouter/"):
+            raise ValueError(
+                f"collision override key is not an openrouter/ key: {key!r}"
+            )
+        if not isinstance(value, dict):
+            raise ValueError(f"collision override {key} is not an object")
+        if value.get("resolution") not in ("fragment", "upstream"):
+            raise ValueError(
+                f"collision override {key} resolution must be fragment or upstream"
+            )
+        reason = value.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError(f"collision override {key} reason is not a string")
+    return overrides
+
+
+def load_collision_overrides(path: Path | str | None) -> dict:
+    """Load the reviewed collision overrides, returning {} when absent."""
+    if path is None:
+        return {}
+    try:
+        raw = Path(path).read_bytes()
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        raise ValueError(f"cannot read collision overrides: {exc}") from exc
+    try:
+        doc = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(f"collision overrides are not JSON: {exc}") from exc
+    if not isinstance(doc, dict):
+        raise ValueError("collision overrides must be a JSON object")
+    schema_version = doc.get("schema_version")
+    if type(schema_version) is not int or schema_version != 1:
+        raise ValueError("collision overrides schema_version must be 1")
+    overrides = doc.get("overrides")
+    if not isinstance(overrides, dict):
+        raise ValueError("collision overrides lacks an overrides object")
+    return _validate_overrides(overrides)
+
+
+def _collision_detail(
+    key: str, ours: dict, upstream: dict, override: dict | None
+) -> dict:
+    differences, comparable, note = _price_differences(ours, upstream)
+    price_equal = comparable > 0 and not differences
+    resolution = "upstream"
+    overridden = False
+    override_reason = None
+    if override is not None:
+        if not isinstance(override, dict):
+            raise ValueError(f"collision override {key} is not an object")
+        resolution = override.get("resolution")
+        if resolution not in ("fragment", "upstream"):
+            raise ValueError(
+                f"collision override {key} resolution must be fragment or upstream"
+            )
+        overridden = True
+        reason = override.get("reason")
+        if isinstance(reason, str) and reason:
+            override_reason = reason
+    elif not price_equal:
+        resolution = "blocked"
+    detail = {
+        "key": key,
+        "resolution": resolution,
+        "price_equal": price_equal,
+        "overridden": overridden,
+        "differences": differences,
+    }
+    if note is not None:
+        detail["note"] = note
+    if override_reason is not None:
+        detail["override_reason"] = override_reason
+    return detail
 
 
 def _reasoning_flags(model: dict) -> dict:
@@ -409,8 +858,10 @@ def build_merge_status(
     upstream_bytes: bytes | None,
     prev_merged_bytes: bytes | None,
     prev_status: dict | None,
+    overrides: dict | None = None,
 ) -> tuple[bytes | None, dict]:
     """Return (merged bytes or None, status document)."""
+    overrides = {} if overrides is None else _validate_overrides(overrides)
     previous = _previous_status(prev_status)
     previous_failures = previous.get("upstream_fetch_failures")
     if not isinstance(previous_failures, int) or isinstance(previous_failures, bool):
@@ -454,14 +905,28 @@ def build_merge_status(
     merged_rate_card_sha = None
     status = "skipped"
     collisions = []
+    collision_details = []
+    blocking = []
 
     if upstream is not None:
         rate_card = json.loads(rate_card_bytes)
         collisions = sorted(set(upstream) & set(rate_card))
-        if not collisions:
+        collision_details = [
+            _collision_detail(key, rate_card[key], upstream[key], overrides.get(key))
+            for key in collisions
+        ]
+        blocking = [
+            detail for detail in collision_details if detail["resolution"] == "blocked"
+        ]
+        if not blocking:
+            details_by_key = {detail["key"]: detail for detail in collision_details}
             merged = dict(upstream)
-            merged.update(rate_card)
-            if len(merged) != len(upstream) + len(rate_card):
+            for key, entry in rate_card.items():
+                detail = details_by_key.get(key)
+                if detail is None or detail["resolution"] == "fragment":
+                    merged[key] = entry
+            expected = len(upstream) + len(rate_card) - len(collisions)
+            if len(merged) != expected:
                 raise ValueError("merged map entry count does not add up")
             merged_bytes = serialize_compact(merged)
             merged_sha = hashlib.sha256(merged_bytes).hexdigest()
@@ -482,11 +947,9 @@ def build_merge_status(
             status = "skipped"
             reason = reason or "no_previous_map"
 
-    report_needed = bool(collisions) or (
-        effective_status != "skipped" and failures >= 3
-    )
+    report_needed = bool(blocking) or (effective_status != "skipped" and failures >= 3)
     report_reason = None
-    if collisions:
+    if blocking:
         report_reason = "collision"
     elif effective_status != "skipped" and failures >= 3:
         report_reason = "upstream_fetch_failures"
@@ -515,6 +978,7 @@ def build_merge_status(
                 "rate_card_sha256": merged_rate_card_sha,
             },
             "collisions": collisions,
+            "collision_details": collision_details,
             "upstream_fetch_failures": failures,
             "report": {
                 "needed": report_needed,
@@ -573,6 +1037,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upstream-url", default=UPSTREAM_URL)
     parser.add_argument("--prev-merged")
     parser.add_argument("--prev-status")
+    parser.add_argument(
+        "--collision-overrides",
+        default=str(Path(__file__).with_name(OVERRIDES_NAME)),
+    )
     args = parser.parse_args(argv)
 
     raw_catalog = _read(args.catalog)
@@ -599,6 +1067,7 @@ def main(argv: list[str] | None = None) -> int:
         upstream_bytes,
         _read(args.prev_merged),
         _read_json(args.prev_status),
+        load_collision_overrides(args.collision_overrides),
     )
     status["upstream"]["url"] = args.upstream_url
     steering = build_steering(catalog, rate_card_bytes, args.revision, warnings)

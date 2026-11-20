@@ -43,7 +43,7 @@ $ python3 web/publish.py
 
 `web/publish.py` runs `model_compare.py --catalog` first to prime the local HTTP cache, followed by `--best` and per-priority `--json` runs. It then fetches the previous `history.json`, `highlights.json`, and LiteLLM artifacts from the live site, builds fresh highlights (`web/generate_highlights.py`), builds the LiteLLM files (`web/build_litellm_artifacts.py`), writes `data.json` (`web/build_site_data.py`), and copies `publish.SITE_FILES` into the output directory.
 
-Every output is gated before deploy: mismatched timestamps, a `best.txt` that disagrees with `catalog.json`'s balanced #1, an empty AA run when keyed, or a `>5%` endpoint drop-rate spike aborts the build loudly so a broken run never overwrites the live site. Upstream LiteLLM collisions or fetch failures freeze only `litellm.json` while keeping the rest of the site publishing, and `web/report_litellm_merge.py` opens or updates a single deduplicated GitHub issue.
+Every output is gated before deploy: mismatched timestamps, a `best.txt` that disagrees with `catalog.json`'s balanced #1, an empty AA run when keyed, or a `>5%` endpoint drop-rate spike aborts the build loudly so a broken run never overwrites the live site. LiteLLM collisions whose prices agree merge automatically; a price conflict freezes only `litellm.json` unless `web/litellm_collision_overrides.json` records a reviewed resolution, and upstream fetch failures freeze it after the retry threshold. `web/report_litellm_merge.py` opens or updates a single deduplicated GitHub issue with the per-key price differences, and closes it once a later run rebuilds the map.
 
 Optional repository secrets:
 

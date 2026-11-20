@@ -59,4 +59,10 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python web/report_litellm_merge.py --status _site/litellm_merge_status.json
+          DEPLOY_OUTCOME: ${{ steps.deployment.outcome }}
+        run: |
+          args=(--status _site/litellm_merge_status.json)
+          if [ "$DEPLOY_OUTCOME" = "success" ]; then
+            args+=(--allow-close)
+          fi
+          python web/report_litellm_merge.py "${args[@]}"

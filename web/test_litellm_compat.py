@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import http.server
+import json
 import os
 import subprocess
 import sys
@@ -23,7 +24,12 @@ litellm = pytest.importorskip("litellm")
 from litellm.integrations.custom_logger import CustomLogger
 
 import build_litellm_artifacts as bla
-from test_build_litellm_artifacts import _basic_catalog, _upstream_bytes
+from test_build_litellm_artifacts import (
+    _GLM_EQUIVALENT_UPSTREAM,
+    _basic_catalog,
+    _upstream_bytes,
+    _upstream_with_priced_collision,
+)
 from test_litellm_contract import apply_steering, resolve_key
 
 KEY = "openrouter/z-ai/glm-5.3"
@@ -105,6 +111,39 @@ print("ok")
 
 def test_litellm_loads_merged_map_and_prices_it(artifacts):
     with _serve(artifacts["path"].parent) as url:
+        result = _run_loader(url)
+    assert result.returncode == 0, result.stderr
+    assert "ok" in result.stdout
+
+
+def test_litellm_loads_equivalent_above_collision_with_same_cost(tmp_path):
+    catalog = _basic_catalog()
+    card, _ = bla.build_rate_card(catalog)
+    card_bytes = bla.serialize_readable(card)
+    upstream_entry = {
+        **_GLM_EQUIVALENT_UPSTREAM,
+        "litellm_provider": "openrouter",
+        "mode": "chat",
+        "max_input_tokens": 1_048_576,
+        "max_output_tokens": 64_000,
+    }
+    merged, status = bla.build_merge_status(
+        catalog,
+        "deadbee",
+        card_bytes,
+        "ok",
+        _upstream_with_priced_collision(upstream_entry),
+        None,
+        None,
+    )
+    assert status["merged"]["status"] == "ok"
+    assert status["collision_details"][0]["resolution"] == "upstream"
+    merged_doc = json.loads(merged)
+    assert "tiered_pricing" not in merged_doc[KEY]
+    assert merged_doc[KEY]["supports_prompt_caching"] is True
+
+    (tmp_path / "model_prices.json").write_bytes(merged)
+    with _serve(tmp_path) as url:
         result = _run_loader(url)
     assert result.returncode == 0, result.stderr
     assert "ok" in result.stdout
