@@ -8992,6 +8992,8 @@ def test_catalog_entry_shape():
             "steering",
             "max_output_tokens",
             "input_modalities",
+            # additive: which retention tier the model's ZDR endpoints are
+            "safety_retention",
         }
         assert set(entry["pricing"]) == {
             "input_per_1m",
@@ -13633,3 +13635,25 @@ def test_run_refuses_when_every_endpoint_is_safety_retention(monkeypatch, capsys
     assert mc.run(make_args(), models, False) == 2
     # the reason is recorded, not inferred: the pool drop is named
     assert "no models satisfy the filters" in capsys.readouterr().err
+
+
+def test_catalog_records_allow_safety_retention():
+    args = make_args(allow_safety_retention="google")
+    models = [make_model(id="acme/model-a")]
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"}
+    )
+    mc.compute_scores(candidates, args, {})
+    doc = mc.build_catalog(args, models, candidates, dropped, [], {}, {}, None, {}, {})
+    assert doc["parameters"]["allow_safety_retention"] == "google"
+    assert doc["models"][0]["safety_retention"] is False
+
+
+def test_catalog_dropped_carries_zero_filled_safety_retention():
+    args = make_args()
+    models = [make_model(id="acme/model-a")]
+    candidates, dropped = mc.build_candidates(models, args, {}, {"acme/model-a"}, [])
+    mc.compute_scores(candidates, args, {})
+    doc = mc.build_catalog(args, models, candidates, dropped, [], {}, {}, None, {}, {})
+    assert doc["pool"]["dropped"]["safety retention"] == 0
+    assert "safety retention" in mc.CATALOG_DROP_REASONS

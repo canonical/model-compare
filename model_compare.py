@@ -158,6 +158,7 @@ CATALOG_DROP_REASONS = (
     "batch",
     "no discount",
     "not ZDR",
+    "safety retention",
     "modality",
     "tool calling",
     "expired",
@@ -5789,6 +5790,7 @@ def build_catalog(
                 else None,
                 "tool_calling": cand["tool_calling"],
                 "zdr": cand["zdr"],
+                "safety_retention": cand.get("safety_retention"),
                 "discount": round(cand["discount"], 4)
                 if has_discount(cand["discount"])
                 else None,
@@ -5866,6 +5868,7 @@ def build_catalog(
             "recency_half_life": args.recency_half_life,
             "max_age_days": args.max_age_days,
             "zdr_required": not args.no_zdr,
+            "allow_safety_retention": getattr(args, "allow_safety_retention", "none"),
             "require_tools": not args.no_require_tools,
             "exclude_free": args.exclude_free,
             "include_batch": args.include_batch,
