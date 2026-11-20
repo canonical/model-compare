@@ -2666,3 +2666,50 @@ def test_project_schedules_carries_quality_effort():
         row for row in bsd.project_schedules(catalog) if row["model"] == "acme/big-deal"
     ]
     assert projected["quality_effort"] == "high"
+
+
+# Safety Retention (spec: docs/superpowers/specs/2026-11-20-safety-retention-filter-design.md)
+
+
+def test_catalog_accepts_allow_safety_retention():
+    doc = make_catalog()
+    doc["parameters"]["allow_safety_retention"] = "google"
+    doc["models"][0]["safety_retention"] = False
+    bsd.validate_catalog(doc)
+
+
+def test_catalog_accepts_documents_without_safety_retention_keys():
+    # backwards compatibility: a catalog written before the flag existed
+    bsd.validate_catalog(make_catalog())
+
+
+def test_catalog_rejects_unknown_safety_retention_mode():
+    doc = make_catalog()
+    doc["parameters"]["allow_safety_retention"] = "sometimes"
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_catalog_rejects_non_bool_safety_retention():
+    doc = make_catalog()
+    doc["parameters"]["allow_safety_retention"] = "google"
+    doc["models"][0]["safety_retention"] = "yes"
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_catalog_rejects_allowance_dependent_model_under_none():
+    doc = make_catalog()
+    doc["parameters"]["allow_safety_retention"] = "none"
+    doc["models"][0]["safety_retention"] = True
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_catalog_rejects_safety_retention_when_zdr_not_required():
+    doc = make_catalog()
+    doc["parameters"]["zdr_required"] = False
+    doc["models"][0]["zdr"] = None
+    doc["models"][0]["safety_retention"] = False
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)

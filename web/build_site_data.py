@@ -76,6 +76,11 @@ REVISION_RE = re.compile(r"[0-9a-f]{7,40}")
 
 CATALOG_SCHEMA_VERSION = 6
 
+# Duplicated from model_compare.py by convention (see PRECISION_LADDER below):
+# the modes --allow-safety-retention accepts, and the only values
+# parameters.allow_safety_retention may carry.
+SAFETY_RETENTION_MODES = ("none", "google", "all")
+
 # Duplicated from model_compare.py: build_site_data is subprocess-isolated
 # from the CLI, and the catalog constants are duplicated here by convention
 # (same precedent as CATALOG_ENTRY_KEYS below). The ladder keys are the only
@@ -753,6 +758,14 @@ def validate_catalog(document) -> None:
     parameters = document["parameters"]
     if not isinstance(parameters, dict) or "zdr_required" not in parameters:
         raise ValueError("catalog parameters must set zdr_required")
+    # Additive (schema v6, no bump): which retention tier counts as ZDR.
+    # Optional so a catalog written before the flag existed still validates.
+    safety_mode = parameters.get("allow_safety_retention")
+    if safety_mode is not None and safety_mode not in SAFETY_RETENTION_MODES:
+        raise ValueError(
+            "catalog parameters.allow_safety_retention must be one of "
+            f"{', '.join(SAFETY_RETENTION_MODES)}: {safety_mode!r}"
+        )
     # scores.overall is documented as reproducible from parameters.weights
     # alone, so the weights must cover every priority and sum to 1.
     weights = parameters.get("weights")
@@ -930,6 +943,29 @@ def validate_catalog(document) -> None:
         _validate_catalog_quality_fields(entry, f"models[{i}]")
         if parameters["zdr_required"] and entry["zdr"] is not True:
             raise ValueError(f"models[{i}] is not zdr=true under zdr_required")
+        # Additive per-model retention tier. Optional, but when present it must
+        # agree with the pool rule that produced it: under `none` no candidate
+        # may depend on the allowance, and with no ZDR gate the field is null.
+        if "safety_retention" in entry:
+            flag = entry["safety_retention"]
+            if flag is not None and not isinstance(flag, bool):
+                raise ValueError(
+                    f"models[{i}] safety_retention must be a bool or null: {flag!r}"
+                )
+            if not parameters["zdr_required"] and flag is not None:
+                raise ValueError(
+                    f"models[{i}] safety_retention must be null when zdr is not "
+                    "required"
+                )
+            if (
+                parameters["zdr_required"]
+                and safety_mode == "none"
+                and flag is True
+            ):
+                raise ValueError(
+                    f"models[{i}] depends on safety retention under "
+                    "allow_safety_retention=none"
+                )
         # Schema v3 additive blocks: the producer emits all four (null when
         # the candidate skipped the endpoint stage); the shapes downstream
         # consumers index into are pinned here.
