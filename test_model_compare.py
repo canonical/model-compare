@@ -12475,7 +12475,7 @@ def test_depth_detail_reports_missing_default_record(capsys):
 
 
 def test_depth_detail_shows_unlabeled_aa_reference(capsys):
-    cand = _cand("z-ai/glm-5.3-flash", 27.8)
+    cand = _cand("z-ai/glm-5.3-flash", 1.0)
     cand["reasoning"] = {
         "default_effort": "max",
         "supported_efforts": ["max", "high", "low"],
@@ -12490,17 +12490,26 @@ def test_depth_detail_shows_unlabeled_aa_reference(capsys):
     }
     mc.print_depth_detail([cand])
     out = capsys.readouterr().out
-    assert "AA index 27.8 without an effort label" in out
-    assert "AA $0.58 per task" in out
-    assert "reference only" in out
-    assert "may not be the quality you get at a selectable effort" in out
-    # The per-effort table is still absent, but the blanket "no data" line
-    # would contradict the reference above it.
+    lines = out.splitlines()
+    assert "effort" in out
+    assert "max*" in out
+    assert "high" in out
+    assert "low" in out
+    unknown_line = next(line for line in lines if line.strip().startswith("unknown "))
+    assert "27.8" in unknown_line
+    assert "0.58" in unknown_line
+    assert "- not selectable" in unknown_line
+    caveat_line = next(
+        line
+        for line in lines
+        if "unknown = measured without an effort label; reference only" in line
+    )
+    assert out.index(unknown_line) < out.index(caveat_line)
     assert "no AA depth data" not in out
 
 
 def test_depth_detail_unlabeled_reference_without_cost(capsys):
-    cand = _cand("z-ai/glm-5.3-flash", 27.8)
+    cand = _cand("z-ai/glm-5.3-flash", 1.0)
     cand["reasoning"] = {"default_effort": "max", "supported_efforts": ["max"]}
     cand["reasoning_depths"] = []
     cand["quality_unlabeled"] = {
@@ -12511,9 +12520,141 @@ def test_depth_detail_unlabeled_reference_without_cost(capsys):
     }
     mc.print_depth_detail([cand])
     out = capsys.readouterr().out
-    note_line = next(line for line in out.splitlines() if "AA index 27.8" in line)
-    assert "without an effort label" in note_line
-    assert "$" not in note_line
+    unknown_line = next(
+        line for line in out.splitlines() if line.strip().startswith("unknown ")
+    )
+    assert "27.8" in unknown_line
+    assert "- not selectable" in unknown_line
+    assert "$" not in unknown_line
+    assert "unknown = measured without an effort label" in out
+
+
+def test_fmt_depth_and_table_cells_for_unlabeled_aa():
+    cand = _cand("z-ai/glm-5.3-flash", 1.0)
+    cand["quality_unlabeled"] = {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    assert mc.fmt_depth(cand) == "unknown"
+    cells = mc.table_cells(cand, 2)
+    assert cells["DEPTH"] == "unknown"
+    assert cells["QUAL"] == "-"
+    assert cells["QUALITY"] == "- · unknown"
+
+    plain = _cand("acme/no-aa", 1.0)
+    assert mc.fmt_depth(plain) == "-"
+    plain_cells = mc.table_cells(plain, 3)
+    assert plain_cells["DEPTH"] == "-"
+    assert plain_cells["QUAL"] == "-"
+    assert plain_cells["QUALITY"] == "-"
+
+
+def test_print_table_dims_unknown_depth_and_simple_quality(capsys):
+    cands = _scored_candidates()
+    cands[1]["quality_unlabeled"] = {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    mc.print_table(
+        cands,
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+        detail="expert",
+    )
+    expert_out = capsys.readouterr().out
+    assert f"{mc.SGR_DIM}unknown{mc.SGR_RESET}" in expert_out
+
+    mc.print_table(
+        cands,
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+        detail="simple",
+    )
+    simple_out = capsys.readouterr().out
+    assert f"{mc.SGR_DIM}- · unknown{mc.SGR_RESET}" in simple_out
+
+
+def test_print_table_legends_redefine_dash_and_explain_unknown(capsys):
+    cands = _scored_candidates()[:1]
+    mc.print_table(cands, mc.PRIORITY_WEIGHTS["balanced"], None, detail="expert")
+    expert = capsys.readouterr().out
+    assert '"-" = unknown' not in expert
+    assert "no known effort" not in expert
+    assert "no AA measurement at all" in expert
+    assert "unknown = AA measured without an effort label" in expert
+
+    mc.print_table(cands, mc.PRIORITY_WEIGHTS["balanced"], None, detail="simple")
+    simple = capsys.readouterr().out
+    assert "'-' = unknown" not in simple
+    assert "no AA measurement at all" in simple
+    assert "- · unknown = AA measured without an effort label" in simple
+
+
+def test_depth_detail_unknown_only_without_supported_efforts(capsys):
+    cand = _cand("nvidia/nemotron-3.5-lightning", 1.0)
+    cand["reasoning"] = {"default_effort": "reasoning", "supported_efforts": []}
+    cand["reasoning_depths"] = []
+    cand["quality_unlabeled"] = {
+        "index": 5.5,
+        "cost_per_task_usd": None,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    mc.print_depth_detail([cand])
+    out = capsys.readouterr().out
+    assert "no AA depth data" not in out
+    unknown_line = next(
+        line for line in out.splitlines() if line.strip().startswith("unknown ")
+    )
+    assert "5.5" in unknown_line
+    assert "- not selectable" in unknown_line
+    assert "unknown = measured without an effort label" in out
+    assert "(no label)" not in out
+    assert any(
+        line.startswith("unknown  ") and "never fills QUAL" in line
+        for line in out.splitlines()
+    )
+
+
+def test_run_unlabeled_aa_keeps_json_qual_null_and_renders_unknown(monkeypatch, capsys):
+    models = [
+        make_model(
+            id="z-ai/glm-5.3-flash",
+            name="Z.AI: GLM 5.3 Flash",
+            reasoning={"default_effort": "max", "supported_efforts": ["max", "high"]},
+        )
+    ]
+    aa_entries = [
+        {
+            "id": "u1",
+            "name": "GLM 5.3 Flash",
+            "slug": "glm-5-3-flash",
+            "creator": "Z.AI",
+            "index": 27.8,
+            "cost_per_task": 0.58,
+            "as_of": "t1",
+        }
+    ]
+    _stub_quality_run(monkeypatch, models, aa_entries=aa_entries, catalog_raises=True)
+    assert mc.run(make_args(aa_api_key="k", json=True), models, False) == 0
+    (row,) = json.loads(capsys.readouterr().out)
+    assert row["quality_index"] is None
+    assert row["quality_effort"] is None
+    assert row["reasoning"]["aa_unlabeled"]["index"] == 27.8
+
+    _stub_quality_run(monkeypatch, models, aa_entries=aa_entries, catalog_raises=True)
+    assert mc.run(make_args(aa_api_key="k", depths=True), models, False) == 0
+    out = capsys.readouterr().out
+    table_row = next(line for line in out.splitlines() if "z-ai/glm-5.3-flash" in line)
+    assert "unknown" in table_row
+    assert "27.8" in out
+    assert "- not selectable" in out
 
 
 def test_depth_detail_heading_is_bold_and_capitalized(capsys):

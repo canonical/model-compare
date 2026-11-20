@@ -4502,11 +4502,25 @@ def _published_reasoning_block(cand):
     }
 
 
+def _has_unlabeled_aa(cand) -> bool:
+    """True when cand carries a finite display-only unlabeled AA index."""
+    rec = cand.get("quality_unlabeled")
+    if not isinstance(rec, dict):
+        return False
+    idx = rec.get("index")
+    if not isinstance(idx, (int, float)) or isinstance(idx, bool):
+        return False
+    try:
+        return math.isfinite(float(idx))
+    except OverflowError:
+        return False
+
+
 def fmt_depth(cand) -> str:
     """DEPTH cell: the effort QUAL was measured at; ``*`` is informational."""
     effort = (cand.get("quality_record") or {}).get("effort")
     if not effort:
-        return "-"
+        return "unknown" if _has_unlabeled_aa(cand) else "-"
     return f"{effort}*" if effort == _display_default_effort(cand) else effort
 
 
@@ -4744,14 +4758,15 @@ LEGENDS = {
             "QUALITY",
             [
                 "AA intelligence index at the model's best measured selectable depth",
-                '({d:default}; {c:--reasoning-effort} overrides); {d:"-"} = unknown, scores 0',
+                '({d:default}; {c:--reasoning-effort} overrides); {d:"-"} = no AA measurement at all, scores 0',
             ],
         ),
         (
             "DEPTH",
             [
                 'reasoning effort QUAL was measured at; {y:"*"} = OpenRouter\'s default (informational)',
-                "{d:-} = no known effort; {c:--depths} shows the depth detail",
+                '{d:"-"} = no AA measurement at all; {c:--depths} shows the depth detail',
+                "{d:unknown} = AA measured without an effort label (reference only; see {c:--depths})",
             ],
         ),
         (
@@ -4789,7 +4804,9 @@ LEGENDS = {
             "QUALITY",
             [
                 "AA intelligence index at the model's best measured selectable depth",
-                "{d:'-'} = unknown, scores 0",
+                '{d:"-"} = no AA measurement at all, scores 0',
+                "{d:- · unknown} = AA measured without an effort label",
+                "(not scored; see {c:--depths})",
                 "suffix after · names the effort used for QUAL; this view has no",
                 'DEPTH column or {y:"*"} marker',
             ],
@@ -4830,6 +4847,8 @@ def table_cells(cand, rank):
     if effort and cand["quality"] is not None:
         # Simple view has no DEPTH column; the effort rides on QUALITY.
         quality_cell += f" · {effort}"
+    elif cand["quality"] is None and _has_unlabeled_aa(cand):
+        quality_cell = "- · unknown"
     return {
         "RANK": str(rank),
         "MODEL": display_text(cand["id"]),
@@ -4915,7 +4934,9 @@ def print_table(
                     body = style.green(body)
             elif rank == 1:
                 body = style.green(body)
-            elif col in ("QUAL", "QUALITY") and row[col] == "-":
+            elif col in ("QUAL", "QUALITY") and row[col] in ("-", "- · unknown"):
+                body = style.dim(body)
+            elif col == "DEPTH" and row[col] == "unknown":
                 body = style.dim(body)
             cells.append(body + (style.yellow("!") if risk_marker else ""))
         print("  ".join(cells))
@@ -5058,10 +5079,9 @@ DEPTH_LEGEND = (
     ),
     ("OR $/M", ["constant across depths (the title line's per-listing price)"]),
     (
-        "(no label)",
+        "unknown",
         [
-            "an AA index measured without an effort label is a reference",
-            "only; it never fills QUAL",
+            "AA index measured without an effort label; reference only, never fills QUAL",
         ],
     ),
 )
@@ -5071,10 +5091,10 @@ def print_depth_detail(top, style=None):
     """Per-model AA depth detail: measured scores and selectable variants.
 
     One block per model in the given (rank) order, listing the union of
-    OpenRouter-supported and AA-measured efforts, deepest first. Models with
-    no measured depths get a single ``no AA depth data`` line, unless AA
-    measured them without an effort label: that index is shown with a
-    reference-only caveat instead. Display only: AA $/task never enters the
+    OpenRouter-supported and AA-measured efforts, deepest first, followed by an
+    ``unknown`` row when AA measured the model without an effort label. Models
+    with neither measured depths nor an unlabeled AA reference get a single
+    ``no AA depth data`` line. Display only: AA $/task never enters the
     weighted score.
     """
     if not top:
@@ -5096,26 +5116,6 @@ def print_depth_detail(top, style=None):
             return (AA_EFFORT_ORDER.index(effort), effort)
         except ValueError:
             return (len(AA_EFFORT_ORDER), effort or "")
-
-    def unlabeled_note(record):
-        """One line for an AA index measured without an effort label.
-
-        Display only: the number cannot fill QUAL, so the note says what it
-        is and warns that a selectable effort may score differently.
-        """
-        if not isinstance(record, dict):
-            return None
-        index = finite(record.get("index"))
-        if index is None:
-            return None
-        cost = finite(record.get("cost_per_task_usd"))
-        text = f"AA index {index:.1f} without an effort label"
-        if cost is not None:
-            text += f" (AA ${cost:.2f} per task)"
-        return (
-            text + "; reference only, may not be the quality you get at a "
-            "selectable effort."
-        )
 
     blocks = []
     for rank, cand in enumerate(top, 1):
@@ -5171,6 +5171,22 @@ def print_depth_detail(top, style=None):
                     select,
                 ]
             )
+        unlabeled = cand.get("quality_unlabeled")
+        u_index = (
+            finite(unlabeled.get("index")) if isinstance(unlabeled, dict) else None
+        )
+        has_unlabeled = u_index is not None
+        if has_unlabeled:
+            u_cost = finite(unlabeled.get("cost_per_task_usd"))
+            rows.append(
+                [
+                    "unknown",
+                    f"{u_index:.1f}",
+                    "-" if u_cost is None else f"{u_cost:.2f}",
+                    "-",
+                    "- not selectable",
+                ]
+            )
         has_measured = any(
             finite(record.get("index")) is not None for record in measured.values()
         )
@@ -5180,7 +5196,8 @@ def print_depth_detail(top, style=None):
                 "cand": cand,
                 "default": default,
                 "rows": rows,
-                "has_records": bool(records),
+                "has_table": bool(records) or has_unlabeled,
+                "has_unlabeled": has_unlabeled,
                 "missing_default": (
                     bool(default)
                     and default in efforts
@@ -5238,12 +5255,8 @@ def print_depth_detail(top, style=None):
             f"{style.dim(pricing)}   "
             f"{style.dim('default:')} {block['default'] or '-'}"
         )
-        note = unlabeled_note(cand.get("quality_unlabeled"))
-        if note:
-            print("   " + style.dim(note))
-        if not block["has_records"]:
-            if not note:
-                print("   " + style.dim("no AA depth data"))
+        if not block["has_table"]:
+            print("   " + style.dim("no AA depth data"))
             continue
         if block["missing_default"]:
             print(f"   AA has no {block['default']} record for this model.")
@@ -5251,6 +5264,14 @@ def print_depth_detail(top, style=None):
         emit_rule()
         for row in block["rows"]:
             emit_row(row)
+        if block["has_unlabeled"]:
+            print(
+                "   "
+                + style.dim(
+                    "unknown = measured without an effort label; reference only, "
+                    "may not match a selectable effort."
+                )
+            )
 
     print()
     width = max(len(legend_plain(term)) for term, _ in DEPTH_LEGEND)
