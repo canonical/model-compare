@@ -170,13 +170,18 @@ Per-source matching and `as_of` semantics:
    the github.io host 301s to plain http — an unauthenticated downgrade on
    ranking-critical data — so the direct https URL is used deliberately).
    The values were produced by a keyed CI run, so hydration is an exact
-   catalog-id join with no re-matching. Gates: `schema_version` must be
+   catalog-id join with no re-matching across both `models` and enriched
+   `filtered` entries (plain `filtered` stubs without quality/reasoning keys are
+   skipped; duplicate ids within or across `models` and `filtered` fail closed).
+   Gates: `schema_version` must be
    exactly 6 (anything else — a v2–v5 artifact or a future version — warns
    and hydrates no quality rather than mixing quality semantics); rows keep
    their recorded `quality_as_of` and `quality_effort`. Because the catalog
    carries every depth record, an unkeyed run re-selects the candidate's
    quality at its best measured selectable effort even when the keyed run's
-   support metadata differed; schedule rows instead use the entry's recorded
+   support metadata differed (including when relaxing filters locally via
+   `--no-zdr`, `--min-context`, `--no-require-tools`, or `--include-batch`);
+   schedule rows instead use the entry's recorded
    quality and effort (see the catalog contract). The
    row labels are the keyed CI run's row-level truth inside the artifact
    (`aa`/`openrouter` — a real catalog row never carries `catalog`); the
@@ -185,7 +190,8 @@ Per-source matching and `as_of` semantics:
    the row's own label. A `generated_at` older than 14 days warns but is
    used — the records' `as_of` makes the staleness visible downstream (the
    check runs only when rows actually hydrate). Any shape surprise — a non-dict
-   document, a non-list `models`, a matched row whose quality is not a
+   document, a non-list `models` or `filtered`, duplicate ids, a matched row
+   whose quality is not a
    finite number — skips the **whole artifact** with a warning: never a
    partial hydration, never a raise; one malformed row means this is not
    the artifact we think it is. A transport failure returns None; a
@@ -208,10 +214,14 @@ Per-source matching and `as_of` semantics:
 AA also returns some rows with no effort label at all (no name
 parenthetical, no slug suffix — "GLM-5.3-Flash"). Such a row is not a depth
 record: the index cannot be tied to a selectable effort, so it never fills
-`QUAL` and never enters the weighted score. It is carried as
-`reasoning.aa_unlabeled` (`index`, `cost_per_task_usd`, `source`, `as_of`)
-and shown in the CLI and site depth detail as a reference, with a note that
-a selectable effort may score differently. `QUAL` stays `-`.
+`QUAL` and never enters the weighted score (`quality` and `quality_effort` stay
+null). It is carried as `reasoning.aa_unlabeled` (`index`,
+`cost_per_task_usd`, `source`, `as_of`). In presentation, `DEPTH` displays
+`unknown`, the Simple view and website deals `QUALITY`/`QUAL` cells display
+`- · unknown`, and both CLI `--depths` and the site's depth detail table
+append a trailing `unknown` row (not selectable, `vs default` `-`) with a caveat
+below the table that a selectable effort may score differently. `QUAL` itself
+stays `-`.
 
 Drift is always winner-vs-OR, and only like-for-like: the comparison is
 valid only when both sides are non-reasoning. When the winner is `aa` or
@@ -260,9 +270,9 @@ Cache keys pin the shapes: `aa-intelligence-v4` (one record per measured
 effort: `id`, `name`, `slug`, `base`, `effort`, `index`, `cost_per_task`,
 `as_of`, plus the envelope's `intelligence_index_version`),
 `openrouter-frontend-aa-v2` (slug-keyed records
-with `as_of`), `published-catalog` (the hydration envelope). Payloads
-cached under earlier keys predate those fields and are never read. The
-source label `api` was renamed `aa` with the reconciliation; consumers
+with `as_of`), `published-catalog-v2` (the hydration envelope, including enriched
+`filtered` entries). Payloads cached under earlier keys predate those fields and
+are never read. The source label `api` was renamed `aa` with the reconciliation; consumers
 (`web/build_site_data.py`) accept exactly `aa`/`catalog`/`openrouter`.
 Models without a resolved record stay quality-blind and rank on
 price/context/age only; `--quality-ref` controls how generous the quality
@@ -607,9 +617,17 @@ The other per-model additive blocks:
   `require_parameters`/`zdr`/`data_collection` policy itself.
 
 `filtered` entries are `{"id", "name", "reasons"}` plus optional additive
-keys (`annotations` — a dropped model's stale cached annotations, marked
-`"stale": true`, display-only); the reason keys are the same strings the
-tool counts internally:
+keys: `annotations` (a dropped model's stale cached annotations, marked
+`"stale": true`, display-only) and, sparsely when the model has AA/quality,
+depth, unlabeled AA, or OpenRouter benchmark data, the same atomic 7-key
+quality/reasoning block carried by `models` entries (`aa`, `quality`,
+`quality_match`, `quality_as_of`, `quality_drift`, `quality_effort`,
+`reasoning`). Router aliases (`~` ids) and entries with zero AA data stay bare
+stubs without the block; non-default `--reasoning-effort` gates
+`filtered[].quality`/`quality_effort` to null when unsupported while still
+publishing all measured `reasoning.depths`, and `sources.aa` counts remain
+strictly candidate-scoped (`models` only). The reason keys are the same strings
+the tool counts internally:
 
 ```
 malformed id, context, pricing, schedule, free, batch, no discount, not ZDR,
