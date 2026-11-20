@@ -102,9 +102,9 @@ REASONING_EFFORT_CHOICES = ("default",) + tuple(reversed(REASONING_GATEWAY_EFFOR
 # unauthenticated downgrade on ranking-critical data; the https direct URL is
 # verified 200 application/json. Do not point this back at github.io.
 QUALITY_CATALOG_URL = "https://model-compare.dev/catalog.json"
-# Cache key for the hydration envelope {"by_id", "generated_at",
-# "schema_version"}. Only usable (non-empty by_id) results are ever written.
-QUALITY_CATALOG_CACHE = "published-catalog"
+# Cache key for the hydration envelope {"by_id", "depths_by_id", "generated_at",
+# "schedules_by_id", "schema_version"}. Only usable results are ever written.
+QUALITY_CATALOG_CACHE = "published-catalog-v2"
 # A published catalog generated more than this many days ago is stale:
 # warn but use -- the records' as_of makes the staleness visible downstream.
 QUALITY_CATALOG_MAX_AGE_DAYS = 14
@@ -1352,15 +1352,141 @@ def _catalog_index(value) -> float | None:
     return index
 
 
+def _parse_catalog_v6_entry(entry: dict, by_id: dict, depths_by_id: dict) -> bool:
+    """Parse one catalog v6 models/filtered entry into by_id and depths_by_id.
+
+    Returns False (after warning) on any malformed field so the caller fails
+    closed for the whole artifact.
+    """
+    model_id = entry["id"]
+    quality = entry.get("quality")
+    match = entry.get("quality_match")
+    if not (match is None and quality is None):
+        if not (isinstance(match, str) and match):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        index = _catalog_index(quality)
+        if index is None:
+            warn("published catalog returned an unexpected response shape")
+            return False
+        effort = entry.get("quality_effort")
+        if effort is not None and not (isinstance(effort, str) and effort):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        recorded = entry.get("quality_as_of")
+        by_id[model_id] = {
+            "index": index,
+            "source": match,
+            "as_of": recorded if isinstance(recorded, str) and recorded else None,
+            "effort": effort,
+        }
+    reasoning = entry.get("reasoning")
+    if reasoning is None:
+        return True
+    if not isinstance(reasoning, dict):
+        warn("published catalog returned an unexpected response shape")
+        return False
+    default_effort = reasoning.get("default_effort")
+    if default_effort is not None and not isinstance(default_effort, str):
+        warn("published catalog returned an unexpected response shape")
+        return False
+    raw_depths = reasoning.get("depths")
+    if raw_depths is None:
+        raw_depths = []
+    if not isinstance(raw_depths, list):
+        warn("published catalog returned an unexpected response shape")
+        return False
+    depths: dict = {}
+    for depth in raw_depths:
+        if not isinstance(depth, dict):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        effort = depth.get("effort")
+        if not (isinstance(effort, str) and effort):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        index = _catalog_index(depth.get("index"))
+        if index is None:
+            warn("published catalog returned an unexpected response shape")
+            return False
+        cost = depth.get("cost_per_task_usd")
+        if cost is not None:
+            cost = _finite_cost(cost)
+            if cost is None:
+                warn("published catalog returned an unexpected response shape")
+                return False
+        source = depth.get("source")
+        if not (isinstance(source, str) and source):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        as_of = depth.get("as_of")
+        if as_of is not None and not isinstance(as_of, str):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        if effort in depths:
+            # Duplicate efforts are ambiguous: fail closed, never guess.
+            warn("published catalog returned an unexpected response shape")
+            return False
+        depths[effort] = {
+            "effort": effort,
+            "index": index,
+            "cost_per_task_usd": cost,
+            "source": source,
+            "as_of": as_of if as_of else None,
+        }
+    unlabeled = reasoning.get("aa_unlabeled")
+    if unlabeled is not None:
+        if not isinstance(unlabeled, dict):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        if any(key not in CATALOG_UNLABELED_KEYS for key in unlabeled):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        if any(key not in unlabeled for key in CATALOG_UNLABELED_KEYS):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        index = _catalog_index(unlabeled.get("index"))
+        if index is None:
+            warn("published catalog returned an unexpected response shape")
+            return False
+        cost = unlabeled.get("cost_per_task_usd")
+        if cost is not None:
+            cost = _finite_cost(cost)
+            if cost is None:
+                warn("published catalog returned an unexpected response shape")
+                return False
+        source = unlabeled.get("source")
+        if not (isinstance(source, str) and source):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        as_of = unlabeled.get("as_of")
+        if as_of is not None and not isinstance(as_of, str):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        unlabeled = {
+            "index": index,
+            "cost_per_task_usd": cost,
+            "source": source,
+            "as_of": as_of if as_of else None,
+        }
+    depths_by_id[model_id] = {
+        "default_effort": default_effort if default_effort else None,
+        "depths": depths,
+        "unlabeled": unlabeled,
+    }
+    return True
+
+
 def _parse_catalog_v6(doc) -> tuple[dict, dict]:
     """Pure parser: a published catalog v6 document -> (by_id, depths_by_id).
 
-    by_id maps id -> {"index", "source", "as_of", "effort"} for the model's
-    main quality (the index at its best selectable depth). The
-    depth map maps id -> {"default_effort", "depths": {effort: record},
-    "unlabeled": record-or-None} for the model's full measured depth list
-    and, when AA measured it without an effort label, the display-only
-    reference; resolve_quality re-selects from it using the
+    Hydrates both ``models`` and enriched ``filtered`` entries (plain stubs in
+    ``filtered`` are skipped). ``by_id`` maps id -> {"index", "source",
+    "as_of", "effort"} for the model's main quality (the index at its best
+    selectable depth). ``depths_by_id`` maps id -> {"default_effort",
+    "depths": {effort: record}, "unlabeled": record-or-None} for the model's
+    full measured depth list and, when AA measured it without an effort label,
+    the display-only reference; resolve_quality re-selects from it using the
     best-selectable-depth rules and the unkeyed run's support data.
 
     Gates (design: failure modes):
@@ -1369,11 +1495,12 @@ def _parse_catalog_v6(doc) -> tuple[dict, dict]:
       "published catalog schema vX, expected 6; skipping hydration" and
       yield empty maps. Mixing semantics is never allowed.
     - Any shape surprise -- a non-dict document, a non-int schema_version,
-      a non-list models, a row without a usable id, a main quality that is
-      not finite/in-range, or malformed depth data -- warns and yields
-      empty maps for the WHOLE artifact. Never a partial hydration, never
-      a raise: the catalog is machine-generated, so one malformed row
-      means this is not the artifact we think it is.
+      a non-list models/filtered, a row without a usable id, duplicate ids
+      within or across models/filtered, a main quality that is not
+      finite/in-range, or malformed depth data -- warns and yields empty maps
+      for the WHOLE artifact. Never a partial hydration, never a raise: the
+      catalog is machine-generated, so one malformed row means this is not
+      the artifact we think it is.
     - Rows with quality None and quality_match None are legitimate
       unmatched models; they are skipped in by_id but their depth block is
       still parsed (a model can have measured depths without a main score).
@@ -1399,131 +1526,46 @@ def _parse_catalog_v6(doc) -> tuple[dict, dict]:
     if not isinstance(models, list):
         warn("published catalog returned an unexpected response shape")
         return {}, {}
+    filtered = doc.get("filtered")
+    if filtered is not None and not isinstance(filtered, list):
+        warn("published catalog returned an unexpected response shape")
+        return {}, {}
     by_id: dict = {}
     depths_by_id: dict = {}
+    seen_ids: set[str] = set()
     for entry in models:
         if not isinstance(entry, dict):
             warn("published catalog returned an unexpected response shape")
             return {}, {}
         model_id = entry.get("id")
-        if not (isinstance(model_id, str) and model_id):
+        if not (isinstance(model_id, str) and model_id) or model_id in seen_ids:
             warn("published catalog returned an unexpected response shape")
             return {}, {}
-        quality = entry.get("quality")
-        match = entry.get("quality_match")
-        if not (match is None and quality is None):
-            if not (isinstance(match, str) and match):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            index = _catalog_index(quality)
-            if index is None:
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            effort = entry.get("quality_effort")
-            if effort is not None and not (isinstance(effort, str) and effort):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            recorded = entry.get("quality_as_of")
-            by_id[model_id] = {
-                "index": index,
-                "source": match,
-                "as_of": recorded if isinstance(recorded, str) and recorded else None,
-                "effort": effort,
-            }
-        reasoning = entry.get("reasoning")
-        if reasoning is None:
+        seen_ids.add(model_id)
+        if not _parse_catalog_v6_entry(entry, by_id, depths_by_id):
+            return {}, {}
+    for entry in filtered or []:
+        if not isinstance(entry, dict):
+            warn("published catalog returned an unexpected response shape")
+            return {}, {}
+        model_id = entry.get("id")
+        if not (isinstance(model_id, str) and model_id) or model_id in seen_ids:
+            warn("published catalog returned an unexpected response shape")
+            return {}, {}
+        seen_ids.add(model_id)
+        if not any(
+            key in entry
+            for key in (
+                "quality",
+                "quality_match",
+                "quality_effort",
+                "quality_as_of",
+                "reasoning",
+            )
+        ):
             continue
-        if not isinstance(reasoning, dict):
-            warn("published catalog returned an unexpected response shape")
+        if not _parse_catalog_v6_entry(entry, by_id, depths_by_id):
             return {}, {}
-        default_effort = reasoning.get("default_effort")
-        if default_effort is not None and not isinstance(default_effort, str):
-            warn("published catalog returned an unexpected response shape")
-            return {}, {}
-        raw_depths = reasoning.get("depths")
-        if raw_depths is None:
-            raw_depths = []
-        if not isinstance(raw_depths, list):
-            warn("published catalog returned an unexpected response shape")
-            return {}, {}
-        depths: dict = {}
-        for depth in raw_depths:
-            if not isinstance(depth, dict):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            effort = depth.get("effort")
-            if not (isinstance(effort, str) and effort):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            index = _catalog_index(depth.get("index"))
-            if index is None:
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            cost = depth.get("cost_per_task_usd")
-            if cost is not None:
-                cost = _finite_cost(cost)
-                if cost is None:
-                    warn("published catalog returned an unexpected response shape")
-                    return {}, {}
-            source = depth.get("source")
-            if not (isinstance(source, str) and source):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            as_of = depth.get("as_of")
-            if as_of is not None and not isinstance(as_of, str):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            if effort in depths:
-                # Duplicate efforts are ambiguous: fail closed, never guess.
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            depths[effort] = {
-                "effort": effort,
-                "index": index,
-                "cost_per_task_usd": cost,
-                "source": source,
-                "as_of": as_of if as_of else None,
-            }
-        unlabeled = reasoning.get("aa_unlabeled")
-        if unlabeled is not None:
-            if not isinstance(unlabeled, dict):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            if any(key not in CATALOG_UNLABELED_KEYS for key in unlabeled):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            if any(key not in unlabeled for key in CATALOG_UNLABELED_KEYS):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            index = _catalog_index(unlabeled.get("index"))
-            if index is None:
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            cost = unlabeled.get("cost_per_task_usd")
-            if cost is not None:
-                cost = _finite_cost(cost)
-                if cost is None:
-                    warn("published catalog returned an unexpected response shape")
-                    return {}, {}
-            source = unlabeled.get("source")
-            if not (isinstance(source, str) and source):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            as_of = unlabeled.get("as_of")
-            if as_of is not None and not isinstance(as_of, str):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            unlabeled = {
-                "index": index,
-                "cost_per_task_usd": cost,
-                "source": source,
-                "as_of": as_of if as_of else None,
-            }
-        depths_by_id[model_id] = {
-            "default_effort": default_effort if default_effort else None,
-            "depths": depths,
-            "unlabeled": unlabeled,
-        }
     return by_id, depths_by_id
 
 
@@ -3482,6 +3524,7 @@ def resolve_quality(
     unlabeled_lookup=None,
     catalog_depths=None,
     requested_effort="default",
+    enforce_effort_support=False,
 ):
     """Per-candidate quality records: AA API primary, catalog next, OR last.
 
@@ -3536,6 +3579,17 @@ def resolve_quality(
         cand.pop("quality_unlabeled", None)
         record = None
         if depth_mode:
+            reasoning_meta = (
+                cand.get("reasoning")
+                if isinstance(cand.get("reasoning"), dict)
+                else None
+            )
+            effort_allowed = (
+                not enforce_effort_support
+                or requested_effort == "default"
+                or supports_effort(reasoning_meta, requested_effort)
+                or requested_effort == (reasoning_meta or {}).get("default_effort")
+            )
             default_effort = cand.get("default_effort")
             effort = (
                 requested_effort if requested_effort != "default" else default_effort
@@ -3544,42 +3598,47 @@ def resolve_quality(
             group = _depth_group(cand, depth_lookup) if depth_lookup else None
             if group is not None:
                 measured = _ordered_depth_records(group)
-                selected_effort = (
-                    effort
-                    if requested_effort != "default"
-                    else select_default_depth(cand, group)
-                )
-                depth_record = group.get(selected_effort) if selected_effort else None
-                if isinstance(depth_record, dict):
-                    record = {
-                        "index": depth_record["index"],
-                        "source": "aa",
-                        "as_of": depth_record.get("as_of"),
-                        "effort": depth_record.get("effort") or selected_effort,
-                    }
+                if effort_allowed:
+                    selected_effort = (
+                        effort
+                        if requested_effort != "default"
+                        else select_default_depth(cand, group)
+                    )
+                    depth_record = (
+                        group.get(selected_effort) if selected_effort else None
+                    )
+                    if isinstance(depth_record, dict):
+                        record = {
+                            "index": depth_record["index"],
+                            "source": "aa",
+                            "as_of": depth_record.get("as_of"),
+                            "effort": depth_record.get("effort") or selected_effort,
+                        }
             if record is None and catalog_depths is not None:
                 catalog_entry = catalog_depths.get(cand["id"])
                 if isinstance(catalog_entry, dict):
                     catalog_group = catalog_entry.get("depths")
                     if isinstance(catalog_group, dict):
                         measured = _ordered_depth_records(catalog_group)
-                        selected_effort = (
-                            effort
-                            if requested_effort != "default"
-                            else select_default_depth(cand, catalog_group)
-                        )
-                        depth_record = (
-                            catalog_group.get(selected_effort)
-                            if selected_effort
-                            else None
-                        )
-                        if isinstance(depth_record, dict):
-                            record = {
-                                "index": depth_record["index"],
-                                "source": "catalog",
-                                "as_of": depth_record.get("as_of"),
-                                "effort": depth_record.get("effort") or selected_effort,
-                            }
+                        if effort_allowed:
+                            selected_effort = (
+                                effort
+                                if requested_effort != "default"
+                                else select_default_depth(cand, catalog_group)
+                            )
+                            depth_record = (
+                                catalog_group.get(selected_effort)
+                                if selected_effort
+                                else None
+                            )
+                            if isinstance(depth_record, dict):
+                                record = {
+                                    "index": depth_record["index"],
+                                    "source": "catalog",
+                                    "as_of": depth_record.get("as_of"),
+                                    "effort": depth_record.get("effort")
+                                    or selected_effort,
+                                }
             reasoning = cand.get("reasoning")
             is_non_reasoning = (
                 isinstance(reasoning, dict) and reasoning.get("is_reasoning") is False
@@ -3587,7 +3646,12 @@ def resolve_quality(
             fallback_effort = (
                 effort if requested_effort != "default" else default_effort
             )
-            if record is None and is_non_reasoning and fallback_effort == "none":
+            if (
+                effort_allowed
+                and record is None
+                and is_non_reasoning
+                and fallback_effort == "none"
+            ):
                 bench = aa_by_id.get(base_model_id(cand["id"]))
                 intelligence = bench.get("intelligence_index") if bench else None
                 if intelligence is not None:
@@ -4438,11 +4502,25 @@ def _published_reasoning_block(cand):
     }
 
 
+def _has_unlabeled_aa(cand) -> bool:
+    """True when cand carries a finite display-only unlabeled AA index."""
+    rec = cand.get("quality_unlabeled")
+    if not isinstance(rec, dict):
+        return False
+    idx = rec.get("index")
+    if not isinstance(idx, (int, float)) or isinstance(idx, bool):
+        return False
+    try:
+        return math.isfinite(float(idx))
+    except OverflowError:
+        return False
+
+
 def fmt_depth(cand) -> str:
     """DEPTH cell: the effort QUAL was measured at; ``*`` is informational."""
     effort = (cand.get("quality_record") or {}).get("effort")
     if not effort:
-        return "-"
+        return "unknown" if _has_unlabeled_aa(cand) else "-"
     return f"{effort}*" if effort == _display_default_effort(cand) else effort
 
 
@@ -4680,14 +4758,15 @@ LEGENDS = {
             "QUALITY",
             [
                 "AA intelligence index at the model's best measured selectable depth",
-                '({d:default}; {c:--reasoning-effort} overrides); {d:"-"} = unknown, scores 0',
+                '({d:default}; {c:--reasoning-effort} overrides); {d:"-"} = no AA measurement at all, scores 0',
             ],
         ),
         (
             "DEPTH",
             [
                 'reasoning effort QUAL was measured at; {y:"*"} = OpenRouter\'s default (informational)',
-                "{d:-} = no known effort; {c:--depths} shows the depth detail",
+                '{d:"-"} = no AA measurement at all; {c:--depths} shows the depth detail',
+                "{d:unknown} = AA measured without an effort label (reference only; see {c:--depths})",
             ],
         ),
         (
@@ -4725,7 +4804,9 @@ LEGENDS = {
             "QUALITY",
             [
                 "AA intelligence index at the model's best measured selectable depth",
-                "{d:'-'} = unknown, scores 0",
+                '{d:"-"} = no AA measurement at all, scores 0',
+                "{d:- · unknown} = AA measured without an effort label",
+                "(not scored; see {c:--depths})",
                 "suffix after · names the effort used for QUAL; this view has no",
                 'DEPTH column or {y:"*"} marker',
             ],
@@ -4766,6 +4847,8 @@ def table_cells(cand, rank):
     if effort and cand["quality"] is not None:
         # Simple view has no DEPTH column; the effort rides on QUALITY.
         quality_cell += f" · {effort}"
+    elif cand["quality"] is None and _has_unlabeled_aa(cand):
+        quality_cell = "- · unknown"
     return {
         "RANK": str(rank),
         "MODEL": display_text(cand["id"]),
@@ -4851,7 +4934,9 @@ def print_table(
                     body = style.green(body)
             elif rank == 1:
                 body = style.green(body)
-            elif col in ("QUAL", "QUALITY") and row[col] == "-":
+            elif col in ("QUAL", "QUALITY") and row[col] in ("-", "- · unknown"):
+                body = style.dim(body)
+            elif col == "DEPTH" and row[col] == "unknown":
                 body = style.dim(body)
             cells.append(body + (style.yellow("!") if risk_marker else ""))
         print("  ".join(cells))
@@ -4994,10 +5079,9 @@ DEPTH_LEGEND = (
     ),
     ("OR $/M", ["constant across depths (the title line's per-listing price)"]),
     (
-        "(no label)",
+        "unknown",
         [
-            "an AA index measured without an effort label is a reference",
-            "only; it never fills QUAL",
+            "AA index measured without an effort label; reference only, never fills QUAL",
         ],
     ),
 )
@@ -5007,10 +5091,10 @@ def print_depth_detail(top, style=None):
     """Per-model AA depth detail: measured scores and selectable variants.
 
     One block per model in the given (rank) order, listing the union of
-    OpenRouter-supported and AA-measured efforts, deepest first. Models with
-    no measured depths get a single ``no AA depth data`` line, unless AA
-    measured them without an effort label: that index is shown with a
-    reference-only caveat instead. Display only: AA $/task never enters the
+    OpenRouter-supported and AA-measured efforts, deepest first, followed by an
+    ``unknown`` row when AA measured the model without an effort label. Models
+    with neither measured depths nor an unlabeled AA reference get a single
+    ``no AA depth data`` line. Display only: AA $/task never enters the
     weighted score.
     """
     if not top:
@@ -5032,26 +5116,6 @@ def print_depth_detail(top, style=None):
             return (AA_EFFORT_ORDER.index(effort), effort)
         except ValueError:
             return (len(AA_EFFORT_ORDER), effort or "")
-
-    def unlabeled_note(record):
-        """One line for an AA index measured without an effort label.
-
-        Display only: the number cannot fill QUAL, so the note says what it
-        is and warns that a selectable effort may score differently.
-        """
-        if not isinstance(record, dict):
-            return None
-        index = finite(record.get("index"))
-        if index is None:
-            return None
-        cost = finite(record.get("cost_per_task_usd"))
-        text = f"AA index {index:.1f} without an effort label"
-        if cost is not None:
-            text += f" (AA ${cost:.2f} per task)"
-        return (
-            text + "; reference only, may not be the quality you get at a "
-            "selectable effort."
-        )
 
     blocks = []
     for rank, cand in enumerate(top, 1):
@@ -5107,6 +5171,22 @@ def print_depth_detail(top, style=None):
                     select,
                 ]
             )
+        unlabeled = cand.get("quality_unlabeled")
+        u_index = (
+            finite(unlabeled.get("index")) if isinstance(unlabeled, dict) else None
+        )
+        has_unlabeled = u_index is not None
+        if has_unlabeled:
+            u_cost = finite(unlabeled.get("cost_per_task_usd"))
+            rows.append(
+                [
+                    "unknown",
+                    f"{u_index:.1f}",
+                    "-" if u_cost is None else f"{u_cost:.2f}",
+                    "-",
+                    "- not selectable",
+                ]
+            )
         has_measured = any(
             finite(record.get("index")) is not None for record in measured.values()
         )
@@ -5116,7 +5196,8 @@ def print_depth_detail(top, style=None):
                 "cand": cand,
                 "default": default,
                 "rows": rows,
-                "has_records": bool(records),
+                "has_table": bool(records) or has_unlabeled,
+                "has_unlabeled": has_unlabeled,
                 "missing_default": (
                     bool(default)
                     and default in efforts
@@ -5174,12 +5255,8 @@ def print_depth_detail(top, style=None):
             f"{style.dim(pricing)}   "
             f"{style.dim('default:')} {block['default'] or '-'}"
         )
-        note = unlabeled_note(cand.get("quality_unlabeled"))
-        if note:
-            print("   " + style.dim(note))
-        if not block["has_records"]:
-            if not note:
-                print("   " + style.dim("no AA depth data"))
+        if not block["has_table"]:
+            print("   " + style.dim("no AA depth data"))
             continue
         if block["missing_default"]:
             print(f"   AA has no {block['default']} record for this model.")
@@ -5187,6 +5264,14 @@ def print_depth_detail(top, style=None):
         emit_rule()
         for row in block["rows"]:
             emit_row(row)
+        if block["has_unlabeled"]:
+            print(
+                "   "
+                + style.dim(
+                    "unknown = measured without an effort label; reference only, "
+                    "may not match a selectable effort."
+                )
+            )
 
     print()
     width = max(len(legend_plain(term)) for term, _ in DEPTH_LEGEND)
@@ -5303,6 +5388,117 @@ def print_json(top):
     print(json.dumps(payload, indent=2))
 
 
+def _enrich_filtered_entries(
+    filtered,
+    aa_source,
+    aa_by_id,
+    catalog_quality,
+    *,
+    depth_lookup=None,
+    unlabeled_lookup=None,
+    catalog_depths=None,
+    reasoning_by_id=None,
+    requested_effort="default",
+):
+    """Attach the 7-key quality/reasoning block to filtered entries with AA data.
+
+    Non-mutating: returns new dicts sorted by id. Router aliases (~) and models
+    with no AA/quality/depth/unlabeled/OpenRouter-aa data remain plain stubs.
+    Never modifies candidate-scoped sources.aa counts.
+    """
+    sorted_filtered = sorted(filtered, key=lambda e: e["id"])
+    if depth_lookup is None and catalog_depths is None and unlabeled_lookup is None:
+        return sorted_filtered
+    effective_depth_lookup = (
+        {} if (depth_lookup is None and catalog_depths is None) else depth_lookup
+    )
+    pseudo_cands = []
+    pseudo_by_id = {}
+    for entry in sorted_filtered:
+        model_id = entry.get("id") or ""
+        if not model_id or model_id.startswith("~") or "/" not in model_id:
+            continue
+        raw_reasoning = (reasoning_by_id or {}).get(model_id)
+        reasoning = raw_reasoning if isinstance(raw_reasoning, dict) else None
+        pseudo = {
+            "id": model_id,
+            "name": entry.get("name") or model_id,
+            "reasoning": reasoning,
+            "default_effort": (reasoning or {}).get("default_effort"),
+            "supported_efforts": list((reasoning or {}).get("supported_efforts") or []),
+        }
+        pseudo_cands.append(pseudo)
+        pseudo_by_id[model_id] = pseudo
+    filtered_quality_by_id, filtered_source_by_id = resolve_quality(
+        pseudo_cands,
+        aa_by_id,
+        {},
+        [],
+        aa_source,
+        catalog_quality,
+        depth_lookup=effective_depth_lookup,
+        unlabeled_lookup=unlabeled_lookup,
+        catalog_depths=catalog_depths,
+        requested_effort=requested_effort,
+        enforce_effort_support=True,
+    )
+    out = []
+    for entry in sorted_filtered:
+        model_id = entry.get("id") or ""
+        pseudo = pseudo_by_id.get(model_id)
+        if pseudo is None:
+            out.append(dict(entry))
+            continue
+        record = filtered_quality_by_id.get(model_id)
+        bench = aa_by_id.get(base_model_id(model_id)) or {}
+        has_or_aa = any(
+            bench.get(key) is not None
+            for key in ("intelligence_index", "coding_index", "agentic_index")
+        )
+        unlabeled_rec = _published_unlabeled_record(pseudo)
+        depths = [
+            {
+                "effort": depth.get("effort"),
+                "index": depth.get("index"),
+                "cost_per_task_usd": depth.get("cost_per_task_usd"),
+                "source": depth.get("source"),
+                "as_of": depth.get("as_of"),
+            }
+            for depth in (pseudo.get("reasoning_depths") or [])
+            if isinstance(depth, dict)
+        ]
+        if record is None and not depths and unlabeled_rec is None and not has_or_aa:
+            out.append(dict(entry))
+            continue
+        reasoning = pseudo.get("reasoning")
+        reasoning = reasoning if isinstance(reasoning, dict) else {}
+        out.append(
+            {
+                **entry,
+                "aa": {
+                    "intelligence_index": bench.get("intelligence_index"),
+                    "coding_index": bench.get("coding_index"),
+                    "agentic_index": bench.get("agentic_index"),
+                },
+                "quality": record["index"] if record else None,
+                "quality_match": filtered_source_by_id.get(model_id),
+                "quality_as_of": record.get("as_of") if record else None,
+                "quality_drift": record.get("drift") if record else None,
+                "quality_effort": record.get("effort") if record else None,
+                "reasoning": {
+                    "default_effort": reasoning.get("default_effort"),
+                    "supported_efforts": reasoning.get("supported_efforts") or [],
+                    "default_enabled": reasoning.get("default_enabled"),
+                    "mandatory": reasoning.get("mandatory"),
+                    "supports_max_tokens": reasoning.get("supports_max_tokens"),
+                    "depths": depths,
+                    "aa_unlabeled": unlabeled_rec,
+                },
+            }
+        )
+    return out
+
+
 def build_catalog(
     args,
     models,
@@ -5325,6 +5521,7 @@ def build_catalog(
     reasoning_by_id=None,
     requested_effort="default",
     schedule_entries=None,
+    unlabeled_lookup=None,
 ):
     """Assemble the full-catalog document (see README "Catalog output").
 
@@ -5649,7 +5846,17 @@ def build_catalog(
         # history tabs, the highlights diff, best.txt) projects from or is
         # checked against it. models keeps its own balanced sort.
         "rankings": catalog_rankings(candidates, weights),
-        "filtered": sorted(filtered, key=lambda e: e["id"]),
+        "filtered": _enrich_filtered_entries(
+            filtered,
+            aa_source,
+            aa_by_id,
+            catalog_quality,
+            depth_lookup=depth_lookup,
+            unlabeled_lookup=unlabeled_lookup,
+            catalog_depths=catalog_depths,
+            reasoning_by_id=reasoning_by_id,
+            requested_effort=requested_effort,
+        ),
     }
 
 
@@ -6144,6 +6351,7 @@ def run(args, models, or_cached) -> int:
                 reasoning_by_id=reasoning_by_id,
                 requested_effort=args.reasoning_effort,
                 schedule_entries=schedule_entries,
+                unlabeled_lookup=unlabeled_lookup,
             )
         )
         return 0

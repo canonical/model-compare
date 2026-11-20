@@ -6900,6 +6900,44 @@ def test_resolve_quality_depth_explicit_effort_does_not_borrow_other_depth():
     assert source == {}
 
 
+def test_resolve_quality_enforce_effort_support_gates_explicit_effort():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "high",
+        "supported_efforts": ["high"],
+        "reasoning": {
+            "default_effort": "high",
+            "supported_efforts": ["high"],
+            "is_reasoning": True,
+        },
+    }
+    lookup = mc.build_aa_depth_lookup(
+        [
+            {
+                "id": "1",
+                "name": "Model A (Max)",
+                "slug": "model-a",
+                "index": 56.0,
+                "as_of": "t1",
+            },
+        ]
+    )
+    quality, source = mc.resolve_quality(
+        [cand],
+        {},
+        {},
+        {},
+        "AA API v2",
+        depth_lookup=lookup,
+        requested_effort="max",
+        enforce_effort_support=True,
+    )
+    assert quality == {}
+    assert source == {}
+    assert [d["effort"] for d in cand["reasoning_depths"]] == ["max"]
+
+
 def test_resolve_quality_depth_explicit_effort_selects_that_depth():
     cand = {
         "id": "acme/model-a",
@@ -8142,6 +8180,227 @@ def test_catalog_quality_by_id_malformed_aa_unlabeled_degrades(mutate, capsys):
     assert "unexpected response shape" in capsys.readouterr().err
 
 
+def test_quality_catalog_cache_key_is_v2():
+    assert mc.QUALITY_CATALOG_CACHE == "published-catalog-v2"
+
+
+def test_parse_catalog_v6_hydrates_filtered_entries_and_stubs(capsys):
+    stamp = "2026-11-20T09:24:16+00:00"
+    doc = _catalog_doc(
+        [
+            {
+                "id": "acme/cand",
+                "quality": 50.0,
+                "quality_match": "aa",
+                "quality_as_of": stamp,
+                "quality_effort": "high",
+                "reasoning": {
+                    "default_effort": "high",
+                    "supported_efforts": ["high"],
+                    "depths": [
+                        {
+                            "effort": "high",
+                            "index": 50.0,
+                            "cost_per_task_usd": 1.0,
+                            "source": "aa",
+                            "as_of": stamp,
+                        }
+                    ],
+                    "aa_unlabeled": None,
+                },
+            }
+        ],
+        schema_version=6,
+    )
+    doc["filtered"] = [
+        {"id": "acme/plain", "name": "Plain", "reasons": ["context"]},
+        {
+            "id": "anthropic/claude-fable-5.2",
+            "name": "Anthropic: Claude Fable 5.2",
+            "reasons": ["not ZDR"],
+            "aa": {
+                "intelligence_index": 64.6,
+                "coding_index": None,
+                "agentic_index": None,
+            },
+            "quality": 65.0,
+            "quality_match": "aa",
+            "quality_as_of": stamp,
+            "quality_drift": None,
+            "quality_effort": "max",
+            "reasoning": {
+                "default_effort": "high",
+                "supported_efforts": ["max", "high"],
+                "depths": [
+                    {
+                        "effort": "max",
+                        "index": 65.0,
+                        "cost_per_task_usd": 26.54,
+                        "source": "aa",
+                        "as_of": stamp,
+                    },
+                    {
+                        "effort": "high",
+                        "index": 62.0,
+                        "cost_per_task_usd": 15.0,
+                        "source": "aa",
+                        "as_of": stamp,
+                    },
+                ],
+                "aa_unlabeled": None,
+            },
+        },
+        {
+            "id": "acme/ctx-unlabeled",
+            "name": "Acme: Unlabeled",
+            "reasons": ["context"],
+            "aa": {
+                "intelligence_index": 27.8,
+                "coding_index": None,
+                "agentic_index": None,
+            },
+            "quality": None,
+            "quality_match": None,
+            "quality_as_of": None,
+            "quality_drift": None,
+            "quality_effort": None,
+            "reasoning": {
+                "default_effort": "max",
+                "supported_efforts": ["max", "low"],
+                "depths": [],
+                "aa_unlabeled": {
+                    "index": 27.8,
+                    "cost_per_task_usd": 0.58,
+                    "source": "aa",
+                    "as_of": stamp,
+                },
+            },
+        },
+    ]
+    by_id, depths_by_id = mc._parse_catalog_v6(doc)
+    assert capsys.readouterr().err == ""
+    assert "acme/plain" not in by_id
+    assert "acme/plain" not in depths_by_id
+    assert by_id["anthropic/claude-fable-5.2"]["index"] == 65.0
+    assert by_id["anthropic/claude-fable-5.2"]["effort"] == "max"
+    assert depths_by_id["anthropic/claude-fable-5.2"]["depths"]["high"]["index"] == 62.0
+    assert "acme/ctx-unlabeled" not in by_id
+    assert depths_by_id["acme/ctx-unlabeled"]["unlabeled"]["index"] == 27.8
+
+    # Absent filtered key remains valid for older/minimal v6 fixtures.
+    no_filtered = _catalog_doc([doc["models"][0]], schema_version=6)
+    no_filtered_by_id, _ = mc._parse_catalog_v6(no_filtered)
+    assert "acme/cand" in no_filtered_by_id
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda doc: doc.update(filtered="not-a-list"),
+        lambda doc: doc["filtered"].append("not-a-dict"),
+        lambda doc: doc["filtered"].append(
+            {"id": "", "name": "X", "reasons": ["context"]}
+        ),
+        lambda doc: doc["models"].append(dict(doc["models"][0])),
+        lambda doc: doc["filtered"].append(
+            {"id": "acme/cand", "name": "Dup Stub", "reasons": ["not ZDR"]}
+        ),
+        lambda doc: doc["filtered"].append(
+            {
+                "id": "acme/cand",
+                "name": "Dup Enriched",
+                "reasons": ["not ZDR"],
+                "quality": 40.0,
+                "quality_match": "aa",
+            }
+        ),
+        lambda doc: doc["filtered"].extend(
+            [
+                {"id": "acme/dup-f", "name": "A", "reasons": ["context"]},
+                {"id": "acme/dup-f", "name": "B", "reasons": ["batch"]},
+            ]
+        ),
+        lambda doc: doc["filtered"].append(
+            {
+                "id": "acme/bad-q",
+                "reasons": ["not ZDR"],
+                "quality": "bad",
+                "quality_match": "aa",
+            }
+        ),
+        lambda doc: doc["filtered"].append(
+            {
+                "id": "acme/out-of-range",
+                "reasons": ["not ZDR"],
+                "quality": 101,
+                "quality_match": "aa",
+            }
+        ),
+        lambda doc: doc["filtered"].append(
+            {
+                "id": "acme/no-match",
+                "reasons": ["not ZDR"],
+                "quality": 50.0,
+                "quality_match": None,
+            }
+        ),
+        lambda doc: doc["filtered"].append(
+            {
+                "id": "acme/empty-effort",
+                "reasons": ["not ZDR"],
+                "quality": 50.0,
+                "quality_match": "aa",
+                "quality_effort": "",
+            }
+        ),
+        lambda doc: doc["filtered"].append(
+            {
+                "id": "acme/bad-depth",
+                "reasons": ["not ZDR"],
+                "quality": None,
+                "quality_match": None,
+                "reasoning": {
+                    "default_effort": "high",
+                    "depths": [{"effort": "high", "index": "bad", "source": "aa"}],
+                },
+            }
+        ),
+        lambda doc: doc["filtered"].append(
+            {
+                "id": "acme/bad-unl",
+                "reasons": ["not ZDR"],
+                "quality": None,
+                "quality_match": None,
+                "reasoning": {
+                    "default_effort": "high",
+                    "depths": [],
+                    "aa_unlabeled": {"index": 27.8, "source": "aa"},
+                },
+            }
+        ),
+    ],
+)
+def test_parse_catalog_v6_rejects_malformed_or_duplicate_filtered(mutate, capsys):
+    doc = _catalog_doc(
+        [
+            {
+                "id": "acme/cand",
+                "quality": 50.0,
+                "quality_match": "aa",
+                "quality_as_of": "t1",
+                "quality_effort": "high",
+            }
+        ],
+        schema_version=6,
+    )
+    doc["filtered"] = []
+    mutate(doc)
+    by_id, depths_by_id = mc._parse_catalog_v6(doc)
+    assert by_id == {}
+    assert depths_by_id == {}
+    assert "unexpected response shape" in capsys.readouterr().err
+
+
 def test_fetch_quality_catalog_parses_schedule_entries(monkeypatch):
     """The published schedules array becomes an id -> recorded-provenance map.
 
@@ -9053,6 +9312,374 @@ def test_catalog_filtered_entries_and_sorting():
             doc["models"], key=lambda e: (-e["scores"]["overall"]["balanced"], e["id"])
         )
     ]
+
+
+def test_build_catalog_enriches_filtered_with_aa_and_unlabeled_sparsely():
+    args = make_args(min_context=1_000_000)
+    cand = _cand("acme/cand", 50.0)
+    cand.update(created=0.0, tool_calling=True, zdr=True, expired=False)
+    cand["quality_record"] = {
+        "index": 50.0,
+        "source": "aa",
+        "as_of": "t-aa",
+        "effort": "high",
+    }
+    cand["reasoning"] = {
+        "default_effort": "high",
+        "supported_efforts": ["high"],
+        "is_reasoning": True,
+    }
+    cand["reasoning_depths"] = [
+        {
+            "effort": "high",
+            "index": 50.0,
+            "cost_per_task_usd": 1.0,
+            "source": "aa",
+            "as_of": "t-aa",
+        }
+    ]
+    mc.compute_scores([cand], args, {"acme/cand": cand["quality_record"]})
+
+    filtered = [
+        {
+            "id": "anthropic/claude-fable-5.2",
+            "name": "Anthropic: Claude Fable 5.2",
+            "reasons": ["not ZDR"],
+        },
+        {
+            "id": "anthropic/claude-fable-5.2:batch",
+            "name": "Anthropic: Claude Fable 5.2 (batch)",
+            "reasons": ["batch"],
+        },
+        {
+            "id": "acme/unlabeled-ctx",
+            "name": "Acme: Unlabeled",
+            "reasons": ["context"],
+        },
+        {
+            "id": "acme/or-only",
+            "name": "Acme: OR Only",
+            "reasons": ["endpoint_fetch_failed"],
+        },
+        {
+            "id": "~anthropic/claude-fable-latest",
+            "name": "Anthropic: Claude Fable Latest",
+            "reasons": ["not ZDR"],
+        },
+        {
+            "id": "acme/no-aa",
+            "name": "Acme: No AA",
+            "reasons": ["context"],
+            "annotations": {"stale": True},
+        },
+    ]
+    orig_keys = {entry["id"]: set(entry.keys()) for entry in filtered}
+
+    aa_entries = [
+        {
+            "id": "fable-max",
+            "name": "Claude Fable 5.2 (Max)",
+            "slug": "claude-fable-5-2",
+            "creator": "Anthropic",
+            "index": 65.0,
+            "cost_per_task": 26.54,
+            "as_of": "t-aa",
+        },
+        {
+            "id": "fable-high",
+            "name": "Claude Fable 5.2 (High)",
+            "slug": "claude-fable-5-2-high",
+            "creator": "Anthropic",
+            "index": 62.0,
+            "cost_per_task": 15.0,
+            "as_of": "t-aa",
+        },
+        {
+            "id": "unl-1",
+            "name": "Unlabeled",
+            "slug": "unlabeled-ctx",
+            "creator": "Acme",
+            "index": 27.8,
+            "cost_per_task": 0.58,
+            "as_of": "t-aa",
+        },
+    ]
+    depth_lookup = mc.build_aa_depth_lookup(aa_entries)
+    unlabeled_lookup = mc.build_aa_unlabeled_lookup(aa_entries)
+    reasoning_by_id = {
+        "anthropic/claude-fable-5.2": {
+            "default_effort": "high",
+            "supported_efforts": ["max", "high"],
+            "default_enabled": None,
+            "mandatory": True,
+            "supports_max_tokens": False,
+            "is_reasoning": True,
+        },
+        "anthropic/claude-fable-5.2:batch": {
+            "default_effort": "high",
+            "supported_efforts": ["max", "high"],
+            "default_enabled": None,
+            "mandatory": True,
+            "supports_max_tokens": False,
+            "is_reasoning": True,
+        },
+        "acme/unlabeled-ctx": {
+            "default_effort": "max",
+            "supported_efforts": ["max", "low"],
+            "default_enabled": True,
+            "mandatory": True,
+            "supports_max_tokens": False,
+            "is_reasoning": True,
+        },
+        "acme/or-only": {
+            "default_effort": "high",
+            "supported_efforts": ["high"],
+            "default_enabled": None,
+            "mandatory": True,
+            "supports_max_tokens": False,
+            "is_reasoning": True,
+        },
+    }
+    aa_by_id = {
+        "anthropic/claude-fable-5.2": {
+            "intelligence_index": 64.6,
+            "coding_index": None,
+            "agentic_index": None,
+            "as_of": "20261109",
+        },
+        "acme/or-only": {
+            "intelligence_index": 31.2,
+            "coding_index": None,
+            "agentic_index": None,
+            "as_of": "20261101",
+        },
+    }
+
+    doc = mc.build_catalog(
+        args,
+        [make_model(id="acme/cand")],
+        [cand],
+        {"not ZDR": 2, "batch": 1, "context": 2, "endpoint_fetch_failed": 1},
+        filtered,
+        {},
+        {"acme/cand": cand["quality_record"]},
+        "AA API v2",
+        aa_by_id,
+        {"acme/cand": "aa"},
+        depth_lookup=depth_lookup,
+        unlabeled_lookup=unlabeled_lookup,
+        reasoning_by_id=reasoning_by_id,
+    )
+
+    # Caller's filtered dicts are never mutated in place.
+    for entry in filtered:
+        assert set(entry.keys()) == orig_keys[entry["id"]]
+
+    # sources.aa stays strictly candidate-scoped.
+    assert doc["sources"]["aa"]["matched_aa"] == 1
+    assert doc["sources"]["aa"]["matched_catalog"] == 0
+    assert doc["sources"]["aa"]["matched_openrouter"] == 0
+    assert doc["sources"]["aa"]["depth_rows"] == 1
+    assert doc["sources"]["aa"]["matched_depth"] == 1
+    assert doc["sources"]["aa"]["matched_default"] == 1
+
+    by_id = {e["id"]: e for e in doc["filtered"]}
+    fable = by_id["anthropic/claude-fable-5.2"]
+    assert fable["reasons"] == ["not ZDR"]
+    assert fable["quality"] == 65.0
+    assert fable["quality_match"] == "aa"
+    assert fable["quality_effort"] == "max"
+    assert fable["quality_as_of"] == "t-aa"
+    assert fable["quality_drift"] is None
+    assert fable["aa"]["intelligence_index"] == 64.6
+    assert [d["effort"] for d in fable["reasoning"]["depths"]] == ["max", "high"]
+    assert fable["reasoning"]["aa_unlabeled"] is None
+    for forbidden in ("pricing", "scores", "context", "endpoints", "steering"):
+        assert forbidden not in fable
+
+    batch = by_id["anthropic/claude-fable-5.2:batch"]
+    assert batch["quality"] == 65.0
+    assert batch["quality_effort"] == "max"
+    assert batch["aa"]["intelligence_index"] == 64.6
+
+    unl = by_id["acme/unlabeled-ctx"]
+    assert unl["quality"] is None
+    assert unl["quality_match"] is None
+    assert unl["quality_effort"] is None
+    assert unl["reasoning"]["aa_unlabeled"] == {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t-aa",
+    }
+
+    or_only = by_id["acme/or-only"]
+    assert or_only["aa"]["intelligence_index"] == 31.2
+    assert or_only["quality"] is None
+    assert or_only["reasoning"]["depths"] == []
+
+    # Router alias (~) and zero-AA entry remain lean stubs.
+    assert set(by_id["~anthropic/claude-fable-latest"]) == {"id", "name", "reasons"}
+    assert set(by_id["acme/no-aa"]) == {"id", "name", "reasons", "annotations"}
+
+
+def test_build_catalog_filtered_respects_explicit_reasoning_effort_gate():
+    args = make_args(reasoning_effort="max")
+    cand = _cand("acme/cand", 50.0)
+    cand.update(created=0.0, tool_calling=True, zdr=True, expired=False)
+    cand["quality_record"] = {
+        "index": 50.0,
+        "source": "aa",
+        "as_of": "t",
+        "effort": "max",
+    }
+    cand["reasoning"] = {"default_effort": "max", "supported_efforts": ["max"]}
+    cand["reasoning_depths"] = [
+        {
+            "effort": "max",
+            "index": 50.0,
+            "cost_per_task_usd": 1.0,
+            "source": "aa",
+            "as_of": "t",
+        }
+    ]
+    mc.compute_scores([cand], args, {"acme/cand": cand["quality_record"]})
+    depth_lookup = mc.build_aa_depth_lookup(
+        [
+            {
+                "id": "f-max",
+                "name": "Filtered Model (Max)",
+                "slug": "filtered-model",
+                "creator": "Acme",
+                "index": 70.0,
+                "cost_per_task": 2.0,
+                "as_of": "t",
+            }
+        ]
+    )
+    reasoning_by_id = {
+        "acme/filtered-model": {
+            "default_effort": "high",
+            "supported_efforts": ["high"],
+            "default_enabled": None,
+            "mandatory": True,
+            "supports_max_tokens": False,
+            "is_reasoning": True,
+        }
+    }
+    filtered = [
+        {
+            "id": "acme/filtered-model",
+            "name": "Acme: Filtered Model",
+            "reasons": ["reasoning effort"],
+        }
+    ]
+    doc = mc.build_catalog(
+        args,
+        [make_model(id="acme/cand")],
+        [cand],
+        {"reasoning effort": 1},
+        filtered,
+        {},
+        {"acme/cand": cand["quality_record"]},
+        "AA API v2",
+        {},
+        {"acme/cand": "aa"},
+        depth_lookup=depth_lookup,
+        unlabeled_lookup={},
+        reasoning_by_id=reasoning_by_id,
+        requested_effort="max",
+    )
+    entry = doc["filtered"][0]
+    assert entry["quality"] is None
+    assert entry["quality_match"] is None
+    assert entry["quality_effort"] is None
+    assert entry["reasoning"]["depths"] == [
+        {
+            "effort": "max",
+            "index": 70.0,
+            "cost_per_task_usd": 2.0,
+            "source": "aa",
+            "as_of": "t",
+        }
+    ]
+
+
+def test_build_catalog_without_depth_args_leaves_filtered_as_stubs():
+    args = make_args()
+    cand = _cand("acme/cand", 50.0)
+    cand.update(created=0.0, tool_calling=True, zdr=True, expired=False)
+    mc.compute_scores([cand], args, {})
+    filtered = [{"id": "acme/dropped", "name": "Acme: Dropped", "reasons": ["context"]}]
+    doc = mc.build_catalog(
+        args,
+        [make_model(id="acme/cand")],
+        [cand],
+        {"context": 1},
+        filtered,
+        {},
+        {},
+        None,
+        {"acme/dropped": {"intelligence_index": 40.0, "as_of": "20261101"}},
+        {},
+    )
+    assert doc["filtered"] == filtered
+
+
+def test_build_catalog_unlabeled_only_provided_keeps_depth_mode():
+    args = make_args()
+    cand = _cand("acme/cand", 50.0)
+    cand.update(created=0.0, tool_calling=True, zdr=True, expired=False)
+    mc.compute_scores([cand], args, {})
+    unlabeled_lookup = mc.build_aa_unlabeled_lookup(
+        [
+            {
+                "id": "u1",
+                "name": "Dropped Reasoner",
+                "slug": "dropped-reasoner",
+                "creator": "Acme",
+                "index": 33.0,
+                "cost_per_task": 0.4,
+                "as_of": "t",
+            }
+        ]
+    )
+    reasoning_by_id = {
+        "acme/dropped-reasoner": {
+            "default_effort": "high",
+            "supported_efforts": ["high"],
+            "default_enabled": None,
+            "mandatory": True,
+            "supports_max_tokens": False,
+            "is_reasoning": True,
+        }
+    }
+    filtered = [
+        {
+            "id": "acme/dropped-reasoner",
+            "name": "Acme: Dropped Reasoner",
+            "reasons": ["not ZDR"],
+        }
+    ]
+    # Even if depth_lookup and catalog_depths are None, passing unlabeled_lookup
+    # must stay in depth mode (never fall back to OR snapshot on a reasoning model).
+    doc = mc.build_catalog(
+        args,
+        [make_model(id="acme/cand")],
+        [cand],
+        {"not ZDR": 1},
+        filtered,
+        {},
+        {},
+        "AA API v2",
+        {"acme/dropped-reasoner": {"intelligence_index": 33.0, "as_of": "20261101"}},
+        {},
+        unlabeled_lookup=unlabeled_lookup,
+        reasoning_by_id=reasoning_by_id,
+    )
+    entry = doc["filtered"][0]
+    assert entry["quality"] is None
+    assert entry["reasoning"]["aa_unlabeled"]["index"] == 33.0
 
 
 def inverting_pool():
@@ -10805,6 +11432,190 @@ def test_run_unkeyed_uses_openrouter_only_for_models_catalog_lacks(monkeypatch, 
     assert rows["acme/uncovered"]["quality_index"] == 30.0
 
 
+def test_run_unkeyed_no_zdr_hydrates_filtered_reasoning_model_and_depths(
+    monkeypatch, capsys
+):
+    stamp = "2026-11-20T09:24:16+00:00"
+    fable = make_model(
+        id="anthropic/claude-fable-5.2",
+        name="Anthropic: Claude Fable 5.2",
+        context_length=1_000_000,
+        pricing={"prompt": "0.000008", "completion": "0.000040"},
+        reasoning={
+            "default_effort": "high",
+            "mandatory": True,
+            "supported_efforts": ["max", "xhigh", "high", "medium", "low"],
+        },
+    )
+    cand = make_model(
+        id="acme/zdr-cand",
+        name="Acme: ZDR Cand",
+        context_length=1_000_000,
+    )
+    small = make_model(
+        id="acme/small-ctx",
+        name="Acme: Small",
+        context_length=200_000,
+        reasoning={"default_effort": "high", "supported_efforts": ["high"]},
+    )
+    models = [cand, fable, small]
+    published_doc = _catalog_doc(
+        [
+            {
+                "id": "acme/zdr-cand",
+                "quality": 40.0,
+                "quality_match": "aa",
+                "quality_as_of": stamp,
+                "quality_effort": "high",
+                "reasoning": {
+                    "default_effort": "high",
+                    "supported_efforts": ["high"],
+                    "depths": [
+                        {
+                            "effort": "high",
+                            "index": 40.0,
+                            "cost_per_task_usd": 1.0,
+                            "source": "aa",
+                            "as_of": stamp,
+                        }
+                    ],
+                    "aa_unlabeled": None,
+                },
+            }
+        ],
+        schema_version=6,
+    )
+    published_doc["filtered"] = [
+        {
+            "id": "anthropic/claude-fable-5.2",
+            "name": "Anthropic: Claude Fable 5.2",
+            "reasons": ["not ZDR"],
+            "aa": {
+                "intelligence_index": 64.6,
+                "coding_index": None,
+                "agentic_index": None,
+            },
+            "quality": 65.0,
+            "quality_match": "aa",
+            "quality_as_of": stamp,
+            "quality_drift": None,
+            "quality_effort": "max",
+            "reasoning": {
+                "default_effort": "high",
+                "supported_efforts": ["max", "xhigh", "high", "medium", "low"],
+                "default_enabled": None,
+                "mandatory": True,
+                "supports_max_tokens": False,
+                "depths": [
+                    {
+                        "effort": "max",
+                        "index": 65.0,
+                        "cost_per_task_usd": 26.54,
+                        "source": "aa",
+                        "as_of": stamp,
+                    },
+                    {
+                        "effort": "high",
+                        "index": 62.0,
+                        "cost_per_task_usd": 15.0,
+                        "source": "aa",
+                        "as_of": stamp,
+                    },
+                ],
+                "aa_unlabeled": None,
+            },
+        },
+        {
+            "id": "acme/small-ctx",
+            "name": "Acme: Small",
+            "reasons": ["context"],
+            "aa": {
+                "intelligence_index": None,
+                "coding_index": None,
+                "agentic_index": None,
+            },
+            "quality": 51.5,
+            "quality_match": "aa",
+            "quality_as_of": stamp,
+            "quality_drift": None,
+            "quality_effort": "high",
+            "reasoning": {
+                "default_effort": "high",
+                "supported_efforts": ["high"],
+                "default_enabled": None,
+                "mandatory": False,
+                "supports_max_tokens": None,
+                "depths": [
+                    {
+                        "effort": "high",
+                        "index": 51.5,
+                        "cost_per_task_usd": 0.4,
+                        "source": "aa",
+                        "as_of": stamp,
+                    }
+                ],
+                "aa_unlabeled": None,
+            },
+        },
+    ]
+
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(
+        mc,
+        "fetch_openrouter_frontend",
+        lambda a: (
+            {},
+            {"acme/zdr-cand", "acme/small-ctx"},
+            {
+                "anthropic/claude-fable-5.2": {
+                    "intelligence_index": 64.6,
+                    "as_of": "20261109",
+                }
+            },
+            set(),
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        mc,
+        "fetch_json",
+        lambda url, *a, **k: published_doc if url == mc.QUALITY_CATALOG_URL else {},
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: [_endpoint()])
+
+    assert (
+        mc.run(make_args(no_zdr=True, min_context=1_000_000, json=True), models, False)
+        == 0
+    )
+    rows = {r["model"]: r for r in json.loads(capsys.readouterr().out)}
+    assert rows["anthropic/claude-fable-5.2"]["quality_index"] == 65.0
+    assert rows["anthropic/claude-fable-5.2"]["quality_effort"] == "max"
+    assert rows["anthropic/claude-fable-5.2"]["quality_source"] == "catalog"
+
+    assert (
+        mc.run(
+            make_args(
+                no_zdr=True,
+                min_context=1_000_000,
+                reasoning_effort="high",
+                json=True,
+            ),
+            models,
+            False,
+        )
+        == 0
+    )
+    high_rows = {r["model"]: r for r in json.loads(capsys.readouterr().out)}
+    assert high_rows["anthropic/claude-fable-5.2"]["quality_index"] == 62.0
+    assert high_rows["anthropic/claude-fable-5.2"]["quality_effort"] == "high"
+
+    assert mc.run(make_args(min_context=200_000, json=True), models, False) == 0
+    ctx_rows = {r["model"]: r for r in json.loads(capsys.readouterr().out)}
+    assert ctx_rows["acme/small-ctx"]["quality_index"] == 51.5
+    assert ctx_rows["acme/small-ctx"]["quality_source"] == "catalog"
+
+
 def test_run_keyed_aa_down_falls_to_openrouter_not_catalog(monkeypatch, capsys):
     # Keyed: an AA failure must degrade to the OR trio, and the catalog
     # fetcher must NEVER run -- a keyed CI/site build hydrating from the
@@ -11664,7 +12475,7 @@ def test_depth_detail_reports_missing_default_record(capsys):
 
 
 def test_depth_detail_shows_unlabeled_aa_reference(capsys):
-    cand = _cand("z-ai/glm-5.3-flash", 27.8)
+    cand = _cand("z-ai/glm-5.3-flash", 1.0)
     cand["reasoning"] = {
         "default_effort": "max",
         "supported_efforts": ["max", "high", "low"],
@@ -11679,17 +12490,26 @@ def test_depth_detail_shows_unlabeled_aa_reference(capsys):
     }
     mc.print_depth_detail([cand])
     out = capsys.readouterr().out
-    assert "AA index 27.8 without an effort label" in out
-    assert "AA $0.58 per task" in out
-    assert "reference only" in out
-    assert "may not be the quality you get at a selectable effort" in out
-    # The per-effort table is still absent, but the blanket "no data" line
-    # would contradict the reference above it.
+    lines = out.splitlines()
+    assert "effort" in out
+    assert "max*" in out
+    assert "high" in out
+    assert "low" in out
+    unknown_line = next(line for line in lines if line.strip().startswith("unknown "))
+    assert "27.8" in unknown_line
+    assert "0.58" in unknown_line
+    assert "- not selectable" in unknown_line
+    caveat_line = next(
+        line
+        for line in lines
+        if "unknown = measured without an effort label; reference only" in line
+    )
+    assert out.index(unknown_line) < out.index(caveat_line)
     assert "no AA depth data" not in out
 
 
 def test_depth_detail_unlabeled_reference_without_cost(capsys):
-    cand = _cand("z-ai/glm-5.3-flash", 27.8)
+    cand = _cand("z-ai/glm-5.3-flash", 1.0)
     cand["reasoning"] = {"default_effort": "max", "supported_efforts": ["max"]}
     cand["reasoning_depths"] = []
     cand["quality_unlabeled"] = {
@@ -11700,9 +12520,141 @@ def test_depth_detail_unlabeled_reference_without_cost(capsys):
     }
     mc.print_depth_detail([cand])
     out = capsys.readouterr().out
-    note_line = next(line for line in out.splitlines() if "AA index 27.8" in line)
-    assert "without an effort label" in note_line
-    assert "$" not in note_line
+    unknown_line = next(
+        line for line in out.splitlines() if line.strip().startswith("unknown ")
+    )
+    assert "27.8" in unknown_line
+    assert "- not selectable" in unknown_line
+    assert "$" not in unknown_line
+    assert "unknown = measured without an effort label" in out
+
+
+def test_fmt_depth_and_table_cells_for_unlabeled_aa():
+    cand = _cand("z-ai/glm-5.3-flash", 1.0)
+    cand["quality_unlabeled"] = {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    assert mc.fmt_depth(cand) == "unknown"
+    cells = mc.table_cells(cand, 2)
+    assert cells["DEPTH"] == "unknown"
+    assert cells["QUAL"] == "-"
+    assert cells["QUALITY"] == "- · unknown"
+
+    plain = _cand("acme/no-aa", 1.0)
+    assert mc.fmt_depth(plain) == "-"
+    plain_cells = mc.table_cells(plain, 3)
+    assert plain_cells["DEPTH"] == "-"
+    assert plain_cells["QUAL"] == "-"
+    assert plain_cells["QUALITY"] == "-"
+
+
+def test_print_table_dims_unknown_depth_and_simple_quality(capsys):
+    cands = _scored_candidates()
+    cands[1]["quality_unlabeled"] = {
+        "index": 27.8,
+        "cost_per_task_usd": 0.58,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    mc.print_table(
+        cands,
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+        detail="expert",
+    )
+    expert_out = capsys.readouterr().out
+    assert f"{mc.SGR_DIM}unknown{mc.SGR_RESET}" in expert_out
+
+    mc.print_table(
+        cands,
+        mc.PRIORITY_WEIGHTS["balanced"],
+        None,
+        style=mc.Style(True),
+        detail="simple",
+    )
+    simple_out = capsys.readouterr().out
+    assert f"{mc.SGR_DIM}- · unknown{mc.SGR_RESET}" in simple_out
+
+
+def test_print_table_legends_redefine_dash_and_explain_unknown(capsys):
+    cands = _scored_candidates()[:1]
+    mc.print_table(cands, mc.PRIORITY_WEIGHTS["balanced"], None, detail="expert")
+    expert = capsys.readouterr().out
+    assert '"-" = unknown' not in expert
+    assert "no known effort" not in expert
+    assert "no AA measurement at all" in expert
+    assert "unknown = AA measured without an effort label" in expert
+
+    mc.print_table(cands, mc.PRIORITY_WEIGHTS["balanced"], None, detail="simple")
+    simple = capsys.readouterr().out
+    assert "'-' = unknown" not in simple
+    assert "no AA measurement at all" in simple
+    assert "- · unknown = AA measured without an effort label" in simple
+
+
+def test_depth_detail_unknown_only_without_supported_efforts(capsys):
+    cand = _cand("nvidia/nemotron-3.5-lightning", 1.0)
+    cand["reasoning"] = {"default_effort": "reasoning", "supported_efforts": []}
+    cand["reasoning_depths"] = []
+    cand["quality_unlabeled"] = {
+        "index": 5.5,
+        "cost_per_task_usd": None,
+        "source": "aa",
+        "as_of": "t1",
+    }
+    mc.print_depth_detail([cand])
+    out = capsys.readouterr().out
+    assert "no AA depth data" not in out
+    unknown_line = next(
+        line for line in out.splitlines() if line.strip().startswith("unknown ")
+    )
+    assert "5.5" in unknown_line
+    assert "- not selectable" in unknown_line
+    assert "unknown = measured without an effort label" in out
+    assert "(no label)" not in out
+    assert any(
+        line.startswith("unknown  ") and "never fills QUAL" in line
+        for line in out.splitlines()
+    )
+
+
+def test_run_unlabeled_aa_keeps_json_qual_null_and_renders_unknown(monkeypatch, capsys):
+    models = [
+        make_model(
+            id="z-ai/glm-5.3-flash",
+            name="Z.AI: GLM 5.3 Flash",
+            reasoning={"default_effort": "max", "supported_efforts": ["max", "high"]},
+        )
+    ]
+    aa_entries = [
+        {
+            "id": "u1",
+            "name": "GLM 5.3 Flash",
+            "slug": "glm-5-3-flash",
+            "creator": "Z.AI",
+            "index": 27.8,
+            "cost_per_task": 0.58,
+            "as_of": "t1",
+        }
+    ]
+    _stub_quality_run(monkeypatch, models, aa_entries=aa_entries, catalog_raises=True)
+    assert mc.run(make_args(aa_api_key="k", json=True), models, False) == 0
+    (row,) = json.loads(capsys.readouterr().out)
+    assert row["quality_index"] is None
+    assert row["quality_effort"] is None
+    assert row["reasoning"]["aa_unlabeled"]["index"] == 27.8
+
+    _stub_quality_run(monkeypatch, models, aa_entries=aa_entries, catalog_raises=True)
+    assert mc.run(make_args(aa_api_key="k", depths=True), models, False) == 0
+    out = capsys.readouterr().out
+    table_row = next(line for line in out.splitlines() if "z-ai/glm-5.3-flash" in line)
+    assert "unknown" in table_row
+    assert "27.8" in out
+    assert "- not selectable" in out
 
 
 def test_depth_detail_heading_is_bold_and_capitalized(capsys):

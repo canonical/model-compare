@@ -295,7 +295,7 @@
         if (defaultEffort && measured[defaultEffort]) {
           defaultCost = finiteNumber(measured[defaultEffort].cost_per_task_usd);
         }
-        return efforts.map(function (effort) {
+        var rows = efforts.map(function (effort) {
           var record = measured[effort] || {};
           var index = finiteNumber(
             record.index === undefined ? record.quality_index : record.index,
@@ -327,11 +327,53 @@
             default: effort === defaultEffort,
           };
         });
+        var unlabeled = unlabeledRecord(row);
+        if (unlabeled) {
+          rows.push({
+            effort: "unknown",
+            index: unlabeled.index,
+            cost: unlabeled.cost,
+            ratio: null,
+            selectable: false,
+            selected: false,
+            default: false,
+            unlabeled: true,
+          });
+        }
+        return rows;
       }
 
-      // DEPTH cell: the effort QUAL was measured at, "*" on the default.
+      function unlabeledRecord(row) {
+        var record = row && row.reasoning && row.reasoning.aa_unlabeled;
+        var index = finiteNumber(record && record.index);
+        if (index === null) return null;
+        return {
+          index: index,
+          cost: finiteNumber(record.cost_per_task_usd),
+          as_of: record.as_of === undefined ? null : record.as_of,
+        };
+      }
+
+      function findCatalogEntry(modelId) {
+        if (!catalogData || !modelId) return null;
+        var lists = [catalogData.models, catalogData.filtered];
+        for (var k = 0; k < lists.length; k++) {
+          var list = lists[k];
+          if (!Array.isArray(list)) continue;
+          for (var j = 0; j < list.length; j++) {
+            if (list[j] && list[j].id === modelId) return list[j];
+          }
+        }
+        return null;
+      }
+
+      // DEPTH cell: the effort QUAL was measured at, "*" on the default,
+      // "unknown" when AA measured the model without an effort label.
       function fmtEffort(row) {
-        if (!row || !row.quality_effort) return "-";
+        if (!row) return "-";
+        if (!row.quality_effort) {
+          return unlabeledRecord(row) ? "unknown" : "-";
+        }
         var reasoning = row.reasoning || {};
         var defaultEffort = row.default_effort || reasoning.default_effort;
         return row.quality_effort === defaultEffort
@@ -345,7 +387,12 @@
       }
 
       function depthTooltip(row) {
-        if (!row || !row.quality_effort) return null;
+        if (!row) return null;
+        if (!row.quality_effort) {
+          return unlabeledRecord(row)
+            ? "AA measured this model without a reasoning-effort label, so QUAL stays blank; expand the row for the reference score."
+            : null;
+        }
         var reasoning = row.reasoning || {};
         var defaultEffort = row.default_effort || reasoning.default_effort;
         var text = "Reasoning effort the QUAL score was measured at";
@@ -355,20 +402,13 @@
         return text + ".";
       }
 
-      // A display-only AA reference: the index was measured without a
-      // reasoning-effort label, so it cannot fill QUAL. The number is still
-      // worth surfacing because AA does rank the model, but the note must
-      // say plainly that a selectable effort may score differently.
-      function unlabeledNote(record) {
+      // Caveat shown below the Depth table when an unknown (unlabeled AA)
+      // row is present: the table already shows the numbers, so the note
+      // explains why QUAL stays blank.
+      function unlabeledCaveat(record) {
         var index = finiteNumber(record && record.index);
         if (index === null) return null;
-        var cost = finiteNumber(record && record.cost_per_task_usd);
-        var text = "AA index " + pyFixed(index, 1) + " without an effort label";
-        if (cost !== null) text += " (AA $" + pyFixed(cost, 2) + " per task)";
-        return (
-          text +
-          "; reference only, may not be the quality you get at a selectable effort."
-        );
+        return "unknown = measured without a reasoning-effort label; reference only, may not be the quality you get at a selectable effort.";
       }
 
       // QUAL cell tooltip: where the quality number came from (the source
@@ -806,6 +846,7 @@
       }
 
       function depthSelectText(reasoning, depth) {
+        if (depth.effort === "unknown" || depth.unlabeled) return "not selectable";
         if (depth.effort === "reasoning") return "-";
         var supported = Array.isArray(reasoning.supported_efforts)
           ? reasoning.supported_efforts
@@ -873,6 +914,7 @@
         rows.forEach(function (depth) {
           var tr = document.createElement("tr");
           if (depth.selected) tr.className = "depth-selected";
+          else if (depth.unlabeled) tr.className = "depth-unlabeled";
           [
             depth.effort + (depth.default ? "*" : ""),
             depth.index === null ? "-" : pyFixed(depth.index, 1),
@@ -926,25 +968,22 @@
         heading.className = "detail-heading";
         heading.textContent = "Depth";
         td.appendChild(heading);
-        var note = unlabeledNote(entry.reasoning.aa_unlabeled);
-        if (note !== null) {
+        var table = depthTable(entry);
+        var caveat = unlabeledCaveat(entry.reasoning.aa_unlabeled);
+        if (table) {
+          td.appendChild(table);
+        }
+        if (caveat !== null) {
           var noteP = document.createElement("p");
           noteP.className = "endpoint-note";
-          noteP.textContent = note;
+          noteP.textContent = caveat;
           td.appendChild(noteP);
         }
-        var table = depthTable(entry);
-        if (!table) {
-          // A reference note already says AA measured this model; the
-          // blanket "no depth data" line would contradict it.
-          if (note === null) {
-            var empty = document.createElement("p");
-            empty.className = "endpoint-note";
-            empty.textContent = "no depth data for this model.";
-            td.appendChild(empty);
-          }
-        } else {
-          td.appendChild(table);
+        if (!table && caveat === null) {
+          var empty = document.createElement("p");
+          empty.className = "endpoint-note";
+          empty.textContent = "no depth data for this model.";
+          td.appendChild(empty);
         }
         tr.appendChild(td);
         return tr;
@@ -983,15 +1022,7 @@
             else movement = { cls: "flat", text: "•" };
           }
           var tier = tierCellData(row);
-          var entry = null;
-          if (catalogData && Array.isArray(catalogData.models)) {
-            for (var j = 0; j < catalogData.models.length; j++) {
-              if (catalogData.models[j].id === row.model) {
-                entry = catalogData.models[j];
-                break;
-              }
-            }
-          }
+          var entry = findCatalogEntry(row.model);
           // data.json drops the nested reasoning block (it stays lean); the
           // depth table and the DEPTH/QUAL hints join it back from the
           // catalog entry looked up above.
@@ -1000,6 +1031,8 @@
             row,
             entry && entry.reasoning ? { reasoning: entry.reasoning } : {},
           );
+          var hasUnlabeled =
+            row.quality_index === null && unlabeledRecord(depthRow) !== null;
           var precTooltip = fmtQuantTooltip(row);
           var ctxCaveat = fmtCtxCaveat(entry, row);
           var qualityTip = qualityTooltip(depthRow);
@@ -1009,6 +1042,8 @@
           var simpleQuality = qualityScore;
           if (row.quality_index !== null && depthRow.quality_effort) {
             simpleQuality += " · " + depthRow.quality_effort;
+          } else if (hasUnlabeled) {
+            simpleQuality = "- · unknown";
           }
           var cells = [
             String(i + 1),
@@ -1039,8 +1074,12 @@
             var td = document.createElement("td");
             td.textContent = cell;
             if (idx === 2) {
+              if (cell === "unknown") td.className = "na";
               if (depthTip) td.title = depthTip;
             } else if (idx === 3) {
+              if (view === "simple" && cell === "- · unknown") {
+                td.className = "na";
+              }
               if (qualityTip) td.title = qualityTip;
             } else if (idx === 7) {
               if (precTooltip) td.title = precTooltip;
@@ -1117,7 +1156,16 @@
           // Null-guarded: the validator requires sched_note, but a
           // hand-edited catalog must not throw into the fetch .catch.
           var note = deal.sched_note ? String(deal.sched_note) : "";
-          var qualityTip = qualityTooltip(deal);
+          var entry = findCatalogEntry(deal.model);
+          var dealWithReasoning = Object.assign(
+            {},
+            deal,
+            entry && entry.reasoning ? { reasoning: entry.reasoning } : {},
+          );
+          var hasUnlabeled =
+            (deal.quality === null || deal.quality === undefined) &&
+            unlabeledRecord(dealWithReasoning) !== null;
+          var qualityTip = qualityTooltip(dealWithReasoning);
           var qualityText =
             deal.quality === null || deal.quality === undefined
               ? "-"
@@ -1130,6 +1178,8 @@
             deal.quality_effort
           ) {
             qualityText += " · " + deal.quality_effort;
+          } else if (hasUnlabeled) {
+            qualityText = "- · unknown";
           }
           var cells = [
             deal.model,
@@ -1168,6 +1218,7 @@
               td.appendChild(span);
             }
             if (idx === 3) {
+              if (cell === "- · unknown") td.className = "na";
               if (qualityTip) td.title = qualityTip;
             }
             tr.appendChild(td);

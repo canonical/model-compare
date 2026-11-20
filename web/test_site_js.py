@@ -1504,16 +1504,21 @@ def test_depth_detail_row_messages():
 
 def test_unlabeled_reference_note():
     assert (
-        run_js("unlabeledNote({index: 27.8, cost_per_task_usd: 0.58})")
-        == "AA index 27.8 without an effort label (AA $0.58 per task); "
-        "reference only, may not be the quality you get at a selectable effort."
+        run_js("unlabeledCaveat({index: 27.8, cost_per_task_usd: 0.58})")
+        == "unknown = measured without a reasoning-effort label; reference only, "
+        "may not be the quality you get at a selectable effort."
     )
     assert (
-        run_js("unlabeledNote({index: 27.8, cost_per_task_usd: null})")
-        == "AA index 27.8 without an effort label; reference only, may not be "
-        "the quality you get at a selectable effort."
+        run_js("unlabeledCaveat({index: 27.8, cost_per_task_usd: null})")
+        == "unknown = measured without a reasoning-effort label; reference only, "
+        "may not be the quality you get at a selectable effort."
     )
-    assert run_js("unlabeledNote(null)") is None
+    assert run_js("unlabeledCaveat(null)") is None
+    assert run_js("unlabeledRecord({reasoning: {aa_unlabeled: {index: 27.8}}})") == {
+        "index": 27.8,
+        "cost": None,
+        "as_of": None,
+    }
 
 
 def test_quality_tooltip_explains_unlabeled_reference():
@@ -1552,18 +1557,26 @@ def test_depth_detail_row_shows_unlabeled_reference():
     out = run_js(
         "(function () {"
         f" var td = depthDetailRow({json.dumps(entry)}, true).children[0];"
+        " var rows = td.children[1].children[1].children;"
+        " var last = rows[rows.length - 1];"
         " return {"
         "   heading: td.children[0].textContent,"
-        "   note: td.children[1].textContent,"
-        "   tableRows: td.children[2].children[1].children.length"
+        "   tableRows: rows.length,"
+        "   lastClass: last.className,"
+        "   lastCells: last.children.map(function (c) { return c.textContent; }),"
+        "   caveatClass: td.children[2].className,"
+        "   caveat: td.children[2].textContent"
         " };"
         "})()"
     )
     assert out == {
         "heading": "Depth",
-        "note": "AA index 27.8 without an effort label (AA $0.58 per task); "
+        "tableRows": 4,
+        "lastClass": "depth-unlabeled",
+        "lastCells": ["unknown", "27.8", "0.58", "-", "not selectable"],
+        "caveatClass": "endpoint-note",
+        "caveat": "unknown = measured without a reasoning-effort label; "
         "reference only, may not be the quality you get at a selectable effort.",
-        "tableRows": 3,
     }
 
 
@@ -1585,17 +1598,223 @@ def test_depth_detail_row_unlabeled_reference_replaces_no_data_line():
     out = run_js(
         "(function () {"
         f" var td = depthDetailRow({json.dumps(entry)}, true).children[0];"
+        " var rows = td.children[1].children[1].children;"
         " return {"
         "   children: td.children.length,"
-        "   note: td.children[1].textContent"
+        "   tableRows: rows.length,"
+        "   rowCells: rows[0].children.map(function (c) { return c.textContent; }),"
+        "   caveat: td.children[2].textContent"
         " };"
         "})()"
     )
     assert out == {
-        "children": 2,
-        "note": "AA index 26.7 without an effort label; reference only, may "
-        "not be the quality you get at a selectable effort.",
+        "children": 3,
+        "tableRows": 1,
+        "rowCells": ["unknown", "26.7", "-", "-", "not selectable"],
+        "caveat": "unknown = measured without a reasoning-effort label; "
+        "reference only, may not be the quality you get at a selectable effort.",
     }
+
+
+def test_fmt_effort_and_depth_tooltip_for_unlabeled_aa():
+    out = run_js(
+        "(function () {"
+        " var row = {reasoning: {aa_unlabeled: {index: 27.8}}};"
+        " return {"
+        "   effort: fmtEffort(row),"
+        "   tip: depthTooltip(row),"
+        "   rows: depthRows(row)"
+        " };"
+        "})()"
+    )
+    assert out["effort"] == "unknown"
+    assert (
+        out["tip"]
+        == "AA measured this model without a reasoning-effort label, so QUAL "
+        "stays blank; expand the row for the reference score."
+    )
+    assert out["rows"] == [
+        {
+            "effort": "unknown",
+            "index": 27.8,
+            "cost": None,
+            "ratio": None,
+            "selectable": False,
+            "selected": False,
+            "default": False,
+            "unlabeled": True,
+        }
+    ]
+
+
+def test_render_unlabeled_row_expert_simple_and_degraded():
+    row = dict(SIMPLE_VIEW_ROW)
+    row.update({"quality_index": None, "quality_effort": None, "default_effort": "max"})
+    data_fix = {"priorities": {"balanced": [row]}, "schedules": []}
+    catalog_fix = {
+        "models": [
+            {
+                "id": "m/x",
+                "reasoning": {
+                    "default_effort": "max",
+                    "supported_efforts": ["max"],
+                    "depths": [],
+                    "aa_unlabeled": {
+                        "index": 27.8,
+                        "cost_per_task_usd": 0.58,
+                        "source": "aa",
+                        "as_of": "2026-11-20T09:24:16+00:00",
+                    },
+                },
+            }
+        ],
+        "filtered": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " catalogData = null;"
+        ' view = "expert"; render();'
+        " var degExp = els.tbody.children[0];"
+        " els.tbody.children = [];"
+        ' view = "simple"; render();'
+        " var degSim = els.tbody.children[0];"
+        " els.tbody.children = [];"
+        f" catalogData = {json.dumps(catalog_fix)};"
+        ' view = "expert"; render();'
+        " var exp = els.tbody.children[0];"
+        " els.tbody.children = [];"
+        ' view = "simple"; render();'
+        " var sim = els.tbody.children[0];"
+        " return {"
+        "   degExpDepth: degExp.children[3].textContent,"
+        "   degSimQual: degSim.children[3].textContent,"
+        "   expDepth: exp.children[3].textContent,"
+        "   expDepthClass: exp.children[3].className,"
+        "   expDepthTip: exp.children[3].title,"
+        "   expQual: exp.children[4].textContent,"
+        "   expQualTip: exp.children[4].title,"
+        "   simQual: sim.children[3].textContent,"
+        "   simQualClass: sim.children[3].className"
+        " };"
+        "})()"
+    )
+    assert out["degExpDepth"] == "-"
+    assert out["degSimQual"] == "-"
+    assert out["expDepth"] == "unknown"
+    assert out["expDepthClass"] == "na"
+    assert "without a reasoning-effort label" in out["expDepthTip"]
+    assert out["expQual"] == "-"
+    assert "27.8" in out["expQualTip"]
+    assert out["simQual"] == "- · unknown"
+    assert out["simQualClass"] == "na"
+
+
+def test_render_deals_joins_catalog_models_and_filtered_for_unlabeled():
+    deal_model = dict(DEALS_ROW, model="m/cand-deal", quality=None)
+    deal_filtered = dict(DEALS_ROW, model="m/filtered-deal", quality=None)
+    deals_fix = {
+        "priorities": {"balanced": []},
+        "schedules": [deal_model, deal_filtered],
+    }
+    catalog_fix = {
+        "models": [
+            {
+                "id": "m/cand-deal",
+                "reasoning": {
+                    "default_effort": "max",
+                    "supported_efforts": [],
+                    "depths": [],
+                    "aa_unlabeled": {
+                        "index": 29.1,
+                        "cost_per_task_usd": 0.4,
+                        "source": "aa",
+                        "as_of": "2026-11-20T09:24:16+00:00",
+                    },
+                },
+            }
+        ],
+        "filtered": [
+            {
+                "id": "m/filtered-deal",
+                "name": "Filtered Deal",
+                "reasons": ["not ZDR"],
+                "reasoning": {
+                    "default_effort": "high",
+                    "supported_efforts": [],
+                    "depths": [],
+                    "aa_unlabeled": {
+                        "index": 34.6,
+                        "cost_per_task_usd": 0.7,
+                        "source": "aa",
+                        "as_of": "2026-11-20T09:24:16+00:00",
+                    },
+                },
+            }
+        ],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(deals_fix)};"
+        " var dealsBody = document.getElementById('deals-tbody');"
+        " catalogData = null;"
+        " renderDeals();"
+        " var degText = dealsBody.children[0].children[3].textContent;"
+        " var degTip = dealsBody.children[0].children[3].title;"
+        " dealsBody.children = [];"
+        f" catalogData = {json.dumps(catalog_fix)};"
+        " renderDeals();"
+        " var r0 = dealsBody.children[0].children[3];"
+        " var r1 = dealsBody.children[1].children[3];"
+        " return {"
+        "   degText: degText,"
+        "   degTip: degTip,"
+        "   r0Text: r0.textContent,"
+        "   r0Class: r0.className,"
+        "   r0Tip: r0.title,"
+        "   r1Text: r1.textContent,"
+        "   r1Class: r1.className,"
+        "   r1Tip: r1.title"
+        " };"
+        "})()"
+    )
+    assert out["degText"] == "-"
+    assert out["degTip"] == ""
+    assert out["r0Text"] == "- · unknown"
+    assert out["r0Class"] == "na"
+    assert "29.1" in out["r0Tip"]
+    assert out["r1Text"] == "- · unknown"
+    assert out["r1Class"] == "na"
+    assert "34.6" in out["r1Tip"]
+
+
+def test_index_html_tooltips_and_style_css_muted_rules():
+    html = re.sub(r"\s+", " ", SITE_HTML.read_text())
+    main_tbl = re.search(r'<table id="table".*?</table>', html).group(0)
+    ths = re.findall(r"<th.*?</th>", main_tbl)
+    depth_th = next(t for t in ths if "DEPTH" in t)
+    qual_th = next(t for t in ths if re.search(r">\s*QUAL\s*<", t))
+    assert "#effort" in depth_th
+    assert "any selectable effort" in depth_th
+    assert "unknown =" in depth_th
+    assert "best measured selectable depth" in qual_th
+    assert "drift notes" in qual_th
+    assert "- = not measured" in qual_th
+    assert "- · unknown" in qual_th
+
+    deals_tbl = re.search(r'<table id="deals".*?</table>', html).group(0)
+    deals_qual_th = next(
+        t
+        for t in re.findall(r"<th.*?</th>", deals_tbl)
+        if re.search(r">\s*QUAL\s*<", t)
+    )
+    assert "- · unknown" in deals_qual_th
+
+    css = SITE_CSS.read_text()
+    assert "#table .na" in css
+    assert "#deals .na" in css
+    assert ".depth-unlabeled" in css
+    assert "var(--muted)" in css
 
 
 def test_render_expanded_row_shows_depth_before_endpoints():

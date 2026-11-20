@@ -2462,6 +2462,187 @@ def test_validate_catalog_requires_reasoning_and_quality_effort_keys():
         bsd.validate_catalog(doc)
 
 
+def _enriched_filtered_entry(model_id="anthropic/claude-fable-5.2", **overrides):
+    entry = {
+        "id": model_id,
+        "name": "Anthropic: Claude Fable 5.2",
+        "reasons": ["not ZDR"],
+        "aa": {"intelligence_index": 64.6, "coding_index": None, "agentic_index": None},
+        "quality": 65.0,
+        "quality_match": "aa",
+        "quality_as_of": "2026-11-20T09:24:16+00:00",
+        "quality_drift": None,
+        "quality_effort": "max",
+        "reasoning": _reasoning_block(
+            depths=[
+                {
+                    "effort": "max",
+                    "index": 65.0,
+                    "cost_per_task_usd": 26.54,
+                    "source": "aa",
+                    "as_of": "2026-11-20T09:24:16+00:00",
+                }
+            ]
+        ),
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_validate_catalog_accepts_enriched_filtered_alongside_stubs():
+    doc = make_catalog()
+    doc["pool"]["listed"] = 5
+    doc["pool"]["dropped"] = {"context": 1, "not ZDR": 2, "endpoint_fetch_failed": 1}
+    doc["filtered"] = [
+        {"id": "acme/small", "name": "Small", "reasons": ["context"]},
+        {
+            "id": "acme/stale",
+            "name": "Stale",
+            "reasons": ["endpoint_fetch_failed"],
+            "annotations": {
+                "price_spread": None,
+                "cheapest_quantized": None,
+                "risk_flag": False,
+                "baseline_context_below_catalog": False,
+                "stale": True,
+            },
+        },
+        _enriched_filtered_entry("anthropic/claude-fable-5.2"),
+        _enriched_filtered_entry(
+            "acme/unlabeled-filtered",
+            quality=None,
+            quality_match=None,
+            quality_as_of=None,
+            quality_drift=None,
+            quality_effort=None,
+            reasoning=_reasoning_block(
+                depths=[],
+                aa_unlabeled={
+                    "index": 27.8,
+                    "cost_per_task_usd": 0.58,
+                    "source": "aa",
+                    "as_of": "2026-11-20T09:24:16+00:00",
+                },
+            ),
+        ),
+    ]
+    bsd.validate_catalog(doc)
+
+
+@pytest.mark.parametrize(
+    "missing_key",
+    (
+        "aa",
+        "quality",
+        "quality_match",
+        "quality_as_of",
+        "quality_drift",
+        "quality_effort",
+        "reasoning",
+    ),
+)
+def test_validate_catalog_rejects_partial_filtered_quality_block(missing_key):
+    doc = make_catalog()
+    entry = _enriched_filtered_entry()
+    entry.pop(missing_key)
+    doc["filtered"].append(entry)
+    with pytest.raises(ValueError, match=missing_key):
+        bsd.validate_catalog(doc)
+
+
+@pytest.mark.parametrize(
+    "mutate, match",
+    [
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(
+                    aa={
+                        "intelligence_index": 101,
+                        "coding_index": None,
+                        "agentic_index": None,
+                    }
+                )
+            ),
+            "aa out of range",
+        ),
+        (
+            lambda doc: doc["filtered"].append(_enriched_filtered_entry(quality=-1)),
+            "quality",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(quality_match="psychic")
+            ),
+            "quality_match",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(quality_as_of=123)
+            ),
+            "quality_as_of",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(quality_drift="yes")
+            ),
+            "quality_drift",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(quality_effort="")
+            ),
+            "quality_effort",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(reasoning=None)
+            ),
+            "reasoning",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(
+                    reasoning=_reasoning_block(
+                        aa_unlabeled={
+                            "index": float("nan"),
+                            "cost_per_task_usd": None,
+                            "source": "aa",
+                            "as_of": "t1",
+                        }
+                    )
+                )
+            ),
+            "aa_unlabeled",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                {"id": "acme/small", "name": "Small Dup", "reasons": ["not ZDR"]}
+            ),
+            "duplicate",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(quality=50.0, quality_match=None)
+            ),
+            "quality and quality_match",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(quality=None, quality_match="aa")
+            ),
+            "quality and quality_match",
+        ),
+    ],
+)
+def test_validate_catalog_rejects_malformed_filtered_quality_and_duplicates(
+    mutate, match
+):
+    doc = make_catalog()
+    mutate(doc)
+    with pytest.raises(ValueError, match=match):
+        bsd.validate_catalog(doc)
+
+
 def test_validate_catalog_requires_schedule_quality_effort():
     doc = make_catalog()
     schedules = make_schedules()
