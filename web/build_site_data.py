@@ -131,6 +131,18 @@ CATALOG_ENTRY_KEYS = (
     "advertised_pricing",
     "annotations",
 )
+# Atomic 7-key quality/reasoning block shared by models[] and enriched
+# filtered[] entries. Present on filtered[] only when the model has AA/quality
+# data; partial presence fails validation.
+CATALOG_FILTERED_QUALITY_KEYS = (
+    "aa",
+    "quality",
+    "quality_match",
+    "quality_as_of",
+    "quality_drift",
+    "quality_effort",
+    "reasoning",
+)
 # Keys of one parsed endpoint (model_compare.parse_endpoints' output shape).
 CATALOG_ENDPOINT_KEYS = (
     "provider_name",
@@ -658,6 +670,46 @@ def _validate_catalog_session_cost(session_cost) -> None:
                 )
 
 
+def _validate_catalog_quality_fields(entry: dict, label: str) -> None:
+    """Validate the shared 7-key quality/reasoning block for models[] and filtered[]."""
+    aa = entry["aa"]
+    if not isinstance(aa, dict) or any(key not in aa for key in CATALOG_AA_KEYS):
+        raise ValueError(f"{label} aa is incomplete")
+    bad_aa = [key for key in CATALOG_AA_KEYS if not _is_aa_value(aa[key])]
+    if bad_aa:
+        raise ValueError(f"{label} aa out of range: {', '.join(bad_aa)}")
+    # The same 0..100 range the schedules rows enforce: quality is an
+    # AA intelligence index, never a negative or astronomically large
+    # number.
+    if entry["quality"] is not None and not _is_aa_value(entry["quality"]):
+        raise ValueError(f"{label} quality must be a number in 0..100 or null")
+    if (
+        entry["quality_match"] is not None
+        and entry["quality_match"] not in CATALOG_QUALITY_MATCH_VALUES
+    ):
+        raise ValueError(f"{label} has unknown quality_match")
+    # Schema v4 provenance: presence-checked by the caller,
+    # value types pinned here -- the stamp is a string or null, the
+    # drift verdict a boolean or null.
+    if entry["quality_as_of"] is not None and not isinstance(
+        entry["quality_as_of"], str
+    ):
+        raise ValueError(f"{label} quality_as_of must be a string or null")
+    if entry["quality_drift"] is not None and not isinstance(
+        entry["quality_drift"], bool
+    ):
+        raise ValueError(f"{label} quality_drift must be a boolean or null")
+    # Schema v5 (thinking depth): the main quality's effort label is a
+    # non-empty string or null (unknown), and the reasoning block is
+    # validated in full -- malformed depth data fails the build.
+    quality_effort = entry["quality_effort"]
+    if quality_effort is not None and (
+        not isinstance(quality_effort, str) or not quality_effort
+    ):
+        raise ValueError(f"{label} quality_effort must be a non-empty string or null")
+    _validate_catalog_reasoning(entry["reasoning"], f"{label} reasoning")
+
+
 def validate_catalog(document) -> None:
     """Validate a raw model_compare.py --catalog document.
 
@@ -875,44 +927,7 @@ def validate_catalog(document) -> None:
             raise ValueError(
                 f"models[{i}] scores.overall out of range: {', '.join(bad_overall)}"
             )
-        aa = entry["aa"]
-        if not isinstance(aa, dict) or any(key not in aa for key in CATALOG_AA_KEYS):
-            raise ValueError(f"models[{i}] aa is incomplete")
-        bad_aa = [key for key in CATALOG_AA_KEYS if not _is_aa_value(aa[key])]
-        if bad_aa:
-            raise ValueError(f"models[{i}] aa out of range: {', '.join(bad_aa)}")
-        # The same 0..100 range the schedules rows enforce: quality is an
-        # AA intelligence index, never a negative or astronomically large
-        # number.
-        if entry["quality"] is not None and not _is_aa_value(entry["quality"]):
-            raise ValueError(f"models[{i}] quality must be a number in 0..100 or null")
-        if (
-            entry["quality_match"] is not None
-            and entry["quality_match"] not in CATALOG_QUALITY_MATCH_VALUES
-        ):
-            raise ValueError(f"models[{i}] has unknown quality_match")
-        # Schema v4 provenance: presence-checked via CATALOG_ENTRY_KEYS,
-        # value types pinned here -- the stamp is a string or null, the
-        # drift verdict a boolean or null.
-        if entry["quality_as_of"] is not None and not isinstance(
-            entry["quality_as_of"], str
-        ):
-            raise ValueError(f"models[{i}] quality_as_of must be a string or null")
-        if entry["quality_drift"] is not None and not isinstance(
-            entry["quality_drift"], bool
-        ):
-            raise ValueError(f"models[{i}] quality_drift must be a boolean or null")
-        # Schema v5 (thinking depth): the main quality's effort label is a
-        # non-empty string or null (unknown), and the reasoning block is
-        # validated in full -- malformed depth data fails the build.
-        quality_effort = entry["quality_effort"]
-        if quality_effort is not None and (
-            not isinstance(quality_effort, str) or not quality_effort
-        ):
-            raise ValueError(
-                f"models[{i}] quality_effort must be a non-empty string or null"
-            )
-        _validate_catalog_reasoning(entry["reasoning"], f"models[{i}] reasoning")
+        _validate_catalog_quality_fields(entry, f"models[{i}]")
         if parameters["zdr_required"] and entry["zdr"] is not True:
             raise ValueError(f"models[{i}] is not zdr=true under zdr_required")
         # Schema v3 additive blocks: the producer emits all four (null when
@@ -969,7 +984,18 @@ def validate_catalog(document) -> None:
             raise ValueError(f"filtered[{i}] has no id")
         if not isinstance(entry.get("reasons"), list) or not entry["reasons"]:
             raise ValueError(f"filtered[{i}] has no reasons")
+        present = [key for key in CATALOG_FILTERED_QUALITY_KEYS if key in entry]
+        if present:
+            missing = [key for key in CATALOG_FILTERED_QUALITY_KEYS if key not in entry]
+            if missing:
+                raise ValueError(
+                    f"filtered[{i}] has incomplete quality block: "
+                    f"missing {', '.join(missing)}"
+                )
+            _validate_catalog_quality_fields(entry, f"filtered[{i}]")
         filtered_ids.append(entry["id"])
+    if len(set(filtered_ids)) != len(filtered_ids):
+        raise ValueError("catalog filtered contains duplicate ids")
     in_both = set(model_ids) & set(filtered_ids)
     if in_both:
         raise ValueError(
@@ -1125,8 +1151,8 @@ def build_snapshot(catalog) -> dict:
     tabs are a projection of the catalog's rankings (the single ranking
     authority, the same order the data.json rows follow): per priority the
     top `HISTORY_TOP_N` ids (20), rank 1-based, quality/blended merged from
-    the models entry. No sort happens here. aa and prices cover candidates only -- filtered
-    entries carry neither.
+    the models entry. No sort happens here. history.json ``aa`` and ``prices``
+    maps project from ranked candidates (``models``) only.
     """
     models = catalog["models"]
     by_id = {entry["id"]: entry for entry in models}
