@@ -79,6 +79,11 @@ OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
 # see DESIGN.md ("Zero data retention") and zdr_eligible.
 SAFETY_RETENTION_MODES = ("none", "google", "all")
 GOOGLE_AUTHOR = "google"
+# Cache key for the parsed ZDR list. v4 carries the retention split
+# ({"zdr": [...], "strict": [...]}); v3 was a bare id list with no retention
+# status and must never be read -- it cannot tell a Safety Retention endpoint
+# from a strict one.
+ZDR_CACHE = "openrouter-zdr-v4"
 # Supported V2 free-tier replacement for the retired /api/v2/data/llms/models
 # (legacy endpoints 410 after 2026-11-04; see
 # https://artificialanalysis.ai/data-api/migrate-v2-data).
@@ -1773,15 +1778,19 @@ def fetch_openrouter_frontend(args):
     independently under its own key and is cached only when non-empty, so a
     degraded payload self-heals on the next run. A base-URL outage never
     blocks the ZDR fetch, and vice versa. Returns
-    (discounts, zdr_ids, aa_by_id, cache_hits, frontend_models) where
-    cache_hits names the payloads served from cache ("discounts", "zdr",
-    "aa"), and frontend_models is the frontend listing projected to the
+    (discounts, zdr_ids, zdr_strict_ids, aa_by_id, cache_hits,
+    frontend_models) where zdr_ids is every model with a ZDR-list endpoint,
+    zdr_strict_ids the subset with at least one endpoint whose
+    safety_retention is exactly False, cache_hits names the payloads served
+    from cache ("discounts", "zdr", "aa"), and frontend_models is the
+    frontend listing projected to the
     fields build_reasoning_metadata needs (slug, permaslug,
     supports_reasoning, reasoning_config).
     """
     discounts = {}
     aa_by_id = {}
     zdr_ids = set()
+    zdr_strict_ids = set()
     frontend_models = []
     cache_hits = set()
 
@@ -1854,16 +1863,22 @@ def fetch_openrouter_frontend(args):
                 save_cache(FRONTEND_REASONING_CACHE, frontend_models)
 
     if args.no_zdr:
-        return discounts, zdr_ids, aa_by_id, cache_hits, frontend_models
+        return discounts, zdr_ids, zdr_strict_ids, aa_by_id, cache_hits, frontend_models
     if not args.no_cache:
-        # v3: the id set now comes from the per-endpoint ZDR list; v1/v2
-        # sets were derived from the models/find response and must never
-        # be read.
-        cached = load_cache("openrouter-zdr-v3", args.cache_ttl)
-        if cached:
+        # v4: the split comes from the per-endpoint ZDR list; v1/v2 sets were
+        # derived from the models/find response and v3 was a bare id list with
+        # no retention status, so none of them may be read.
+        cached = load_cache(ZDR_CACHE, args.cache_ttl)
+        if (
+            isinstance(cached, dict)
+            and isinstance(cached.get("zdr"), list)
+            and isinstance(cached.get("strict"), list)
+            and cached["zdr"]
+        ):
             return (
                 discounts,
-                set(cached),
+                set(cached["zdr"]),
+                set(cached["strict"]),
                 aa_by_id,
                 cache_hits | {"zdr"},
                 frontend_models,
@@ -1872,7 +1887,7 @@ def fetch_openrouter_frontend(args):
         payload = fetch_json(OPENROUTER_ZDR_URL, timeout=30)
     except Exception as exc:
         warn(f"could not fetch ZDR data: {exc}")
-        return discounts, zdr_ids, aa_by_id, cache_hits, frontend_models
+        return discounts, zdr_ids, zdr_strict_ids, aa_by_id, cache_hits, frontend_models
     # One entry per ZDR endpoint, keyed by the exact model id (variants
     # such as :free are listed individually). An id is ZDR iff it has at
     # least one ZDR endpoint. The models/find ?zdr=true filter cannot be
@@ -1885,8 +1900,16 @@ def fetch_openrouter_frontend(args):
     # and -10 without describing them, so the meaning of the non-zero values
     # is unverified; treat anything other than 0, including a missing
     # status, as not serving (fail closed).
+    #
+    # The list is wider than zero data retention: an endpoint flagged
+    # safety_retention=True may retain prompts for abuse investigation, so it
+    # is not ZDR. An id is "strict" iff at least one of its endpoints says
+    # safety_retention is exactly False -- a missing or non-boolean value is
+    # unknown, and unknown is never strict (fail closed), which is what
+    # --allow-safety-retention none and google then refuse.
     entries = payload.get("data") if isinstance(payload, dict) else None
     ids = set()
+    strict_ids = set()
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict):
             continue
@@ -1896,11 +1919,13 @@ def fetch_openrouter_frontend(args):
         model_id = entry.get("model_id")
         if isinstance(model_id, str) and model_id:
             ids.add(model_id)
+            if entry.get("safety_retention") is False:
+                strict_ids.add(model_id)
     if not ids:
         warn("no ZDR entries found; treating ZDR data as unavailable")
-        return discounts, zdr_ids, aa_by_id, cache_hits, frontend_models
-    save_cache("openrouter-zdr-v3", sorted(ids))
-    return discounts, ids, aa_by_id, cache_hits, frontend_models
+        return discounts, zdr_ids, zdr_strict_ids, aa_by_id, cache_hits, frontend_models
+    save_cache(ZDR_CACHE, {"zdr": sorted(ids), "strict": sorted(strict_ids)})
+    return discounts, ids, strict_ids, aa_by_id, cache_hits, frontend_models
 
 
 def parse_price(value) -> float | None:
@@ -6251,6 +6276,7 @@ def run(args, models, or_cached) -> int:
     (
         discounts,
         zdr_ids,
+        zdr_strict_ids,
         aa_by_id,
         frontend_cache_hits,
         frontend_models,
