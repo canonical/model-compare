@@ -719,10 +719,20 @@ contract above.
   `max_price` at the base per-1M prices, baseline quantization only), and
   `reasoning` (preferred rank effort, model default, supported efforts,
   mandatory, `supports_max_tokens`). The literal `max` is preserved.
-- `litellm.json` — LiteLLM's upstream map with the fragment applied by
-  `base.update(fragment)`, compactly serialized. It is optional.
-- `litellm_merge_status.json` — merge provenance, collisions, consecutive
-  upstream fetch failures, and the report decision.
+- `litellm.json` — LiteLLM's upstream map plus the fragment, compactly
+  serialized. Keys only in the fragment are added whole. For an overlapping
+  key the two price schedules are compared (resolving `tiered_pricing` and
+  `*_above_<N>[k]_tokens` according to LiteLLM's lookup rules); equal prices
+  keep upstream's richer entry, and a reviewed
+  `web/litellm_collision_overrides.json` may resolve a conflict in favor of
+  either the `fragment` or `upstream` entry. It is optional.
+- `litellm_merge_status.json` — merge provenance, colliding keys, per-key
+  collision details (resolution, price equality and differing fields),
+  consecutive upstream fetch failures, and the report decision. Each detail
+  carries `key`, `resolution` (`upstream`, `fragment` or `blocked`),
+  `price_equal`, `overridden`, optional `note`, optional `override_reason`,
+  and `differences` records with `field`, `from_tokens`, `model_compare` and
+  `upstream`.
 
 The rate-card hash is the exact-byte SHA-256 of the published fragment; the
 steering `_meta` and the status carry it so the pair cannot drift. A hash
@@ -731,14 +741,23 @@ the publish (`check_litellm`).
 
 The merged map is isolated from the site. A failed or invalid upstream fetch
 increments `upstream_fetch_failures`, keeps the previous map and reports at
-three consecutive failures. An upstream key collision freezes the previous
-map, keeps the fragment and the site publishing, and reports immediately.
-`web/report_litellm_merge.py` deduplicates one `bug` issue titled "LiteLLM
-merged map needs attention"; the workflow grants `issues: write` and runs the
-report step after deploy with `continue-on-error`. A frozen map's keys are
-allowed to differ from the current rate card; only an `ok` map must be a
-superset. `web/publish.py` fetches the previous merged map and status from
-the live site, the same way it fetches history and highlights.
+three consecutive failures. An upstream key collision is resolved by price
+first: if both base `input_cost_per_token` and `output_cost_per_token` are
+present and agree, no rate-card price (including cache rates) is missing
+upstream, every comparable tier price matches, and any off-peak schedule
+agrees, the map is merged automatically and upstream's entry is kept. A
+genuine price conflict freezes the previous map, keeps the fragment and the
+site publishing, and reports immediately with the per-key differences, unless
+`web/litellm_collision_overrides.json` records a reviewed resolution
+(`fragment` or `upstream`) for that key. `web/report_litellm_merge.py`
+deduplicates one `bug` issue titled "LiteLLM merged map needs attention"; the
+workflow grants `issues: write` and runs the report step after deploy with
+`continue-on-error`. When a later run deploys a rebuilt map
+(`merged.status: ok` with `deploy-pages` succeeding, which passes
+`--allow-close`), the report step closes that issue.
+A frozen map's keys are allowed to differ from the current rate card; only an
+`ok` map must be a superset. `web/publish.py` fetches the previous merged map
+and status from the live site, the same way it fetches history and highlights.
 
 Consumer notes and representation limits:
 
@@ -749,7 +768,9 @@ Consumer notes and representation limits:
   `environment_variables` in the proxy config), or merge upstream and the
   fragment yourself with `jq -s '.[0] + .[1]' upstream.json
   litellm_rate_card.json > merged.json` (a shallow union: overlapping keys are
-  replaced whole by our entry). Verify loading via
+  replaced whole by our entry). That manual union always keeps our entry; the
+  published `litellm.json` keeps upstream's entry when the prices are
+  equivalent, as described above. Verify loading via
   `GET /model/cost_map/source` and alert on `fallback_reason`, since LiteLLM
   silently falls back to its bundled map on fetch or validation errors.
 - **Applying `litellm_steering.json` in a hook:** `litellm_steering.json` is

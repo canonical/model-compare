@@ -12,6 +12,7 @@ on:
       - web/test_litellm_contract.py
       - web/test_litellm_compat.py
       - web/requirements-litellm.txt
+      - web/litellm_collision_overrides.json
       - .github/workflows/litellm-compat.yml
   schedule:
     # Weekly, independent of the 3-hour publish cron.

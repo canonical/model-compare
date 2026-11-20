@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -178,6 +179,29 @@ def _upstream_bytes(count=1000):
 def _upstream_with_collision():
     data = {f"up/{i}": {} for i in range(1000)}
     data["openrouter/z-ai/glm-5.3"] = {}
+    return json.dumps(data).encode()
+
+
+# The rate-card entry for openrouter/z-ai/glm-5.3: base $0.022/$0.40 per 1M,
+# tier above 100k tokens $0.50/$2.50 per 1M, cache $0.005/$0.625 per 1M.
+# These are the same prices LiteLLM's upstream map would carry, encoded with
+# its flat `*_above_100k_tokens` fields instead of our `tiered_pricing`.
+_GLM_EQUIVALENT_UPSTREAM = {
+    "input_cost_per_token": 2.2e-8,
+    "output_cost_per_token": 4e-7,
+    "cache_read_input_token_cost": 5e-9,
+    "cache_creation_input_token_cost": 6.25e-7,
+    "input_cost_per_token_above_100k_tokens": 5e-7,
+    "output_cost_per_token_above_100k_tokens": 2.5e-6,
+    "cache_read_input_token_cost_above_100k_tokens": 5e-8,
+    "cache_creation_input_token_cost_above_100k_tokens": 6.25e-7,
+    "supports_prompt_caching": True,
+}
+
+
+def _upstream_with_priced_collision(entry):
+    data = {f"up/{i}": {} for i in range(1000)}
+    data["openrouter/z-ai/glm-5.3"] = entry
     return json.dumps(data).encode()
 
 
@@ -487,6 +511,477 @@ def test_merge_clean():
     assert status["merged"]["entries"] == 1003
     assert status["merged"]["rate_card_sha256"] == hashlib.sha256(raw).hexdigest()
     assert status["report"]["needed"] is False
+
+
+def test_price_differences_tiered_matches_above_fields():
+    ours = {
+        "input_cost_per_token": 2.2e-8,
+        "output_cost_per_token": 4e-7,
+        "cache_read_input_token_cost": 5e-9,
+        "cache_creation_input_token_cost": 6.25e-7,
+        "tiered_pricing": [
+            {
+                "range": [0, 100_000],
+                "input_cost_per_token": 2.2e-8,
+                "output_cost_per_token": 4e-7,
+                "cache_read_input_token_cost": 5e-9,
+                "cache_creation_input_token_cost": 6.25e-7,
+            },
+            {
+                "range": [100_000, 1_048_576],
+                "input_cost_per_token": 5e-7,
+                "output_cost_per_token": 2.5e-6,
+                "cache_read_input_token_cost": 5e-8,
+                "cache_creation_input_token_cost": 6.25e-7,
+            },
+        ],
+    }
+    differences, comparable, note = bla._price_differences(
+        ours, _GLM_EQUIVALENT_UPSTREAM
+    )
+    assert differences == []
+    assert comparable > 0
+    assert note is None
+
+
+def test_price_differences_off_peak_schedule_conflict():
+    ours = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+        "off_peak_pricing": {
+            "input_cost_per_token": 5e-7,
+            "output_cost_per_token": 1e-6,
+        },
+    }
+    upstream = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+        "off_peak_pricing": {
+            "input_cost_per_token": 4e-7,
+            "output_cost_per_token": 1e-6,
+        },
+    }
+    differences, comparable, note = bla._price_differences(ours, upstream)
+    assert comparable > 0
+    assert note == "off-peak pricing differs"
+    assert differences[-1] == {
+        "field": "off_peak_pricing",
+        "from_tokens": "off-peak",
+        "model_compare": "present",
+        "upstream": "present",
+    }
+
+
+def test_merge_equivalent_collision_keeps_upstream_entry():
+    raw, _ = _rate_card_bytes()
+    upstream = _upstream_with_priced_collision(_GLM_EQUIVALENT_UPSTREAM)
+    merged, status = bla.build_merge_status(
+        _basic_catalog(), "deadbee", raw, "ok", upstream, None, None
+    )
+    data = json.loads(merged)
+    assert status["merged"]["status"] == "ok"
+    assert status["merged"]["entries"] == 1003
+    assert status["merged"]["rate_card_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert status["report"]["needed"] is False
+    assert status["collisions"] == ["openrouter/z-ai/glm-5.3"]
+    detail = status["collision_details"][0]
+    assert detail["key"] == "openrouter/z-ai/glm-5.3"
+    assert detail["resolution"] == "upstream"
+    assert detail["price_equal"] is True
+    assert detail["overridden"] is False
+    assert detail["differences"] == []
+    # Keeping upstream preserves its extra capability fields.
+    assert data["openrouter/z-ai/glm-5.3"]["supports_prompt_caching"] is True
+    assert "max_output_tokens" not in data["openrouter/z-ai/glm-5.3"]
+
+
+def test_merge_price_conflict_freezes_and_reports_diff():
+    raw, _ = _rate_card_bytes()
+    conflict = dict(_GLM_EQUIVALENT_UPSTREAM)
+    conflict["input_cost_per_token"] = 4.4e-8
+    conflict["input_cost_per_token_above_100k_tokens"] = 1e-6
+    upstream = _upstream_with_priced_collision(conflict)
+    merged, status = bla.build_merge_status(
+        _basic_catalog(), "deadbee", raw, "ok", upstream, None, None
+    )
+    assert merged is None
+    assert status["merged"]["status"] == "skipped"
+    assert status["merged"]["reason"] == "collision"
+    assert status["report"]["needed"] is True
+    detail = status["collision_details"][0]
+    assert detail["resolution"] == "blocked"
+    assert detail["price_equal"] is False
+    assert detail["overridden"] is False
+    assert detail["differences"] == [
+        {
+            "field": "input_cost_per_token",
+            "from_tokens": 0,
+            "model_compare": 2.2e-8,
+            "upstream": 4.4e-8,
+        },
+        {
+            "field": "input_cost_per_token",
+            "from_tokens": 100_000,
+            "model_compare": 5e-7,
+            "upstream": 1e-6,
+        },
+    ]
+
+
+def test_merge_conflict_override_fragment_merges_our_entry():
+    raw, _ = _rate_card_bytes()
+    conflict = dict(_GLM_EQUIVALENT_UPSTREAM)
+    conflict["input_cost_per_token"] = 4.4e-8
+    upstream = _upstream_with_priced_collision(conflict)
+    overrides = {
+        "openrouter/z-ai/glm-5.3": {
+            "resolution": "fragment",
+            "reason": "baseline price is intentional",
+        }
+    }
+    merged, status = bla.build_merge_status(
+        _basic_catalog(), "deadbee", raw, "ok", upstream, None, None, overrides
+    )
+    data = json.loads(merged)
+    assert status["merged"]["status"] == "ok"
+    assert status["merged"]["entries"] == 1003
+    assert status["report"]["needed"] is False
+    detail = status["collision_details"][0]
+    assert detail["resolution"] == "fragment"
+    assert detail["overridden"] is True
+    assert detail["override_reason"] == "baseline price is intentional"
+    assert detail["price_equal"] is False
+    assert data["openrouter/z-ai/glm-5.3"]["max_output_tokens"] == 64_000
+    assert "supports_prompt_caching" not in data["openrouter/z-ai/glm-5.3"]
+
+
+def test_merge_conflict_override_upstream_merges_upstream_entry():
+    raw, _ = _rate_card_bytes()
+    conflict = dict(_GLM_EQUIVALENT_UPSTREAM)
+    conflict["input_cost_per_token"] = 4.4e-8
+    upstream = _upstream_with_priced_collision(conflict)
+    overrides = {
+        "openrouter/z-ai/glm-5.3": {"resolution": "upstream"},
+    }
+    merged, status = bla.build_merge_status(
+        _basic_catalog(), "deadbee", raw, "ok", upstream, None, None, overrides
+    )
+    data = json.loads(merged)
+    assert status["merged"]["status"] == "ok"
+    assert status["report"]["needed"] is False
+    detail = status["collision_details"][0]
+    assert detail["resolution"] == "upstream"
+    assert detail["overridden"] is True
+    assert detail["price_equal"] is False
+    assert data["openrouter/z-ai/glm-5.3"]["supports_prompt_caching"] is True
+    assert "max_output_tokens" not in data["openrouter/z-ai/glm-5.3"]
+
+
+def test_load_collision_overrides(tmp_path):
+    path = tmp_path / "overrides.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "overrides": {
+                    "openrouter/z-ai/glm-5.3": {
+                        "resolution": "fragment",
+                        "reason": "reviewed",
+                    }
+                },
+            }
+        )
+    )
+    assert bla.load_collision_overrides(path) == {
+        "openrouter/z-ai/glm-5.3": {
+            "resolution": "fragment",
+            "reason": "reviewed",
+        }
+    }
+
+
+def test_repo_collision_overrides_file_is_valid():
+    path = Path(bla.__file__).with_name(bla.OVERRIDES_NAME)
+    overrides = bla.load_collision_overrides(path)
+    assert overrides["openrouter/google/gemini-4-hydrogen"]["resolution"] == "fragment"
+
+
+def test_load_collision_overrides_rejects_unknown_resolution(tmp_path):
+    path = tmp_path / "overrides.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "overrides": {
+                    "openrouter/z-ai/glm-5.3": {"resolution": "ours"},
+                },
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="resolution"):
+        bla.load_collision_overrides(path)
+
+
+@pytest.mark.parametrize("version", [True, 1.0, 2])
+def test_load_collision_overrides_rejects_non_int_v1_schema(tmp_path, version):
+    path = tmp_path / "overrides.json"
+    path.write_text(json.dumps({"schema_version": version, "overrides": {}}))
+    with pytest.raises(ValueError, match="schema_version"):
+        bla.load_collision_overrides(path)
+
+
+@pytest.mark.parametrize(
+    "bad_overrides",
+    [
+        [],
+        ["openrouter/z-ai/glm-5.3"],
+        "invalid",
+        {"openrouter/not-colliding": {"resolution": "bogus"}},
+        {"bad/key": {"resolution": "fragment"}},
+    ],
+)
+def test_build_merge_status_validates_overrides_even_without_collisions(bad_overrides):
+    raw, _ = _rate_card_bytes()
+    with pytest.raises(ValueError):
+        bla.build_merge_status(
+            _basic_catalog(),
+            "deadbee",
+            raw,
+            "failed",
+            None,
+            None,
+            None,
+            bad_overrides,
+        )
+
+
+def test_price_differences_float_tiered_bounds_detects_conflict():
+    ours = {
+        "input_cost_per_token": 5e-8,
+        "output_cost_per_token": 4e-7,
+        "cache_read_input_token_cost": 5e-8,
+        "cache_creation_input_token_cost": 5e-8,
+    }
+    upstream = {
+        "input_cost_per_token": 5e-8,
+        "output_cost_per_token": 4e-7,
+        "tiered_pricing": [
+            {
+                "range": [0.0, 256000.0],
+                "input_cost_per_token": 5e-8,
+                "output_cost_per_token": 4e-7,
+            },
+            {
+                "range": [256000.0, 1000000.0],
+                "input_cost_per_token": 2.5e-7,
+                "output_cost_per_token": 2e-6,
+            },
+        ],
+    }
+    differences, comparable, note = bla._price_differences(ours, upstream)
+    assert comparable > 0
+    assert note is None
+    assert differences == [
+        {
+            "field": "input_cost_per_token",
+            "from_tokens": 256_000,
+            "model_compare": 5e-8,
+            "upstream": 2.5e-7,
+        },
+        {
+            "field": "output_cost_per_token",
+            "from_tokens": 256_000,
+            "model_compare": 4e-7,
+            "upstream": 2e-6,
+        },
+        {
+            "field": "cache_read_input_token_cost",
+            "from_tokens": 256_000,
+            "model_compare": 5e-8,
+            "upstream": 2.5e-7,
+        },
+        {
+            "field": "cache_creation_input_token_cost",
+            "from_tokens": 256_000,
+            "model_compare": 5e-8,
+            "upstream": 2.5e-7,
+        },
+    ]
+
+
+def test_price_differences_requires_both_base_input_and_output():
+    ours = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+    }
+    upstream = {
+        "input_cost_per_token": 1e-6,
+    }
+    differences, comparable, note = bla._price_differences(ours, upstream)
+    assert differences == []
+    assert comparable == 0
+    assert note == "no comparable base price"
+
+
+def test_price_differences_blocks_when_upstream_misses_our_cache_rate():
+    ours = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+        "cache_read_input_token_cost": 1e-7,
+    }
+    upstream = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+    }
+    differences, comparable, note = bla._price_differences(ours, upstream)
+    assert comparable == 3
+    assert note is None
+    assert differences == [
+        {
+            "field": "cache_read_input_token_cost",
+            "from_tokens": 0,
+            "model_compare": 1e-7,
+            "upstream": "absent",
+        }
+    ]
+    # Upstream defining extra cache rates while ours omits them stays skipped.
+    rev_diff, rev_comp, rev_note = bla._price_differences(upstream, ours)
+    assert rev_diff == []
+    assert rev_comp == 2
+    assert rev_note is None
+
+
+def test_price_differences_non_k_and_decimal_k_thresholds():
+    ours = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+        "cache_read_input_token_cost": 1e-7,
+        "cache_creation_input_token_cost": 1e-6,
+        "tiered_pricing": [
+            {
+                "range": [0, 32_500],
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token": 2e-6,
+                "cache_read_input_token_cost": 1e-7,
+                "cache_creation_input_token_cost": 1e-6,
+            },
+            {
+                "range": [32_500, 200_000],
+                "input_cost_per_token": 2e-6,
+                "output_cost_per_token": 4e-6,
+                "cache_read_input_token_cost": 2e-7,
+                "cache_creation_input_token_cost": 2e-6,
+            },
+            {
+                "range": [200_000, 1_000_000],
+                "input_cost_per_token": 3e-6,
+                "output_cost_per_token": 6e-6,
+                "cache_read_input_token_cost": 3e-7,
+                "cache_creation_input_token_cost": 3e-6,
+            },
+        ],
+    }
+    upstream = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+        "cache_read_input_token_cost": 1e-7,
+        "cache_creation_input_token_cost": 1e-6,
+        "input_cost_per_token_above_32.5k_tokens": 2e-6,
+        "output_cost_per_token_above_32.5k_tokens": 4e-6,
+        "cache_read_input_token_cost_above_32.5k_tokens": 2e-7,
+        "cache_creation_input_token_cost_above_32.5k_tokens": 2e-6,
+        "input_cost_per_token_above_200000_tokens": 3e-6,
+        "output_cost_per_token_above_200000_tokens": 6e-6,
+        "cache_read_input_token_cost_above_200000_tokens": 3e-7,
+        "cache_creation_input_token_cost_above_200000_tokens": 3e-6,
+        # Non-integral threshold must be ignored rather than rounded into the schedule.
+        "input_cost_per_token_above_1.5_tokens": 9e-6,
+    }
+    differences, comparable, note = bla._price_differences(ours, upstream)
+    assert differences == []
+    assert comparable == 12
+    assert note is None
+
+
+def test_price_schedule_tiered_omitted_fields_and_precedence():
+    tiered_entry = {
+        "input_cost_per_token": 9e-6,
+        "output_cost_per_token": 4e-6,
+        "input_cost_per_token_above_100k_tokens": 9e-5,
+        "tiered_pricing": [
+            {
+                "range": [0, 100_000],
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token": 2e-6,
+                "cache_read_input_token_cost": 1e-7,
+            },
+            {
+                "range": [100_000, 1_000_000],
+                "input_cost_per_token": 3e-6,
+                # output omits -> top-level 4e-6; cache omits -> tier input 3e-6.
+            },
+        ],
+    }
+    schedule = bla._price_schedule(tiered_entry)
+    assert schedule == [
+        (
+            0,
+            {
+                "input_cost_per_token": 1e-6,
+                "output_cost_per_token": 2e-6,
+                "cache_read_input_token_cost": 1e-7,
+                "cache_creation_input_token_cost": 1e-6,
+            },
+        ),
+        (
+            100_000,
+            {
+                "input_cost_per_token": 3e-6,
+                "output_cost_per_token": 4e-6,
+                "cache_read_input_token_cost": 3e-6,
+                "cache_creation_input_token_cost": 3e-6,
+            },
+        ),
+    ]
+
+    # Empty/invalid tiered_pricing falls back to base + *_above_* path.
+    fallback_entry = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+        "input_cost_per_token_above_100k_tokens": 2e-6,
+        "tiered_pricing": [{"range": [-1, 100_000], "input_cost_per_token": 9e-6}],
+    }
+    assert bla._price_schedule(fallback_entry) == [
+        (0, {"input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6}),
+        (100_000, {"input_cost_per_token": 2e-6, "output_cost_per_token": 2e-6}),
+    ]
+
+
+def test_price_differences_off_peak_semantic_equivalence():
+    ours = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+        "off_peak_pricing": {
+            "input_cost_per_token": 0.1 / 1_000_000.0,  # 1.0000000000000001e-07
+            "output_cost_per_token": 0.2 / 1_000_000.0,
+            "hours_utc": ["16:00-00:00"],
+            "windows": [{"hours_utc": ["00:00-00:00"], "weekdays": [6, 7]}],
+        },
+    }
+    upstream = {
+        "input_cost_per_token": 1e-6,
+        "output_cost_per_token": 2e-6,
+        "off_peak_pricing": {
+            "input_cost_per_token": 1e-7,
+            "output_cost_per_token": 2e-7,
+            "hours_utc": "16:00-00:00",
+            "windows": [{"hours_utc": "00:00-00:00", "weekdays": ["sun", "sat"]}],
+        },
+    }
+    differences, comparable, note = bla._price_differences(ours, upstream)
+    assert differences == []
+    assert comparable > 0
+    assert note is None
 
 
 def test_merge_collision_freezes_previous():

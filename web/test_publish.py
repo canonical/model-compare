@@ -793,6 +793,8 @@ def test_publish_workflow_has_litellm_reporting():
     assert "retention-days: 1" in text
     assert "report_litellm_merge.py" in text
     assert "if: always()" in text
+    assert "steps.deployment.outcome" in text
+    assert "--allow-close" in text
 
 
 def test_publish_copies_the_faq_page(tmp_path, monkeypatch):

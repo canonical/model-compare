@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "overrides": {
+    "openrouter/google/gemini-4-hydrogen": {
+      "resolution": "fragment",
+      "reason": "model-compare prices the cheapest live baseline endpoint (google-ai-studio/flex, $0.75/$3.75 per 1M); LiteLLM upstream carries OpenRouter's advertised list price ($1.50/$7.50). Keep the baseline view: LiteLLM records actual OpenRouter spend from usage.cost, and this map drives estimates."
+    }
+  }
+}
