@@ -102,9 +102,9 @@ REASONING_EFFORT_CHOICES = ("default",) + tuple(reversed(REASONING_GATEWAY_EFFOR
 # unauthenticated downgrade on ranking-critical data; the https direct URL is
 # verified 200 application/json. Do not point this back at github.io.
 QUALITY_CATALOG_URL = "https://model-compare.dev/catalog.json"
-# Cache key for the hydration envelope {"by_id", "generated_at",
-# "schema_version"}. Only usable (non-empty by_id) results are ever written.
-QUALITY_CATALOG_CACHE = "published-catalog"
+# Cache key for the hydration envelope {"by_id", "depths_by_id", "generated_at",
+# "schedules_by_id", "schema_version"}. Only usable results are ever written.
+QUALITY_CATALOG_CACHE = "published-catalog-v2"
 # A published catalog generated more than this many days ago is stale:
 # warn but use -- the records' as_of makes the staleness visible downstream.
 QUALITY_CATALOG_MAX_AGE_DAYS = 14
@@ -1352,15 +1352,141 @@ def _catalog_index(value) -> float | None:
     return index
 
 
+def _parse_catalog_v6_entry(entry: dict, by_id: dict, depths_by_id: dict) -> bool:
+    """Parse one catalog v6 models/filtered entry into by_id and depths_by_id.
+
+    Returns False (after warning) on any malformed field so the caller fails
+    closed for the whole artifact.
+    """
+    model_id = entry["id"]
+    quality = entry.get("quality")
+    match = entry.get("quality_match")
+    if not (match is None and quality is None):
+        if not (isinstance(match, str) and match):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        index = _catalog_index(quality)
+        if index is None:
+            warn("published catalog returned an unexpected response shape")
+            return False
+        effort = entry.get("quality_effort")
+        if effort is not None and not (isinstance(effort, str) and effort):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        recorded = entry.get("quality_as_of")
+        by_id[model_id] = {
+            "index": index,
+            "source": match,
+            "as_of": recorded if isinstance(recorded, str) and recorded else None,
+            "effort": effort,
+        }
+    reasoning = entry.get("reasoning")
+    if reasoning is None:
+        return True
+    if not isinstance(reasoning, dict):
+        warn("published catalog returned an unexpected response shape")
+        return False
+    default_effort = reasoning.get("default_effort")
+    if default_effort is not None and not isinstance(default_effort, str):
+        warn("published catalog returned an unexpected response shape")
+        return False
+    raw_depths = reasoning.get("depths")
+    if raw_depths is None:
+        raw_depths = []
+    if not isinstance(raw_depths, list):
+        warn("published catalog returned an unexpected response shape")
+        return False
+    depths: dict = {}
+    for depth in raw_depths:
+        if not isinstance(depth, dict):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        effort = depth.get("effort")
+        if not (isinstance(effort, str) and effort):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        index = _catalog_index(depth.get("index"))
+        if index is None:
+            warn("published catalog returned an unexpected response shape")
+            return False
+        cost = depth.get("cost_per_task_usd")
+        if cost is not None:
+            cost = _finite_cost(cost)
+            if cost is None:
+                warn("published catalog returned an unexpected response shape")
+                return False
+        source = depth.get("source")
+        if not (isinstance(source, str) and source):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        as_of = depth.get("as_of")
+        if as_of is not None and not isinstance(as_of, str):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        if effort in depths:
+            # Duplicate efforts are ambiguous: fail closed, never guess.
+            warn("published catalog returned an unexpected response shape")
+            return False
+        depths[effort] = {
+            "effort": effort,
+            "index": index,
+            "cost_per_task_usd": cost,
+            "source": source,
+            "as_of": as_of if as_of else None,
+        }
+    unlabeled = reasoning.get("aa_unlabeled")
+    if unlabeled is not None:
+        if not isinstance(unlabeled, dict):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        if any(key not in CATALOG_UNLABELED_KEYS for key in unlabeled):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        if any(key not in unlabeled for key in CATALOG_UNLABELED_KEYS):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        index = _catalog_index(unlabeled.get("index"))
+        if index is None:
+            warn("published catalog returned an unexpected response shape")
+            return False
+        cost = unlabeled.get("cost_per_task_usd")
+        if cost is not None:
+            cost = _finite_cost(cost)
+            if cost is None:
+                warn("published catalog returned an unexpected response shape")
+                return False
+        source = unlabeled.get("source")
+        if not (isinstance(source, str) and source):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        as_of = unlabeled.get("as_of")
+        if as_of is not None and not isinstance(as_of, str):
+            warn("published catalog returned an unexpected response shape")
+            return False
+        unlabeled = {
+            "index": index,
+            "cost_per_task_usd": cost,
+            "source": source,
+            "as_of": as_of if as_of else None,
+        }
+    depths_by_id[model_id] = {
+        "default_effort": default_effort if default_effort else None,
+        "depths": depths,
+        "unlabeled": unlabeled,
+    }
+    return True
+
+
 def _parse_catalog_v6(doc) -> tuple[dict, dict]:
     """Pure parser: a published catalog v6 document -> (by_id, depths_by_id).
 
-    by_id maps id -> {"index", "source", "as_of", "effort"} for the model's
-    main quality (the index at its best selectable depth). The
-    depth map maps id -> {"default_effort", "depths": {effort: record},
-    "unlabeled": record-or-None} for the model's full measured depth list
-    and, when AA measured it without an effort label, the display-only
-    reference; resolve_quality re-selects from it using the
+    Hydrates both ``models`` and enriched ``filtered`` entries (plain stubs in
+    ``filtered`` are skipped). ``by_id`` maps id -> {"index", "source",
+    "as_of", "effort"} for the model's main quality (the index at its best
+    selectable depth). ``depths_by_id`` maps id -> {"default_effort",
+    "depths": {effort: record}, "unlabeled": record-or-None} for the model's
+    full measured depth list and, when AA measured it without an effort label,
+    the display-only reference; resolve_quality re-selects from it using the
     best-selectable-depth rules and the unkeyed run's support data.
 
     Gates (design: failure modes):
@@ -1369,11 +1495,12 @@ def _parse_catalog_v6(doc) -> tuple[dict, dict]:
       "published catalog schema vX, expected 6; skipping hydration" and
       yield empty maps. Mixing semantics is never allowed.
     - Any shape surprise -- a non-dict document, a non-int schema_version,
-      a non-list models, a row without a usable id, a main quality that is
-      not finite/in-range, or malformed depth data -- warns and yields
-      empty maps for the WHOLE artifact. Never a partial hydration, never
-      a raise: the catalog is machine-generated, so one malformed row
-      means this is not the artifact we think it is.
+      a non-list models/filtered, a row without a usable id, duplicate ids
+      within or across models/filtered, a main quality that is not
+      finite/in-range, or malformed depth data -- warns and yields empty maps
+      for the WHOLE artifact. Never a partial hydration, never a raise: the
+      catalog is machine-generated, so one malformed row means this is not
+      the artifact we think it is.
     - Rows with quality None and quality_match None are legitimate
       unmatched models; they are skipped in by_id but their depth block is
       still parsed (a model can have measured depths without a main score).
@@ -1399,131 +1526,46 @@ def _parse_catalog_v6(doc) -> tuple[dict, dict]:
     if not isinstance(models, list):
         warn("published catalog returned an unexpected response shape")
         return {}, {}
+    filtered = doc.get("filtered")
+    if filtered is not None and not isinstance(filtered, list):
+        warn("published catalog returned an unexpected response shape")
+        return {}, {}
     by_id: dict = {}
     depths_by_id: dict = {}
+    seen_ids: set[str] = set()
     for entry in models:
         if not isinstance(entry, dict):
             warn("published catalog returned an unexpected response shape")
             return {}, {}
         model_id = entry.get("id")
-        if not (isinstance(model_id, str) and model_id):
+        if not (isinstance(model_id, str) and model_id) or model_id in seen_ids:
             warn("published catalog returned an unexpected response shape")
             return {}, {}
-        quality = entry.get("quality")
-        match = entry.get("quality_match")
-        if not (match is None and quality is None):
-            if not (isinstance(match, str) and match):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            index = _catalog_index(quality)
-            if index is None:
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            effort = entry.get("quality_effort")
-            if effort is not None and not (isinstance(effort, str) and effort):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            recorded = entry.get("quality_as_of")
-            by_id[model_id] = {
-                "index": index,
-                "source": match,
-                "as_of": recorded if isinstance(recorded, str) and recorded else None,
-                "effort": effort,
-            }
-        reasoning = entry.get("reasoning")
-        if reasoning is None:
+        seen_ids.add(model_id)
+        if not _parse_catalog_v6_entry(entry, by_id, depths_by_id):
+            return {}, {}
+    for entry in filtered or []:
+        if not isinstance(entry, dict):
+            warn("published catalog returned an unexpected response shape")
+            return {}, {}
+        model_id = entry.get("id")
+        if not (isinstance(model_id, str) and model_id) or model_id in seen_ids:
+            warn("published catalog returned an unexpected response shape")
+            return {}, {}
+        seen_ids.add(model_id)
+        if not any(
+            key in entry
+            for key in (
+                "quality",
+                "quality_match",
+                "quality_effort",
+                "quality_as_of",
+                "reasoning",
+            )
+        ):
             continue
-        if not isinstance(reasoning, dict):
-            warn("published catalog returned an unexpected response shape")
+        if not _parse_catalog_v6_entry(entry, by_id, depths_by_id):
             return {}, {}
-        default_effort = reasoning.get("default_effort")
-        if default_effort is not None and not isinstance(default_effort, str):
-            warn("published catalog returned an unexpected response shape")
-            return {}, {}
-        raw_depths = reasoning.get("depths")
-        if raw_depths is None:
-            raw_depths = []
-        if not isinstance(raw_depths, list):
-            warn("published catalog returned an unexpected response shape")
-            return {}, {}
-        depths: dict = {}
-        for depth in raw_depths:
-            if not isinstance(depth, dict):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            effort = depth.get("effort")
-            if not (isinstance(effort, str) and effort):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            index = _catalog_index(depth.get("index"))
-            if index is None:
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            cost = depth.get("cost_per_task_usd")
-            if cost is not None:
-                cost = _finite_cost(cost)
-                if cost is None:
-                    warn("published catalog returned an unexpected response shape")
-                    return {}, {}
-            source = depth.get("source")
-            if not (isinstance(source, str) and source):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            as_of = depth.get("as_of")
-            if as_of is not None and not isinstance(as_of, str):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            if effort in depths:
-                # Duplicate efforts are ambiguous: fail closed, never guess.
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            depths[effort] = {
-                "effort": effort,
-                "index": index,
-                "cost_per_task_usd": cost,
-                "source": source,
-                "as_of": as_of if as_of else None,
-            }
-        unlabeled = reasoning.get("aa_unlabeled")
-        if unlabeled is not None:
-            if not isinstance(unlabeled, dict):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            if any(key not in CATALOG_UNLABELED_KEYS for key in unlabeled):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            if any(key not in unlabeled for key in CATALOG_UNLABELED_KEYS):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            index = _catalog_index(unlabeled.get("index"))
-            if index is None:
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            cost = unlabeled.get("cost_per_task_usd")
-            if cost is not None:
-                cost = _finite_cost(cost)
-                if cost is None:
-                    warn("published catalog returned an unexpected response shape")
-                    return {}, {}
-            source = unlabeled.get("source")
-            if not (isinstance(source, str) and source):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            as_of = unlabeled.get("as_of")
-            if as_of is not None and not isinstance(as_of, str):
-                warn("published catalog returned an unexpected response shape")
-                return {}, {}
-            unlabeled = {
-                "index": index,
-                "cost_per_task_usd": cost,
-                "source": source,
-                "as_of": as_of if as_of else None,
-            }
-        depths_by_id[model_id] = {
-            "default_effort": default_effort if default_effort else None,
-            "depths": depths,
-            "unlabeled": unlabeled,
-        }
     return by_id, depths_by_id
 
 
