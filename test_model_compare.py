@@ -13442,3 +13442,35 @@ def test_run_color_on_dims_dropped_line_on_stderr(monkeypatch, capsys):
     assert "\x1b[2m(dropped: 1 context)\x1b[0m" in err
     assert "1 of 2 listed models ranked" in err
     assert "\x1b[" not in err.replace("\x1b[2m(dropped: 1 context)\x1b[0m", "")
+
+
+# Safety Retention (spec: docs/superpowers/specs/2026-11-20-safety-retention-filter-design.md)
+
+
+def test_zdr_eligible_modes():
+    any_ids = {"google/sr", "meta/sr", "acme/strict"}
+    strict = {"acme/strict"}
+    # strict endpoints survive every mode
+    assert mc.zdr_eligible("acme/strict", any_ids, strict, "none")
+    # a Safety Retention-only model survives only where its author allows it
+    assert not mc.zdr_eligible("google/sr", any_ids, strict, "none")
+    assert mc.zdr_eligible("google/sr", any_ids, strict, "google")
+    assert not mc.zdr_eligible("meta/sr", any_ids, strict, "google")
+    assert mc.zdr_eligible("meta/sr", any_ids, strict, "all")
+    # absent from the list never qualifies, in any mode
+    assert not mc.zdr_eligible("acme/absent", any_ids, strict, "all")
+
+
+def test_zdr_eligible_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        mc.zdr_eligible("acme/x", {"acme/x"}, {"acme/x"}, "some")
+
+
+def test_allow_safety_retention_default_and_choices():
+    assert mc.parse_args([]).allow_safety_retention == "none"
+    assert (
+        mc.parse_args(["--allow-safety-retention", "google"]).allow_safety_retention
+        == "google"
+    )
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--allow-safety-retention", "bogus"])

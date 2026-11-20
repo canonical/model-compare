@@ -71,6 +71,14 @@ OPENROUTER_DISCOUNTS_URL = (
 # Public per-endpoint list of zero-data-retention endpoints; DESIGN.md
 # ("Zero data retention") describes how its entries are interpreted.
 OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
+# The ZDR list is wider than zero data retention: it also carries endpoints
+# whose provider (or OpenRouter) may keep prompts and responses, flagged or
+# not, solely to detect and investigate abuse ("Safety Retention"). They never
+# train on the data but they do store it, so a guardrail that enforces ZDR
+# only can refuse them. --allow-safety-retention decides whether they count;
+# see DESIGN.md ("Zero data retention") and zdr_eligible.
+SAFETY_RETENTION_MODES = ("none", "google", "all")
+GOOGLE_AUTHOR = "google"
 # Supported V2 free-tier replacement for the retired /api/v2/data/llms/models
 # (legacy endpoints 410 after 2026-11-04; see
 # https://artificialanalysis.ai/data-api/migrate-v2-data).
@@ -4118,6 +4126,27 @@ def off_peak_deals(schedules, limit=10):
 # ---------------------------------------------------------------------------
 
 
+def zdr_eligible(model_id, zdr_ids, zdr_strict_ids, mode) -> bool:
+    """True iff the model survives the ZDR gate under ``mode``.
+
+    ``zdr_ids`` is every model with a ZDR-list endpoint; ``zdr_strict_ids`` the
+    subset with at least one endpoint whose ``safety_retention`` is exactly
+    False. A model absent from ``zdr_ids`` never qualifies. ``none`` admits the
+    strict subset only; ``google`` also admits a Safety Retention-only model
+    whose author is Google, mirroring OpenRouter's per-model-group guardrail
+    split; ``all`` admits anything listed.
+    """
+    if mode not in SAFETY_RETENTION_MODES:
+        raise ValueError(f"unknown safety retention mode: {mode!r}")
+    if model_id not in (zdr_ids or set()):
+        return False
+    if mode == "all" or model_id in (zdr_strict_ids or set()):
+        return True
+    if mode == "google":
+        return model_id.split("/", 1)[0] == GOOGLE_AUTHOR
+    return False
+
+
 def build_candidates(
     models,
     args,
@@ -6172,6 +6201,14 @@ def parse_args(argv=None):
         "--no-zdr",
         action="store_true",
         help="consider all models, not just zero-data-retention (ZDR) ones",
+    )
+    filters.add_argument(
+        "--allow-safety-retention",
+        choices=SAFETY_RETENTION_MODES,
+        default="none",
+        help="keep only models with a zero-data-retention endpoint; whether "
+        "endpoints that only offer Safety Retention count: none never, "
+        "google only for Google's models, all always",
     )
     sources.add_argument(
         "--no-cache",
