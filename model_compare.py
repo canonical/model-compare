@@ -3482,6 +3482,7 @@ def resolve_quality(
     unlabeled_lookup=None,
     catalog_depths=None,
     requested_effort="default",
+    enforce_effort_support=False,
 ):
     """Per-candidate quality records: AA API primary, catalog next, OR last.
 
@@ -3536,6 +3537,17 @@ def resolve_quality(
         cand.pop("quality_unlabeled", None)
         record = None
         if depth_mode:
+            reasoning_meta = (
+                cand.get("reasoning")
+                if isinstance(cand.get("reasoning"), dict)
+                else None
+            )
+            effort_allowed = (
+                not enforce_effort_support
+                or requested_effort == "default"
+                or supports_effort(reasoning_meta, requested_effort)
+                or requested_effort == (reasoning_meta or {}).get("default_effort")
+            )
             default_effort = cand.get("default_effort")
             effort = (
                 requested_effort if requested_effort != "default" else default_effort
@@ -3544,42 +3556,47 @@ def resolve_quality(
             group = _depth_group(cand, depth_lookup) if depth_lookup else None
             if group is not None:
                 measured = _ordered_depth_records(group)
-                selected_effort = (
-                    effort
-                    if requested_effort != "default"
-                    else select_default_depth(cand, group)
-                )
-                depth_record = group.get(selected_effort) if selected_effort else None
-                if isinstance(depth_record, dict):
-                    record = {
-                        "index": depth_record["index"],
-                        "source": "aa",
-                        "as_of": depth_record.get("as_of"),
-                        "effort": depth_record.get("effort") or selected_effort,
-                    }
+                if effort_allowed:
+                    selected_effort = (
+                        effort
+                        if requested_effort != "default"
+                        else select_default_depth(cand, group)
+                    )
+                    depth_record = (
+                        group.get(selected_effort) if selected_effort else None
+                    )
+                    if isinstance(depth_record, dict):
+                        record = {
+                            "index": depth_record["index"],
+                            "source": "aa",
+                            "as_of": depth_record.get("as_of"),
+                            "effort": depth_record.get("effort") or selected_effort,
+                        }
             if record is None and catalog_depths is not None:
                 catalog_entry = catalog_depths.get(cand["id"])
                 if isinstance(catalog_entry, dict):
                     catalog_group = catalog_entry.get("depths")
                     if isinstance(catalog_group, dict):
                         measured = _ordered_depth_records(catalog_group)
-                        selected_effort = (
-                            effort
-                            if requested_effort != "default"
-                            else select_default_depth(cand, catalog_group)
-                        )
-                        depth_record = (
-                            catalog_group.get(selected_effort)
-                            if selected_effort
-                            else None
-                        )
-                        if isinstance(depth_record, dict):
-                            record = {
-                                "index": depth_record["index"],
-                                "source": "catalog",
-                                "as_of": depth_record.get("as_of"),
-                                "effort": depth_record.get("effort") or selected_effort,
-                            }
+                        if effort_allowed:
+                            selected_effort = (
+                                effort
+                                if requested_effort != "default"
+                                else select_default_depth(cand, catalog_group)
+                            )
+                            depth_record = (
+                                catalog_group.get(selected_effort)
+                                if selected_effort
+                                else None
+                            )
+                            if isinstance(depth_record, dict):
+                                record = {
+                                    "index": depth_record["index"],
+                                    "source": "catalog",
+                                    "as_of": depth_record.get("as_of"),
+                                    "effort": depth_record.get("effort")
+                                    or selected_effort,
+                                }
             reasoning = cand.get("reasoning")
             is_non_reasoning = (
                 isinstance(reasoning, dict) and reasoning.get("is_reasoning") is False
@@ -3587,7 +3604,12 @@ def resolve_quality(
             fallback_effort = (
                 effort if requested_effort != "default" else default_effort
             )
-            if record is None and is_non_reasoning and fallback_effort == "none":
+            if (
+                effort_allowed
+                and record is None
+                and is_non_reasoning
+                and fallback_effort == "none"
+            ):
                 bench = aa_by_id.get(base_model_id(cand["id"]))
                 intelligence = bench.get("intelligence_index") if bench else None
                 if intelligence is not None:
@@ -5303,6 +5325,117 @@ def print_json(top):
     print(json.dumps(payload, indent=2))
 
 
+def _enrich_filtered_entries(
+    filtered,
+    aa_source,
+    aa_by_id,
+    catalog_quality,
+    *,
+    depth_lookup=None,
+    unlabeled_lookup=None,
+    catalog_depths=None,
+    reasoning_by_id=None,
+    requested_effort="default",
+):
+    """Attach the 7-key quality/reasoning block to filtered entries with AA data.
+
+    Non-mutating: returns new dicts sorted by id. Router aliases (~) and models
+    with no AA/quality/depth/unlabeled/OpenRouter-aa data remain plain stubs.
+    Never modifies candidate-scoped sources.aa counts.
+    """
+    sorted_filtered = sorted(filtered, key=lambda e: e["id"])
+    if depth_lookup is None and catalog_depths is None and unlabeled_lookup is None:
+        return sorted_filtered
+    effective_depth_lookup = (
+        {} if (depth_lookup is None and catalog_depths is None) else depth_lookup
+    )
+    pseudo_cands = []
+    pseudo_by_id = {}
+    for entry in sorted_filtered:
+        model_id = entry.get("id") or ""
+        if not model_id or model_id.startswith("~") or "/" not in model_id:
+            continue
+        raw_reasoning = (reasoning_by_id or {}).get(model_id)
+        reasoning = raw_reasoning if isinstance(raw_reasoning, dict) else None
+        pseudo = {
+            "id": model_id,
+            "name": entry.get("name") or model_id,
+            "reasoning": reasoning,
+            "default_effort": (reasoning or {}).get("default_effort"),
+            "supported_efforts": list((reasoning or {}).get("supported_efforts") or []),
+        }
+        pseudo_cands.append(pseudo)
+        pseudo_by_id[model_id] = pseudo
+    filtered_quality_by_id, filtered_source_by_id = resolve_quality(
+        pseudo_cands,
+        aa_by_id,
+        {},
+        [],
+        aa_source,
+        catalog_quality,
+        depth_lookup=effective_depth_lookup,
+        unlabeled_lookup=unlabeled_lookup,
+        catalog_depths=catalog_depths,
+        requested_effort=requested_effort,
+        enforce_effort_support=True,
+    )
+    out = []
+    for entry in sorted_filtered:
+        model_id = entry.get("id") or ""
+        pseudo = pseudo_by_id.get(model_id)
+        if pseudo is None:
+            out.append(dict(entry))
+            continue
+        record = filtered_quality_by_id.get(model_id)
+        bench = aa_by_id.get(base_model_id(model_id)) or {}
+        has_or_aa = any(
+            bench.get(key) is not None
+            for key in ("intelligence_index", "coding_index", "agentic_index")
+        )
+        unlabeled_rec = _published_unlabeled_record(pseudo)
+        depths = [
+            {
+                "effort": depth.get("effort"),
+                "index": depth.get("index"),
+                "cost_per_task_usd": depth.get("cost_per_task_usd"),
+                "source": depth.get("source"),
+                "as_of": depth.get("as_of"),
+            }
+            for depth in (pseudo.get("reasoning_depths") or [])
+            if isinstance(depth, dict)
+        ]
+        if record is None and not depths and unlabeled_rec is None and not has_or_aa:
+            out.append(dict(entry))
+            continue
+        reasoning = pseudo.get("reasoning")
+        reasoning = reasoning if isinstance(reasoning, dict) else {}
+        out.append(
+            {
+                **entry,
+                "aa": {
+                    "intelligence_index": bench.get("intelligence_index"),
+                    "coding_index": bench.get("coding_index"),
+                    "agentic_index": bench.get("agentic_index"),
+                },
+                "quality": record["index"] if record else None,
+                "quality_match": filtered_source_by_id.get(model_id),
+                "quality_as_of": record.get("as_of") if record else None,
+                "quality_drift": record.get("drift") if record else None,
+                "quality_effort": record.get("effort") if record else None,
+                "reasoning": {
+                    "default_effort": reasoning.get("default_effort"),
+                    "supported_efforts": reasoning.get("supported_efforts") or [],
+                    "default_enabled": reasoning.get("default_enabled"),
+                    "mandatory": reasoning.get("mandatory"),
+                    "supports_max_tokens": reasoning.get("supports_max_tokens"),
+                    "depths": depths,
+                    "aa_unlabeled": unlabeled_rec,
+                },
+            }
+        )
+    return out
+
+
 def build_catalog(
     args,
     models,
@@ -5325,6 +5458,7 @@ def build_catalog(
     reasoning_by_id=None,
     requested_effort="default",
     schedule_entries=None,
+    unlabeled_lookup=None,
 ):
     """Assemble the full-catalog document (see README "Catalog output").
 
@@ -5649,7 +5783,17 @@ def build_catalog(
         # history tabs, the highlights diff, best.txt) projects from or is
         # checked against it. models keeps its own balanced sort.
         "rankings": catalog_rankings(candidates, weights),
-        "filtered": sorted(filtered, key=lambda e: e["id"]),
+        "filtered": _enrich_filtered_entries(
+            filtered,
+            aa_source,
+            aa_by_id,
+            catalog_quality,
+            depth_lookup=depth_lookup,
+            unlabeled_lookup=unlabeled_lookup,
+            catalog_depths=catalog_depths,
+            reasoning_by_id=reasoning_by_id,
+            requested_effort=requested_effort,
+        ),
     }
 
 
@@ -6144,6 +6288,7 @@ def run(args, models, or_cached) -> int:
                 reasoning_by_id=reasoning_by_id,
                 requested_effort=args.reasoning_effort,
                 schedule_entries=schedule_entries,
+                unlabeled_lookup=unlabeled_lookup,
             )
         )
         return 0
