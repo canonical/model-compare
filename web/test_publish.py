@@ -238,6 +238,12 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
         for i in range(len(json_calls))
     ] == ["balanced", "price", "quality"]
     assert (out / "best.txt").read_text().strip() == "openrouter/z-ai/glm-5.3-flash"
+    # Every ranking run must agree on the safety-retention mode: --best off one
+    # setting and the tables off another lets best.txt name an unranked model.
+    model_compare_calls = [cmd for cmd in calls if Path(cmd[1]).name == "model_compare.py"]
+    assert len(model_compare_calls) == 5
+    for cmd in model_compare_calls:
+        assert cmd[cmd.index("--allow-safety-retention") + 1] == "google"
     assert (out / "index.html").is_file()
     assert (out / "style.css").is_file()
     assert (out / "app.js").is_file()

@@ -34,6 +34,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = Path(__file__).resolve().parent
 USER_AGENT = "model-compare (https://github.com/canonical/model-compare)"
 PRIORITIES = ("balanced", "price", "quality")
+# The mode every ranking run shares. The org's guardrail enforces ZDR and
+# allows Safety Retention for Google's models only, so the published tables
+# use the same rule; see model_compare.py --allow-safety-retention.
+MODEL_COMPARE_FILTER_ARGS = ["--allow-safety-retention", "google"]
 PREV_HISTORY_URL = "https://canonical.github.io/model-compare/history.json"
 PREV_HIGHLIGHTS_URL = "https://canonical.github.io/model-compare/highlights.json"
 PREV_LITELLM_MERGED_URL = "https://canonical.github.io/model-compare/litellm.json"
@@ -493,16 +497,31 @@ def build_site(output_dir: Path) -> None:
         # Not guaranteed: degraded fetches (empty discounts, no AA entries)
         # are never cached, so a later run may fetch different data. That
         # fails loudly (order_rows, check_best) and the next run self-heals.
-        run_script(model_compare, ["--catalog"], out=scratch / "catalog.json")
+        run_script(
+            model_compare,
+            ["--catalog", *MODEL_COMPARE_FILTER_ARGS],
+            out=scratch / "catalog.json",
+        )
         # Gates before anything else runs, so a failed AA source gate or an
         # endpoint-drop exodus writes no publish artifacts to output_dir.
         check_aa_source(scratch / "catalog.json")
         check_endpoint_drops(scratch / "catalog.json")
-        run_script(model_compare, ["--best"], out=output_dir / "best.txt")
+        run_script(
+            model_compare,
+            ["--best", *MODEL_COMPARE_FILTER_ARGS],
+            out=output_dir / "best.txt",
+        )
         for priority in PRIORITIES:
             run_script(
                 model_compare,
-                ["--priority", priority, "--json", "--top", "20"],
+                [
+                    "--priority",
+                    priority,
+                    "--json",
+                    "--top",
+                    "20",
+                    *MODEL_COMPARE_FILTER_ARGS,
+                ],
                 out=scratch / f"{priority}.json",
             )
 
