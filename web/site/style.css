@@ -284,7 +284,9 @@
       #table .caveat {
         color: var(--muted);
       }
-      #table .na {
+      #table .na,
+      #deals .na,
+      #table .depth-table .depth-unlabeled td {
         color: var(--muted);
       }
       #table tbody tr[role="button"] {
