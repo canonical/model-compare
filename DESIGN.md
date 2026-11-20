@@ -340,14 +340,18 @@ for all other models, with the stricter setting winning across account and
 guardrail. A model served on Google Vertex is grouped by its author, so
 `meta/muse-ember` on a Google endpoint falls under "all other models".
 
-A model id is therefore *strict* iff at least one of its entries has
-`safety_retention` exactly `False`; a missing or non-boolean value is unknown
-and unknown is never strict (fail closed). `--allow-safety-retention` decides
-whether a model that is listed but not strict survives: `none` (the default)
-drops it, `google` keeps it when its author slug is `google`, and `all` keeps
-every listed model, which is the behaviour before this distinction existed.
-The drop is reported as `safety retention`, distinct from `not ZDR` (absent
-from the list entirely), and `--no-zdr` makes the whole knob inert.
+Parsing therefore yields three sets of ids: every listed model; the *strict*
+ones, with at least one entry whose `safety_retention` is exactly `False`; and
+the *safety-retention* ones, with at least one entry whose `safety_retention`
+is exactly `True`. A missing, `null` or non-boolean value lands in neither of
+the latter two, so an unknown retention status is never strict and never
+counts as the explicit Safety Retention a Google model may use (fail closed).
+`--allow-safety-retention` decides which set survives: `none` (the default)
+keeps the strict set only; `google` also keeps an explicitly Safety Retention
+model whose author slug is `google`; and `all` keeps every listed model,
+including unknown-status ones, which is the behaviour before this distinction
+existed. The drop is reported as `safety retention`, distinct from `not ZDR`
+(absent from the list entirely), and `--no-zdr` makes the whole knob inert.
 
 The default is `none` because it is the only setting that is right for a
 stranger running the script against their own account. The published site

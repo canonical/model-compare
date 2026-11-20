@@ -79,11 +79,12 @@ OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
 # see DESIGN.md ("Zero data retention") and zdr_eligible.
 SAFETY_RETENTION_MODES = ("none", "google", "all")
 GOOGLE_AUTHOR = "google"
-# Cache key for the parsed ZDR list. v4 carries the retention split
-# ({"zdr": [...], "strict": [...]}); v3 was a bare id list with no retention
-# status and must never be read -- it cannot tell a Safety Retention endpoint
-# from a strict one.
-ZDR_CACHE = "openrouter-zdr-v4"
+# Cache key for the parsed ZDR list. v5 carries the full retention split
+# ({"zdr": [...], "strict": [...], "sr": [...]}); v3 was a bare id list with no
+# retention status and v4 stored only two lists, so neither can be read -- the
+# difference between "explicitly Safety Retention" and "retention status
+# unknown" is exactly what the gate needs.
+ZDR_CACHE = "openrouter-zdr-v5"
 # Supported V2 free-tier replacement for the retired /api/v2/data/llms/models
 # (legacy endpoints 410 after 2026-11-04; see
 # https://artificialanalysis.ai/data-api/migrate-v2-data).
@@ -1792,6 +1793,7 @@ def fetch_openrouter_frontend(args):
     aa_by_id = {}
     zdr_ids = set()
     zdr_strict_ids = set()
+    zdr_sr_ids = set()
     frontend_models = []
     cache_hits = set()
 
@@ -1864,22 +1866,32 @@ def fetch_openrouter_frontend(args):
                 save_cache(FRONTEND_REASONING_CACHE, frontend_models)
 
     if args.no_zdr:
-        return discounts, zdr_ids, zdr_strict_ids, aa_by_id, cache_hits, frontend_models
+        return (
+            discounts,
+            zdr_ids,
+            zdr_strict_ids,
+            zdr_sr_ids,
+            aa_by_id,
+            cache_hits,
+            frontend_models,
+        )
     if not args.no_cache:
-        # v4: the split comes from the per-endpoint ZDR list; v1/v2 sets were
-        # derived from the models/find response and v3 was a bare id list with
-        # no retention status, so none of them may be read.
+        # v5: the split comes from the per-endpoint ZDR list; v1/v2 sets were
+        # derived from the models/find response, v3 was a bare id list and v4
+        # had only two lists, so none of them may be read.
         cached = load_cache(ZDR_CACHE, args.cache_ttl)
         if (
             isinstance(cached, dict)
             and isinstance(cached.get("zdr"), list)
             and isinstance(cached.get("strict"), list)
+            and isinstance(cached.get("sr"), list)
             and cached["zdr"]
         ):
             return (
                 discounts,
                 set(cached["zdr"]),
                 set(cached["strict"]),
+                set(cached["sr"]),
                 aa_by_id,
                 cache_hits | {"zdr"},
                 frontend_models,
@@ -1888,7 +1900,15 @@ def fetch_openrouter_frontend(args):
         payload = fetch_json(OPENROUTER_ZDR_URL, timeout=30)
     except Exception as exc:
         warn(f"could not fetch ZDR data: {exc}")
-        return discounts, zdr_ids, zdr_strict_ids, aa_by_id, cache_hits, frontend_models
+        return (
+            discounts,
+            zdr_ids,
+            zdr_strict_ids,
+            zdr_sr_ids,
+            aa_by_id,
+            cache_hits,
+            frontend_models,
+        )
     # One entry per ZDR endpoint, keyed by the exact model id (variants
     # such as :free are listed individually). An id is ZDR iff it has at
     # least one ZDR endpoint. The models/find ?zdr=true filter cannot be
@@ -1904,13 +1924,17 @@ def fetch_openrouter_frontend(args):
     #
     # The list is wider than zero data retention: an endpoint flagged
     # safety_retention=True may retain prompts for abuse investigation, so it
-    # is not ZDR. An id is "strict" iff at least one of its endpoints says
-    # safety_retention is exactly False -- a missing or non-boolean value is
-    # unknown, and unknown is never strict (fail closed), which is what
-    # --allow-safety-retention none and google then refuse.
+    # is not ZDR. Three sets come out of it: every listed id; the "strict" ids,
+    # which have at least one endpoint saying safety_retention is exactly
+    # False; and the "sr" ids, which have at least one endpoint saying it is
+    # exactly True. A missing, null or non-boolean value lands in neither of
+    # the latter two, so an unknown retention status is never strict and never
+    # counts as the explicit Safety Retention a Google model may use -- fail
+    # closed, which is what --allow-safety-retention none and google refuse.
     entries = payload.get("data") if isinstance(payload, dict) else None
     ids = set()
     strict_ids = set()
+    sr_ids = set()
     for entry in entries if isinstance(entries, list) else []:
         if not isinstance(entry, dict):
             continue
@@ -1920,13 +1944,31 @@ def fetch_openrouter_frontend(args):
         model_id = entry.get("model_id")
         if isinstance(model_id, str) and model_id:
             ids.add(model_id)
-            if entry.get("safety_retention") is False:
+            flag = entry.get("safety_retention")
+            if flag is False:
                 strict_ids.add(model_id)
+            elif flag is True:
+                sr_ids.add(model_id)
     if not ids:
         warn("no ZDR entries found; treating ZDR data as unavailable")
-        return discounts, zdr_ids, zdr_strict_ids, aa_by_id, cache_hits, frontend_models
-    save_cache(ZDR_CACHE, {"zdr": sorted(ids), "strict": sorted(strict_ids)})
-    return discounts, ids, strict_ids, aa_by_id, cache_hits, frontend_models
+        return (
+            discounts,
+            zdr_ids,
+            zdr_strict_ids,
+            zdr_sr_ids,
+            aa_by_id,
+            cache_hits,
+            frontend_models,
+        )
+    save_cache(
+        ZDR_CACHE,
+        {
+            "zdr": sorted(ids),
+            "strict": sorted(strict_ids),
+            "sr": sorted(sr_ids),
+        },
+    )
+    return discounts, ids, strict_ids, sr_ids, aa_by_id, cache_hits, frontend_models
 
 
 def parse_price(value) -> float | None:
@@ -4152,15 +4194,19 @@ def off_peak_deals(schedules, limit=10):
 # ---------------------------------------------------------------------------
 
 
-def zdr_eligible(model_id, zdr_ids, zdr_strict_ids, mode) -> bool:
+def zdr_eligible(model_id, zdr_ids, zdr_strict_ids, zdr_sr_ids, mode) -> bool:
     """True iff the model survives the ZDR gate under ``mode``.
 
     ``zdr_ids`` is every model with a ZDR-list endpoint; ``zdr_strict_ids`` the
     subset with at least one endpoint whose ``safety_retention`` is exactly
-    False. A model absent from ``zdr_ids`` never qualifies. ``none`` admits the
-    strict subset only; ``google`` also admits a Safety Retention-only model
-    whose author is Google, mirroring OpenRouter's per-model-group guardrail
-    split; ``all`` admits anything listed.
+    False; ``zdr_sr_ids`` the subset with at least one endpoint whose
+    ``safety_retention`` is exactly True. A model in neither of the latter two
+    has an unknown retention status and is never admitted by ``none`` or
+    ``google`` (fail closed). A model absent from ``zdr_ids`` never qualifies.
+    ``none`` admits the strict subset only; ``google`` also admits an
+    explicitly Safety Retention model whose author is Google, mirroring
+    OpenRouter's per-model-group guardrail split; ``all`` admits anything
+    listed, as before this distinction existed.
     """
     if mode not in SAFETY_RETENTION_MODES:
         raise ValueError(f"unknown safety retention mode: {mode!r}")
@@ -4169,7 +4215,12 @@ def zdr_eligible(model_id, zdr_ids, zdr_strict_ids, mode) -> bool:
     if mode == "all" or model_id in (zdr_strict_ids or set()):
         return True
     if mode == "google":
-        return model_id.split("/", 1)[0] == GOOGLE_AUTHOR
+        return (
+            model_id in (zdr_sr_ids or set())
+            and isinstance(model_id, str)
+            and "/" in model_id
+            and model_id.partition("/")[0] == GOOGLE_AUTHOR
+        )
     return False
 
 
@@ -4181,15 +4232,17 @@ def build_candidates(
     filtered_out=None,
     *,
     zdr_strict_ids=None,
+    zdr_sr_ids=None,
     reasoning_by_id: dict[str, dict] | None = None,
 ):
     now = time.time()
     require_tools = not args.no_require_tools
     requested_effort = getattr(args, "reasoning_effort", "default")
-    # One id set means "all of these are strict": a caller that does not know
-    # the retention split keeps the pre-Safety-Retention behaviour.
-    if zdr_strict_ids is None:
-        zdr_strict_ids = zdr_ids
+    # Fail closed: a caller that does not supply the retention split cannot
+    # prove any listed model is strict, so none of them qualifies under the
+    # default mode. Callers that know the set is strict pass it explicitly.
+    zdr_strict_ids = zdr_strict_ids or set()
+    zdr_sr_ids = zdr_sr_ids or set()
     safety_mode = getattr(args, "allow_safety_retention", "none")
     dropped = {}
     candidates = []
@@ -4272,7 +4325,9 @@ def build_candidates(
             # Listed, but its only ZDR-list endpoints may be Safety Retention
             # ones: a narrower reason than "not ZDR", because the model is in
             # the list and only the mode keeps it out.
-            if not zdr_eligible(model_id, zdr_ids, zdr_strict_ids, safety_mode):
+            if not zdr_eligible(
+                model_id, zdr_ids, zdr_strict_ids, zdr_sr_ids, safety_mode
+            ):
                 drop("safety retention", model_id, model.get("name"))
                 continue
         modality = (model.get("architecture") or {}).get("modality") or ""
@@ -4376,7 +4431,7 @@ def build_candidates(
                 "safety_retention": (
                     None
                     if args.no_zdr
-                    else model_id in (zdr_ids or set())
+                    else model_id in (zdr_sr_ids or set())
                     and model_id not in (zdr_strict_ids or set())
                 ),
                 "expired": expired,
@@ -6300,6 +6355,7 @@ def run(args, models, or_cached) -> int:
         discounts,
         zdr_ids,
         zdr_strict_ids,
+        zdr_sr_ids,
         aa_by_id,
         frontend_cache_hits,
         frontend_models,
@@ -6356,6 +6412,7 @@ def run(args, models, or_cached) -> int:
         zdr_ids,
         filtered,
         zdr_strict_ids=zdr_strict_ids,
+        zdr_sr_ids=zdr_sr_ids,
         reasoning_by_id=reasoning_by_id,
     )
     # The provider-aware stage: every surviving candidate is repriced at its

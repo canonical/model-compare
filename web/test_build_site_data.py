@@ -2713,3 +2713,28 @@ def test_catalog_rejects_safety_retention_when_zdr_not_required():
     doc["models"][0]["safety_retention"] = False
     with pytest.raises(ValueError):
         bsd.validate_catalog(doc)
+
+
+def test_catalog_accepts_allowance_dependent_models_under_google_and_all():
+    # the published-site shape: mode google, Google models flagged true
+    for mode in ("google", "all"):
+        doc = make_catalog()
+        doc["parameters"]["allow_safety_retention"] = mode
+        doc["models"][0]["safety_retention"] = True
+        bsd.validate_catalog(doc)
+
+
+def test_catalog_rejects_null_allow_safety_retention():
+    # present-but-null is a broken producer, not an absent key
+    doc = make_catalog()
+    doc["parameters"]["allow_safety_retention"] = None
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_catalog_accepts_null_safety_retention_when_zdr_not_required():
+    doc = make_catalog()
+    doc["parameters"]["zdr_required"] = False
+    doc["models"][0]["zdr"] = None
+    doc["models"][0]["safety_retention"] = None
+    bsd.validate_catalog(doc)

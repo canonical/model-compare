@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ZDR list also carries Safety Retention endpoints, which may store prompts to
   investigate abuse; they are no longer counted as ZDR unless the mode allows
   them. `google` matches a guardrail that permits Safety Retention for Google's
-  models only, and is what the published site and plugin use.
+  models only, and is what the published site (and so the plugin's remote
+  catalog) uses; a plugin run that executes the vendored script locally uses
+  the `none` default.
 - The catalog records the choice: `parameters.allow_safety_retention`, a
   per-model `safety_retention` flag, and a `safety retention` drop reason.
   Both fields are additive — `schema_version` stays 6.

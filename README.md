@@ -33,6 +33,7 @@ $ ./model_compare.py --best                   # print only the #1 model ID for s
 $ ./model_compare.py --priority price --top 3 # three cheapest sensible picks
 $ ./model_compare.py --reasoning-effort max   # rank strictly at max thinking effort
 $ ./model_compare.py --off-peak --depths      # include off-peak deals and per-depth scores
+$ ./model_compare.py --allow-safety-retention google  # match the published site
 ```
 
 Exit codes: `0` on success, `1` on network/fetch failure, `2` when no models survive the filters, and `130` on `Ctrl-C`.

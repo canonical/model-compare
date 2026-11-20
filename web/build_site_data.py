@@ -761,7 +761,10 @@ def validate_catalog(document) -> None:
     # Additive (schema v6, no bump): which retention tier counts as ZDR.
     # Optional so a catalog written before the flag existed still validates.
     safety_mode = parameters.get("allow_safety_retention")
-    if safety_mode is not None and safety_mode not in SAFETY_RETENTION_MODES:
+    if (
+        "allow_safety_retention" in parameters
+        and safety_mode not in SAFETY_RETENTION_MODES
+    ):
         raise ValueError(
             "catalog parameters.allow_safety_retention must be one of "
             f"{', '.join(SAFETY_RETENTION_MODES)}: {safety_mode!r}"
