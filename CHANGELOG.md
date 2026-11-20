@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.11] - 2026-11-20
+
+### Added
+
+- Tool version is `model-compare 0.7.11`.
+- The site is split into four tabs — Picks, OpenCode plugin, How to use and
+  FAQ — with refreshed navigation and page-specific assets.
+- `catalog.json` filtered entries now carry AA quality and depth records, so
+  `--no-zdr` runs are not quality-blind; unlabeled AA measurements display as
+  `unknown` in the CLI tables, `--depths` and the site tables.
+- LiteLLM collision handling is now hybrid: price-equivalent upstream
+  collisions merge automatically (keeping upstream's richer entry), genuine
+  price conflicts freeze and report per-key differences, and
+  `web/litellm_collision_overrides.json` records reviewed resolutions.
+- `litellm_merge_status.json` carries `collision_details` with each key's
+  resolution, price equality and differing fields. The deduplicated issue
+  renders the same per-key price-difference table and closes itself after a
+  successful Pages deploy rebuilds the map.
+
+### Changed
+
+- `litellm` is pinned to 1.110.2 and the `litellm-compat` gate runs on
+  Python 3.15; Renovate keeps the job inside LiteLLM's `<3.16` ceiling.
+- README and site documentation are refreshed around the tabbed site and the
+  LiteLLM artifacts.
+
+### Fixed
+
+- The `litellm-compat` gate fails loudly when LiteLLM cannot be imported
+  instead of silently turning every compatibility test into a skip.
+- Filtered catalog quality requires matching `quality` and `quality_match`
+  nullness.
+- The LiteLLM alert issue is closed only after a successful Pages deploy.
+
 ## [0.7.10] - 2026-11-09
 
 ### Added
