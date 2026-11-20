@@ -815,6 +815,13 @@ def test_publish_copies_the_faq_page(tmp_path, monkeypatch):
     assert (out / "faq.html").is_file()
 
 
+def test_faq_explains_safety_retention_without_cli_flags():
+    site = Path(__file__).resolve().parent / "site"
+    faq = (site / "faq.html").read_text(encoding="utf-8")
+    assert "Safety Retention" in faq
+    assert "--allow-safety-retention" not in faq
+
+
 def test_faq_page_is_linked_from_the_index_footer_and_answers_routing():
     site = Path(__file__).resolve().parent / "site"
     faq = (site / "faq.html").read_text(encoding="utf-8")

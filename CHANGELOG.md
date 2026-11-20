@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `--allow-safety-retention {none,google,all}` (default `none`). OpenRouter's
+  ZDR list also carries Safety Retention endpoints, which may store prompts to
+  investigate abuse; they are no longer counted as ZDR unless the mode allows
+  them. `google` matches a guardrail that permits Safety Retention for Google's
+  models only, and is what the published site and plugin use.
+- The catalog records the choice: `parameters.allow_safety_retention`, a
+  per-model `safety_retention` flag, and a `safety retention` drop reason.
+  Both fields are additive — `schema_version` stays 6.
+
 ## [0.7.11] - 2026-11-20
 
 ### Added

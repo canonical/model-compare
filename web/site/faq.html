@@ -173,7 +173,10 @@
           <li>
             <strong>Zero-data-retention (ZDR) only:</strong> a model must have
             at least one live ZDR endpoint — a provider committed to not storing
-            or training on your prompts and completions.
+            or training on your prompts and completions. An endpoint that only
+            offers <strong>Safety Retention</strong> does not count: it may keep
+            prompts and responses to investigate abuse. Google's models are the
+            exception here, because that is what our guardrail allows.
           </li>
           <li>
             <strong>1M-token context window:</strong> models with smaller

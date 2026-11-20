@@ -327,6 +327,43 @@ ids it lacked were `:batch` or `:free` variants. If the list cannot be fetched
 or yields no entries, the tool refuses to rank rather than silently
 considering non-ZDR models; pass `--no-zdr` to explicitly consider everything.
 
+### Safety Retention
+
+The list is wider than zero data retention. Each entry also carries a
+`safety_retention` boolean, and `true` marks an endpoint whose provider — or
+OpenRouter itself — may keep prompts and responses from any request, flagged
+or not, solely to detect and investigate abuse. Such an endpoint never trains
+on the data, but it does store it, so it is not ZDR and a guardrail that
+enforces ZDR may refuse it outright. OpenRouter decides whether ZDR-enforced
+requests may use them **per model group**: separately for Google's models and
+for all other models, with the stricter setting winning across account and
+guardrail. A model served on Google Vertex is grouped by its author, so
+`meta/muse-ember` on a Google endpoint falls under "all other models".
+
+A model id is therefore *strict* iff at least one of its entries has
+`safety_retention` exactly `False`; a missing or non-boolean value is unknown
+and unknown is never strict (fail closed). `--allow-safety-retention` decides
+whether a model that is listed but not strict survives: `none` (the default)
+drops it, `google` keeps it when its author slug is `google`, and `all` keeps
+every listed model, which is the behaviour before this distinction existed.
+The drop is reported as `safety retention`, distinct from `not ZDR` (absent
+from the list entirely), and `--no-zdr` makes the whole knob inert.
+
+The default is `none` because it is the only setting that is right for a
+stranger running the script against their own account. The published site
+passes `google`, because that is what the org's guardrail permits: it enforces
+ZDR and allows Safety Retention for Google's models only. Excluding Safety
+Retention outright would remove 26 usable Google models from the tables,
+including the top balanced picks, so the published artifacts state the choice
+rather than hiding it.
+
+`parameters.allow_safety_retention` and the per-model `safety_retention` field
+are both additive — the meaning of `zdr` is unchanged — so `schema_version`
+stays `6`. `web/build_site_data.py` accepts a catalog without them (written
+before this change) and checks them when present, including that no candidate
+depends on the allowance under `none` and that the field is `null` when no ZDR
+gate ran.
+
 ## CLI output
 
 The plain table path splits across the two streams. stdout carries the table,
@@ -433,7 +470,9 @@ reconciliation"): fields may be added without notice, but renaming,
 removing, **or changing the meaning of** one bumps the version.
 
 Top level: `schema_version`, `tool`, `generated_at`, `parameters` (all knobs,
-including the requested `reasoning_effort`, plus the **effective**
+including the requested `reasoning_effort`, `allow_safety_retention` — the
+mode the run applied, one of `none`/`google`/`all`, inert under `--no-zdr` —
+plus the **effective**
 per-priority `weights` — reproducing `scores.overall`
 needs nothing else), `sources` (`openrouter`, `aa` with `mode`
 `aa`/`catalog`/`none` — the run's quality chain, not a match outcome; see
@@ -513,7 +552,10 @@ baseline endpoint's price structure in full** (see below) — `context`,
 the models-API `top_provider.max_completion_tokens`; null when neither is
 known), `input_modalities` (the models-API `architecture.input_modalities`
 list, possibly empty),
-`listed_at`, `age_days`, `tool_calling`, `zdr`, `discount`, `expired`,
+`listed_at`, `age_days`, `tool_calling`, `zdr`, `safety_retention` (`true`
+when every ZDR-list endpoint the model has is a Safety Retention one, so it
+survives only because the mode allows it; `null` under `--no-zdr`),
+`discount`, `expired`,
 `quality` (the AA intelligence index at the scored effort — best measured
 selectable by default, or the exact explicit effort — or `null`), `aa` (the
 OpenRouter-published
@@ -631,7 +673,7 @@ the tool counts internally:
 
 ```
 malformed id, context, pricing, schedule, free, batch, no discount, not ZDR,
-modality, tool calling, expired, age, reasoning effort,
+safety retention, modality, tool calling, expired, age, reasoning effort,
 no_baseline_eligible_endpoint, endpoint_fetch_failed
 ```
 
