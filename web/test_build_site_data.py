@@ -2620,6 +2620,18 @@ def test_validate_catalog_rejects_partial_filtered_quality_block(missing_key):
             ),
             "duplicate",
         ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(quality=50.0, quality_match=None)
+            ),
+            "quality and quality_match",
+        ),
+        (
+            lambda doc: doc["filtered"].append(
+                _enriched_filtered_entry(quality=None, quality_match="aa")
+            ),
+            "quality and quality_match",
+        ),
     ],
 )
 def test_validate_catalog_rejects_malformed_filtered_quality_and_duplicates(

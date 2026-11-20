@@ -993,6 +993,11 @@ def validate_catalog(document) -> None:
                     f"missing {', '.join(missing)}"
                 )
             _validate_catalog_quality_fields(entry, f"filtered[{i}]")
+            if (entry["quality"] is None) != (entry["quality_match"] is None):
+                raise ValueError(
+                    f"filtered[{i}] quality and quality_match must both be null "
+                    "or non-null"
+                )
         filtered_ids.append(entry["id"])
     if len(set(filtered_ids)) != len(filtered_ids):
         raise ValueError("catalog filtered contains duplicate ids")
