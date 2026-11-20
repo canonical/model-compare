@@ -13557,3 +13557,79 @@ def test_fetch_openrouter_frontend_ignores_v3_zdr_cache(monkeypatch, tmp_path):
     ) = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
     assert mc.OPENROUTER_ZDR_URL in calls
     assert zdr_strict_ids == {"acme/a", "acme/b:batch", "acme/both"}
+
+
+def test_build_candidates_safety_retention_modes():
+    models = [
+        make_model(id="google/sr"),
+        make_model(id="meta/sr"),
+        make_model(id="acme/strict"),
+        make_model(id="acme/both"),
+    ]
+    zdr = {"google/sr", "meta/sr", "acme/strict", "acme/both"}
+    strict = {"acme/strict", "acme/both"}
+
+    def run(mode):
+        args = make_args(allow_safety_retention=mode)
+        return mc.build_candidates(models, args, {}, zdr, zdr_strict_ids=strict)
+
+    kept, dropped = run("none")
+    assert [c["id"] for c in kept] == ["acme/strict", "acme/both"]
+    assert dropped["safety retention"] == 2
+
+    kept, dropped = run("google")
+    assert [c["id"] for c in kept] == ["google/sr", "acme/strict", "acme/both"]
+    assert dropped["safety retention"] == 1
+
+    kept, dropped = run("all")
+    assert len(kept) == 4
+    assert "safety retention" not in dropped
+
+
+def test_build_candidates_safety_retention_field():
+    models = [make_model(id="google/sr"), make_model(id="acme/strict")]
+    zdr = {"google/sr", "acme/strict"}
+    strict = {"acme/strict"}
+    args = make_args(allow_safety_retention="google")
+    kept, _ = mc.build_candidates(models, args, {}, zdr, zdr_strict_ids=strict)
+    flags = {c["id"]: c["safety_retention"] for c in kept}
+    # "depends on the allowance", not "has an SR endpoint"
+    assert flags == {"google/sr": True, "acme/strict": False}
+
+
+def test_build_candidates_no_zdr_nulls_safety_retention():
+    models = [make_model(id="meta/sr")]
+    args = make_args(no_zdr=True)
+    kept, _ = mc.build_candidates(models, args, {}, {"meta/sr"}, zdr_strict_ids=set())
+    assert [c["id"] for c in kept] == ["meta/sr"]
+    assert kept[0]["safety_retention"] is None
+
+
+def test_build_candidates_without_strict_set_treats_all_as_strict():
+    # backward compatibility: one id set means "all of these are strict"
+    models = [make_model(id="acme/model-a")]
+    kept, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"})
+    assert [c["id"] for c in kept] == ["acme/model-a"]
+    assert "safety retention" not in dropped
+
+
+def test_run_refuses_when_every_endpoint_is_safety_retention(monkeypatch, capsys):
+    # A Google-only world under the default mode: nothing qualifies, and the
+    # run exits 2 rather than silently ranking retaining endpoints.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    monkeypatch.setattr(
+        mc,
+        "fetch_openrouter_frontend",
+        lambda args: ({}, {"google/sr"}, set(), {}, set(), []),
+    )
+    monkeypatch.setattr(mc, "fetch_aa_entries", lambda args: ([], None, False, None))
+    monkeypatch.setattr(mc, "fetch_quality_catalog", lambda args: None)
+    # The endpoint stage would happily price it, so the empty pool can only
+    # come from the ZDR gate -- otherwise this test would pass for the wrong
+    # reason (an endpoint-stage drop also exits 2).
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: [_endpoint()])
+    models = [make_model(id="google/sr")]
+    assert mc.run(make_args(), models, False) == 2
+    # the reason is recorded, not inferred: the pool drop is named
+    assert "no models satisfy the filters" in capsys.readouterr().err

@@ -4178,11 +4178,18 @@ def build_candidates(
     discounts,
     zdr_ids,
     filtered_out=None,
+    *,
+    zdr_strict_ids=None,
     reasoning_by_id: dict[str, dict] | None = None,
 ):
     now = time.time()
     require_tools = not args.no_require_tools
     requested_effort = getattr(args, "reasoning_effort", "default")
+    # One id set means "all of these are strict": a caller that does not know
+    # the retention split keeps the pre-Safety-Retention behaviour.
+    if zdr_strict_ids is None:
+        zdr_strict_ids = zdr_ids
+    safety_mode = getattr(args, "allow_safety_retention", "none")
     dropped = {}
     candidates = []
 
@@ -4257,9 +4264,16 @@ def build_candidates(
         if args.discount and not has_discount(discount):
             drop("no discount", model_id, model.get("name"))
             continue
-        if not args.no_zdr and model_id not in (zdr_ids or set()):
-            drop("not ZDR", model_id, model.get("name"))
-            continue
+        if not args.no_zdr:
+            if model_id not in (zdr_ids or set()):
+                drop("not ZDR", model_id, model.get("name"))
+                continue
+            # Listed, but its only ZDR-list endpoints may be Safety Retention
+            # ones: a narrower reason than "not ZDR", because the model is in
+            # the list and only the mode keeps it out.
+            if not zdr_eligible(model_id, zdr_ids, zdr_strict_ids, safety_mode):
+                drop("safety retention", model_id, model.get("name"))
+                continue
         modality = (model.get("architecture") or {}).get("modality") or ""
         output_modality = (
             modality.split("->")[-1].strip() if "->" in modality else "text"
@@ -4358,6 +4372,12 @@ def build_candidates(
                 "created": created,
                 "tool_calling": tool_calling,
                 "zdr": None if args.no_zdr else model_id in (zdr_ids or set()),
+                "safety_retention": (
+                    None
+                    if args.no_zdr
+                    else model_id in (zdr_ids or set())
+                    and model_id not in (zdr_strict_ids or set())
+                ),
                 "expired": expired,
                 "reasoning": reasoning,
                 "default_effort": (reasoning or {}).get("default_effort"),
@@ -6332,6 +6352,7 @@ def run(args, models, or_cached) -> int:
         discounts,
         zdr_ids,
         filtered,
+        zdr_strict_ids=zdr_strict_ids,
         reasoning_by_id=reasoning_by_id,
     )
     # The provider-aware stage: every surviving candidate is repriced at its
