@@ -6169,12 +6169,11 @@ def paged_stdout(argv: list[str]):
 # one line that must never clip.
 HELP_WIDTH = 80
 EPILOG_HEADING = "Examples:"
-# Help vocabulary: option names and their choice lists read as one thing, and
-# a group heading reads as another. Cyan and bold are the tool's own
-# attributes (see SGR_*), so help reuses them rather than inventing a palette.
-HELP_VALUE_RE = re.compile(r"\{[^{}\s]+\}")
-HELP_OPTION_RE = re.compile(r"(?m)^(?P<indent>\s*)(?P<flag>--?[a-zA-Z][\w-]*)")
-HELP_HEADING_RE = re.compile(r"(?m)^(?P<name>[a-z][a-z &]*):$")
+# The choice list argparse renders after an option (--color {auto,on,off}).
+# The values are named again in the option's own description, where argparse
+# leaves them plain; they get the same yellow there so the vocabulary reads as
+# one thing.
+HELP_VALUE_GROUP_RE = re.compile(r"(\{[^{}]*\})")
 
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -6196,6 +6195,13 @@ class HelpFormatter(argparse.RawDescriptionHelpFormatter):
             return super()._format_usage(usage, actions, groups, prefix)
         finally:
             self._width = fixed
+
+    def _format_action(self, action):
+        return highlight_action(
+            super()._format_action(action),
+            action.choices,
+            color_enabled("auto", sys.stdout),
+        )
 
 
 def format_examples(raw: str, width: int = HELP_WIDTH) -> str:
@@ -6227,40 +6233,44 @@ def format_examples(raw: str, width: int = HELP_WIDTH) -> str:
     return "\n".join(rendered)
 
 
-def highlight_help(text: str, enabled: bool) -> str:
-    """Style the rendered help: cyan option values, a bold examples block.
+def highlight_action(block: str, choices, enabled: bool) -> str:
+    """Colour an option's accepted values where its description names them.
 
-    Applied to the finished string, never to the inputs: ANSI escapes count as
-    characters, so colouring before argparse wraps would shorten every line.
+    Argparse styles the ``{a,b,c}`` list itself; this colours the same words
+    in the prose beside it, and nothing else. Applied to the finished block, so
+    the escapes never enter a line-length calculation.
     """
-    if not enabled:
+    words = [choice for choice in (choices or ()) if isinstance(choice, str)]
+    if not enabled or not words:
+        return block
+    pattern = re.compile(r"\b(" + "|".join(map(re.escape, words)) + r")\b")
+    parts = HELP_VALUE_GROUP_RE.split(block)
+    for i in range(0, len(parts), 2):  # even indexes sit outside {…}
+        parts[i] = pattern.sub(
+            lambda m: f"{SGR_YELLOW}{m.group(1)}{SGR_RESET}", parts[i]
+        )
+    return "".join(parts)
+
+
+def highlight_epilog(text: str, enabled: bool) -> str:
+    """Bold the examples block, heading included; argparse styles none of it."""
+    at = text.find(EPILOG_HEADING) if enabled else -1
+    if at < 0:
         return text
-    at = text.find(EPILOG_HEADING)
-    head, tail = (text, "") if at < 0 else (text[:at], text[at:])
-    head = HELP_OPTION_RE.sub(
-        lambda m: f"{m.group('indent')}{SGR_CYAN}{m.group('flag')}{SGR_RESET}", head
-    )
-    head = HELP_VALUE_RE.sub(lambda m: f"{SGR_CYAN}{m.group(0)}{SGR_RESET}", head)
-    head = HELP_HEADING_RE.sub(lambda m: f"{SGR_BOLD}{m.group(0)}{SGR_RESET}", head)
-    if tail:
-        tail = f"{SGR_BOLD}{tail.rstrip()}{SGR_RESET}\n"
-    return head + tail
+    return f"{text[:at]}{SGR_BOLD}{text[at:].rstrip()}{SGR_RESET}\n"
 
 
 class HelpParser(argparse.ArgumentParser):
-    """ArgumentParser that highlights its own help on a colour-capable stdout."""
+    """ArgumentParser that leaves argparse's palette alone and bolds the examples.
 
-    def __init__(self, *args, **kwargs):
-        # Styling happens once, on the finished text: argparse's own colours
-        # (Python 3.14+) would nest resets inside them and read differently
-        # across versions, so they are turned off where the option exists.
-        try:
-            super().__init__(*args, color=False, **kwargs)
-        except TypeError:
-            super().__init__(*args, **kwargs)
+    Python 3.14 colours help by itself (option names, metavars, group
+    headings); earlier versions do not. Neither styles the epilog, so that is
+    the one thing added here, together with the accepted values named in an
+    option's own description.
+    """
 
     def format_help(self):
-        return highlight_help(
+        return highlight_epilog(
             super().format_help(), color_enabled("auto", sys.stdout)
         )
 

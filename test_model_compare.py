@@ -13779,27 +13779,42 @@ def test_help_wraps_at_eighty_but_usage_follows_the_terminal(monkeypatch, capsys
     assert max(len(line) for line in lines[end + 1 :]) <= 80
 
 
-def test_highlight_help_styles_values_options_headings_and_examples():
-    text = (
-        "usage: x [--detail {simple,expert}]\n"
-        "\n"
-        "output:\n"
-        "  --best  pick one\n"
-        "\n"
-        "Examples:\n"
-        "  x --best  the #1\n"
+def test_highlight_action_colours_values_outside_the_brace_list():
+    block = (
+        "  --safety-retention {none,google,all}\n"
+        "                        none never (default), google only, all always\n"
     )
-    styled = mc.highlight_help(text, True)
-    assert f"{mc.SGR_CYAN}{{simple,expert}}{mc.SGR_RESET}" in styled
-    assert f"{mc.SGR_CYAN}--best{mc.SGR_RESET}" in styled
-    assert f"{mc.SGR_BOLD}output:{mc.SGR_RESET}" in styled
-    # the whole examples block is bold, heading included
+    styled = mc.highlight_action(block, ("none", "google", "all"), True)
+    # the values named in the description are coloured ...
+    assert f"{mc.SGR_YELLOW}none{mc.SGR_RESET} never" in styled
+    assert f"{mc.SGR_YELLOW}all{mc.SGR_RESET} always" in styled
+    # ... and the brace list is left for argparse to style
+    assert f"{mc.SGR_YELLOW}{{none,google,all}}" not in styled
+    # an option without choices, or a plain terminal, is untouched
+    assert mc.highlight_action(block, None, True) == block
+    assert mc.highlight_action(block, ("none",), False) == block
+
+
+def test_highlight_epilog_bolds_the_examples_block():
+    text = "options:\n  --x  y\n\nExamples:\n  x --best  the #1\n"
+    styled = mc.highlight_epilog(text, True)
     assert f"{mc.SGR_BOLD}Examples:" in styled
     assert styled.rstrip().endswith(mc.SGR_RESET)
-    assert mc.highlight_help(text, False) == text
+    assert mc.highlight_epilog(text, False) == text
 
 
 def test_help_is_plain_without_a_terminal(capsys):
     with pytest.raises(SystemExit):
         mc.parse_args(["--help"])
     assert "\x1b[" not in capsys.readouterr().out
+
+
+def test_help_colours_accepted_values_on_a_colour_capable_stdout(monkeypatch, capsys):
+    # argparse colours its own vocabulary; this pins that the values an option
+    # accepts are coloured in its description too, not only in the {a,b,c} list.
+    monkeypatch.setattr(mc, "color_enabled", lambda mode, stream: True)
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert f"{mc.SGR_YELLOW}none{mc.SGR_RESET} never (default)" in out
+    assert f"{mc.SGR_BOLD}Examples:" in out
