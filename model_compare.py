@@ -6062,19 +6062,14 @@ class PagerInterrupted(Exception):
     """Ctrl-C reached the parent while the pager was running."""
 
 
-def resolve_pager(args) -> list[str] | None:
-    """The pager argv for the human output path, or None to print directly.
+def pager_argv() -> list[str]:
+    """The pager command: $PAGER verbatim, else the built-in fallback.
 
-    None when --no-pager is set or stdout is not a TTY. $PAGER is used
-    verbatim (shlex-split, no injected flags; an empty split counts as
-    unset); the fallback pages only what exceeds one screen, keeps the SGR
-    codes and skips the alt-screen init so the stderr notes survive
-    quitting. POSIX terminals only.
+    $PAGER is used verbatim (shlex-split, no injected flags; an empty or
+    malformed split counts as unset). The fallback pages only what exceeds
+    one screen, keeps the SGR codes and skips the alt-screen init so the
+    stderr notes survive quitting. POSIX terminals only.
     """
-    if args.no_pager:
-        return None
-    if not getattr(sys.stdout, "isatty", lambda: False)():
-        return None
     raw = os.environ.get("PAGER")
     argv = []
     if raw is not None:
@@ -6088,6 +6083,18 @@ def resolve_pager(args) -> list[str] | None:
     if not argv:
         argv = ["less", "--quit-if-one-screen", "--RAW-CONTROL-CHARS", "--no-init"]
     return argv
+
+
+def resolve_pager(args) -> list[str] | None:
+    """The pager argv for the human output path, or None to print directly.
+
+    None when --no-pager is set or stdout is not a TTY.
+    """
+    if args.no_pager:
+        return None
+    if not getattr(sys.stdout, "isatty", lambda: False)():
+        return None
+    return pager_argv()
 
 
 @contextmanager
@@ -6299,8 +6306,50 @@ def highlight_epilog(text: str, enabled: bool) -> str:
     return f"{text[:at]}{SGR_HEADING}{lines[0]}{SGR_RESET}\n" + "\n".join(body) + "\n"
 
 
+def page_help(text: str, stream) -> bool:
+    """Page the help when it is longer than the viewport; False to print it.
+
+    Only a terminal is paged: a pipe keeps its plain text, and output that
+    fits one screen is printed directly so a short help never clears the
+    screen for a one-screen pager. The text is built before the pager starts,
+    so its colours are decided against the terminal, not against the pipe
+    the pager reads; `less` renders them through its raw-control-chars flags.
+    """
+    if not getattr(stream, "isatty", lambda: False)():
+        return False
+    if len(text.splitlines()) <= shutil.get_terminal_size().lines:
+        return False
+    try:
+        with paged_stdout(pager_argv()) as paged:
+            if not paged:
+                return False
+            try:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            except (BrokenPipeError, PagerInterrupted):
+                # The reader quit early -- that is what a pager is for.
+                pass
+    except PagerInterrupted:
+        pass
+    return True
+
+
+class _NoPagerAction(argparse.Action):
+    """store_true, and remember the request for the help pager.
+
+    --help fires while the command line is still being parsed, before the
+    namespace reaches its caller, so the parser has to carry the flag for
+    page_help to see it. That makes the order matter, as it does for any
+    option that ends the parse: --no-pager has to come first.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, True)
+        parser.no_pager = True
+
+
 class HelpParser(argparse.ArgumentParser):
-    """ArgumentParser that leaves argparse's palette alone and bolds the examples.
+    """ArgumentParser that styles its epilog and pages a long help.
 
     Python 3.14 colours help by itself (option names, metavars, group
     headings); earlier versions do not. Neither styles the epilog, so that is
@@ -6313,10 +6362,20 @@ class HelpParser(argparse.ArgumentParser):
             super().format_help(), color_enabled("auto", sys.stdout)
         )
 
+    # Set by --no-pager; see _NoPagerAction.
+    no_pager = False
+
+    def print_help(self, file=None):
+        text = self.format_help()
+        stream = file or sys.stdout
+        if not self.no_pager and page_help(text, stream):
+            return
+        self._print_message(text, stream)
+
 
 def parse_args(argv=None):
     parser = HelpParser(
-        prog="model-compare",
+        prog="model_compare.py",
         description="Pick the best value-for-money LLM on OpenRouter.",
         formatter_class=HelpFormatter,
         epilog=EPILOG_HEADING
@@ -6326,7 +6385,9 @@ def parse_args(argv=None):
     parser.add_argument(
         "--version",
         action="version",
-        version=f"%(prog)s {VERSION}",
+        # The product name, not the script's: the release pin in the test
+        # suite keys on this literal, and it is what the changelog calls it.
+        version=f"model-compare {VERSION}",
     )
     output = parser.add_argument_group("output")
     ranking = parser.add_argument_group("ranking")
@@ -6395,8 +6456,10 @@ def parse_args(argv=None):
     )
     output.add_argument(
         "--no-pager",
-        action="store_true",
-        help="do not page the table output even on a terminal",
+        action=_NoPagerAction,
+        nargs=0,
+        default=False,
+        help="do not page the output even on a terminal",
     )
     ranking.add_argument(
         "--input-share",

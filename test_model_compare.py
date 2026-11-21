@@ -13833,3 +13833,88 @@ def test_help_colours_accepted_values_on_a_colour_capable_stdout(monkeypatch, ca
     out = capsys.readouterr().out
     assert f"{mc.SGR_YELLOW}none{mc.SGR_RESET} never (default)" in out
     assert f"{mc.SGR_HEADING}examples:{mc.SGR_RESET}" in out
+
+
+def test_help_usage_names_the_script(capsys):
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--help"])
+    assert capsys.readouterr().out.startswith("usage: model_compare.py ")
+
+
+class _TTY(io.StringIO):
+    def isatty(self):
+        return True
+
+
+def _capture_pager(monkeypatch, written):
+    import contextlib
+
+    @contextlib.contextmanager
+    def fake(argv):
+        buffer = io.StringIO()
+        original = sys.stdout
+        sys.stdout = buffer
+        try:
+            yield True
+        finally:
+            sys.stdout = original
+            written.append((argv, buffer.getvalue()))
+
+    monkeypatch.setattr(mc, "paged_stdout", fake)
+
+
+def test_page_help_pages_a_help_longer_than_the_viewport(monkeypatch):
+    written = []
+    _capture_pager(monkeypatch, written)
+    monkeypatch.setattr(mc, "pager_argv", lambda: ["less"])
+    monkeypatch.setattr(
+        mc.shutil, "get_terminal_size", lambda: os.terminal_size((80, 10))
+    )
+    text = "line\n" * 40
+    assert mc.page_help(text, _TTY()) is True
+    assert written == [(["less"], text)]
+
+
+def test_page_help_prints_a_help_that_fits(monkeypatch):
+    written = []
+    _capture_pager(monkeypatch, written)
+    monkeypatch.setattr(
+        mc.shutil, "get_terminal_size", lambda: os.terminal_size((80, 40))
+    )
+    assert mc.page_help("line\n" * 5, _TTY()) is False
+    assert written == []
+
+
+def test_page_help_never_pages_a_pipe(monkeypatch):
+    written = []
+    _capture_pager(monkeypatch, written)
+    monkeypatch.setattr(
+        mc.shutil, "get_terminal_size", lambda: os.terminal_size((80, 5))
+    )
+    assert mc.page_help("line\n" * 40, io.StringIO()) is False
+    assert written == []
+
+
+def test_help_is_offered_to_the_pager(monkeypatch, capsys):
+    # the decision lives in page_help; this pins that --help goes through it
+    offered = []
+    monkeypatch.setattr(
+        mc, "page_help", lambda text, stream: offered.append(text) or True
+    )
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--help"])
+    assert offered and "usage: model_compare.py" in offered[0]
+    assert capsys.readouterr().out == ""
+
+
+def test_no_pager_also_suppresses_the_help_pager(monkeypatch, capsys):
+    # --help fires mid-parse, so the parser carries the request itself; the
+    # option therefore has to come before --help, like any option that exits.
+    offered = []
+    monkeypatch.setattr(
+        mc, "page_help", lambda text, stream: offered.append(text) or True
+    )
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--no-pager", "--help"])
+    assert offered == []
+    assert "usage: model_compare.py" in capsys.readouterr().out
