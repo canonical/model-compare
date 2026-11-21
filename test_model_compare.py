@@ -13779,20 +13779,32 @@ def test_help_wraps_at_eighty_but_usage_follows_the_terminal(monkeypatch, capsys
     assert max(len(line) for line in lines[end + 1 :]) <= 80
 
 
-def test_highlight_action_colours_values_outside_the_brace_list():
-    block = (
-        "  --safety-retention {none,google,all}\n"
-        "                        none never (default), google only, all always\n"
-    )
-    styled = mc.highlight_action(block, ("none", "google", "all"), True)
-    # the values named in the description are coloured ...
+def test_highlight_help_text_colours_the_vocabulary_of_a_line():
+    line = "none never (default: none), google only; see --top and NO_COLOR"
+    styled = mc.highlight_help_text(line, mc.help_pattern(("none", "google")))
     assert f"{mc.SGR_YELLOW}none{mc.SGR_RESET} never" in styled
-    assert f"{mc.SGR_YELLOW}all{mc.SGR_RESET} always" in styled
-    # ... and the brace list is left for argparse to style
-    assert f"{mc.SGR_YELLOW}{{none,google,all}}" not in styled
-    # an option without choices, or a plain terminal, is untouched
-    assert mc.highlight_action(block, None, True) == block
-    assert mc.highlight_action(block, ("none",), False) == block
+    assert f"{mc.SGR_YELLOW}google{mc.SGR_RESET} only" in styled
+    # the value after "default:" is coloured whole, not word by word
+    assert f"default: {mc.SGR_YELLOW}none{mc.SGR_RESET}" in styled
+    # a mentioned option is cyan, an environment variable green
+    assert f"{mc.SGR_CYAN}--top{mc.SGR_RESET}" in styled
+    assert f"{mc.SGR_GREEN}NO_COLOR{mc.SGR_RESET}" in styled
+
+
+def test_help_pattern_without_choices_still_colours_options_and_env():
+    styled = mc.highlight_help_text(
+        "ignores --top; set AA_API_KEY", mc.help_pattern(None)
+    )
+    assert f"{mc.SGR_CYAN}--top{mc.SGR_RESET}" in styled
+    assert f"{mc.SGR_GREEN}AA_API_KEY{mc.SGR_RESET}" in styled
+
+
+def test_highlight_help_text_keeps_a_multi_word_default_whole():
+    styled = mc.highlight_help_text(
+        "cache lifetime in seconds (default: 21600 = 6h)",
+        mc.help_pattern(None),
+    )
+    assert f"default: {mc.SGR_YELLOW}21600 = 6h{mc.SGR_RESET}" in styled
 
 
 def test_highlight_epilog_bolds_the_examples_block():

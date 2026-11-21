@@ -6169,11 +6169,13 @@ def paged_stdout(argv: list[str]):
 # one line that must never clip.
 HELP_WIDTH = 80
 EPILOG_HEADING = "Examples:"
-# The choice list argparse renders after an option (--color {auto,on,off}).
-# The values are named again in the option's own description, where argparse
-# leaves them plain; they get the same yellow there so the vocabulary reads as
-# one thing.
-HELP_VALUE_GROUP_RE = re.compile(r"(\{[^{}]*\})")
+# Help prose names things argparse leaves plain: other options (--catalog's
+# "ignores --top"), the values an option accepts (after "default:", or named in
+# the description), and the environment variables that can stand in for a flag.
+# Each gets the attribute its kind already has elsewhere in the output.
+HELP_OPTION_RE = r"--[a-zA-Z][\w-]*"
+HELP_ENV_RE = r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b"
+HELP_DEFAULT_RE = r"(?<=default: )[^,;)\n]+?(?=[,;)\n]|$)"
 
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -6197,11 +6199,21 @@ class HelpFormatter(argparse.RawDescriptionHelpFormatter):
             self._width = fixed
 
     def _format_action(self, action):
-        return highlight_action(
-            super()._format_action(action),
-            action.choices,
-            color_enabled("auto", sys.stdout),
-        )
+        # _split_lines runs inside this call, and only it knows the action the
+        # help belongs to, so the pattern and the colour verdict ride along.
+        self._help_pattern = help_pattern(action.choices)
+        self._help_color = color_enabled("auto", sys.stdout)
+        try:
+            return super()._format_action(action)
+        finally:
+            self._help_pattern = None
+            self._help_color = False
+
+    def _split_lines(self, text, width):
+        lines = super()._split_lines(text, width)
+        if not getattr(self, "_help_color", False) or not self._help_pattern:
+            return lines
+        return [highlight_help_text(line, self._help_pattern) for line in lines]
 
 
 def format_examples(raw: str, width: int = HELP_WIDTH) -> str:
@@ -6233,23 +6245,39 @@ def format_examples(raw: str, width: int = HELP_WIDTH) -> str:
     return "\n".join(rendered)
 
 
-def highlight_action(block: str, choices, enabled: bool) -> str:
-    """Colour an option's accepted values where its description names them.
+def help_pattern(choices):
+    """One pass over a help line: default value, choice, option, environment.
 
-    Argparse styles the ``{a,b,c}`` list itself; this colours the same words
-    in the prose beside it, and nothing else. Applied to the finished block, so
-    the escapes never enter a line-length calculation.
+    Ordered so the first alternative that matches wins: a value right after
+    "default: " is matched whole before its words are reconsidered as choices.
     """
+    alternatives = [f"(?P<default>{HELP_DEFAULT_RE})"]
     words = [choice for choice in (choices or ()) if isinstance(choice, str)]
-    if not enabled or not words:
-        return block
-    pattern = re.compile(r"\b(" + "|".join(map(re.escape, words)) + r")\b")
-    parts = HELP_VALUE_GROUP_RE.split(block)
-    for i in range(0, len(parts), 2):  # even indexes sit outside {…}
-        parts[i] = pattern.sub(
-            lambda m: f"{SGR_YELLOW}{m.group(1)}{SGR_RESET}", parts[i]
-        )
-    return "".join(parts)
+    # The group always exists, even with nothing to match: the callback asks
+    # every match which alternative it came from.
+    choice = "|".join(map(re.escape, words)) if words else r"(?!)"
+    alternatives.append(r"(?P<choice>\b(?:" + choice + r")\b)")
+    alternatives += [f"(?P<option>{HELP_OPTION_RE})", f"(?P<env>{HELP_ENV_RE})"]
+    return re.compile("|".join(alternatives))
+
+
+def highlight_help_text(text: str, pattern) -> str:
+    """Colour one already-wrapped help line.
+
+    Applied after wrapping, never before: an escape counts as a character, so
+    colouring the source would shorten every line.
+    """
+
+    def repl(match):
+        if match.group("default") is not None or match.group("choice") is not None:
+            code = SGR_YELLOW
+        elif match.group("option") is not None:
+            code = SGR_CYAN
+        else:
+            code = SGR_GREEN
+        return f"{code}{match.group(0)}{SGR_RESET}"
+
+    return pattern.sub(repl, text)
 
 
 def highlight_epilog(text: str, enabled: bool) -> str:
