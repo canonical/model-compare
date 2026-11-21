@@ -243,7 +243,7 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
     model_compare_calls = [cmd for cmd in calls if Path(cmd[1]).name == "model_compare.py"]
     assert len(model_compare_calls) == 5
     for cmd in model_compare_calls:
-        assert cmd[cmd.index("--allow-safety-retention") + 1] == "google"
+        assert cmd[cmd.index("--safety-retention") + 1] == "google"
     assert (out / "index.html").is_file()
     assert (out / "style.css").is_file()
     assert (out / "app.js").is_file()
@@ -819,7 +819,7 @@ def test_faq_explains_safety_retention_without_cli_flags():
     site = Path(__file__).resolve().parent / "site"
     faq = (site / "faq.html").read_text(encoding="utf-8")
     assert "Safety Retention" in faq
-    assert "--allow-safety-retention" not in faq
+    assert "--safety-retention" not in faq
 
 
 def test_faq_page_is_linked_from_the_index_footer_and_answers_routing():

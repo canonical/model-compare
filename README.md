@@ -33,7 +33,7 @@ $ ./model_compare.py --best                   # print only the #1 model ID for s
 $ ./model_compare.py --priority price --top 3 # three cheapest sensible picks
 $ ./model_compare.py --reasoning-effort max   # rank strictly at max thinking effort
 $ ./model_compare.py --off-peak --depths      # include off-peak deals and per-depth scores
-$ ./model_compare.py --allow-safety-retention google  # match the published site
+$ ./model_compare.py --safety-retention google  # match the published site
 ```
 
 Exit codes: `0` on success, `1` on network/fetch failure, `2` when no models survive the filters, and `130` on `Ctrl-C`.
@@ -76,7 +76,7 @@ RANK  MODEL               DEPTH  QUAL  $IN/M  $OUT/M  DISC  PREC  TIER   CTX    
 | `--recency-half-life D` | `120` | Listing-age decay half-life in days |
 | `--max-age-days D` | off | Drop models listed more than `D` days ago |
 | `--no-zdr` | off | Include providers without zero-data-retention (ZDR) guarantees |
-| `--allow-safety-retention {none,google,all}` | `none` | Whether endpoints that only offer Safety Retention count as ZDR: never, only for Google's models, or always |
+| `--safety-retention {none,google,all}` | `none` | Whether endpoints that only offer Safety Retention count as ZDR: never, only for Google's models, or always |
 | `--no-require-tools` | off | Include models that don't support tool/function calling |
 | `--exclude-free` | off | Drop zero-cost `:free` listings |
 | `--include-batch` | off | Keep asynchronous `:batch` variants (requires `--no-zdr` in practice) |
@@ -91,7 +91,7 @@ RANK  MODEL               DEPTH  QUAL  $IN/M  $OUT/M  DISC  PREC  TIER   CTX    
 
 Out of the box, `model_compare.py` filters for models suitable for day-to-day coding agents: text output, tool-calling support, at least a **1M-token context window**, no asynchronous `:batch` listings, and at least one live **zero-data-retention (ZDR)** endpoint. Every one of those checks can be relaxed with the flags above.
 
-OpenRouter's ZDR list is wider than zero data retention: it also carries **Safety Retention** endpoints, which may keep prompts and responses, flagged or not, solely to investigate abuse. They never train on the data but they do store it, so a guardrail that enforces ZDR can refuse them. They do not count by default; `--allow-safety-retention google` admits them for Google's models only, which is what the published tables use because that is what the org's guardrail permits.
+OpenRouter's ZDR list is wider than zero data retention: it also carries **Safety Retention** endpoints, which may keep prompts and responses, flagged or not, solely to investigate abuse. They never train on the data but they do store it, so a guardrail that enforces ZDR can refuse them. They do not count by default; `--safety-retention google` admits them for Google's models only, which is what the published tables use because that is what the org's guardrail permits.
 
 Surviving models are scored across four normalized dimensions — **quality**, **price**, **context headroom**, and **listing age**:
 

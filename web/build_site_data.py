@@ -77,7 +77,7 @@ REVISION_RE = re.compile(r"[0-9a-f]{7,40}")
 CATALOG_SCHEMA_VERSION = 6
 
 # Duplicated from model_compare.py by convention (see PRECISION_LADDER below):
-# the modes --allow-safety-retention accepts, and the only values
+# the modes --safety-retention accepts, and the only values
 # parameters.allow_safety_retention may carry.
 SAFETY_RETENTION_MODES = ("none", "google", "all")
 

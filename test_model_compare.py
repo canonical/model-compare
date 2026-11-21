@@ -65,7 +65,7 @@ def make_args(**overrides):
         include_batch=False,
         discount=False,
         no_zdr=False,
-        allow_safety_retention="none",
+        safety_retention="none",
         no_cache=True,
         cache_ttl=0,
         # parse_args always provides this (mirror the production shape);
@@ -13496,14 +13496,14 @@ def test_zdr_eligible_rejects_unknown_mode():
         mc.zdr_eligible("acme/x", {"acme/x"}, {"acme/x"}, set(), "some")
 
 
-def test_allow_safety_retention_default_and_choices():
-    assert mc.parse_args([]).allow_safety_retention == "none"
+def test_safety_retention_default_and_choices():
+    assert mc.parse_args([]).safety_retention == "none"
     assert (
-        mc.parse_args(["--allow-safety-retention", "google"]).allow_safety_retention
+        mc.parse_args(["--safety-retention", "google"]).safety_retention
         == "google"
     )
     with pytest.raises(SystemExit):
-        mc.parse_args(["--allow-safety-retention", "bogus"])
+        mc.parse_args(["--safety-retention", "bogus"])
 
 
 def test_fetch_openrouter_frontend_splits_strict_and_safety_retention(
@@ -13589,7 +13589,7 @@ def test_build_candidates_safety_retention_modes():
     sr = {"google/sr", "meta/sr"}
 
     def run(mode):
-        args = make_args(allow_safety_retention=mode)
+        args = make_args(safety_retention=mode)
         return mc.build_candidates(
             models, args, {}, zdr, zdr_strict_ids=strict, zdr_sr_ids=sr
         )
@@ -13611,7 +13611,7 @@ def test_build_candidates_safety_retention_field():
     models = [make_model(id="google/sr"), make_model(id="acme/strict")]
     zdr = {"google/sr", "acme/strict"}
     strict = {"acme/strict"}
-    args = make_args(allow_safety_retention="google")
+    args = make_args(safety_retention="google")
     kept, _ = mc.build_candidates(
         models, args, {}, zdr, zdr_strict_ids=strict, zdr_sr_ids={"google/sr"}
     )
@@ -13659,7 +13659,7 @@ def test_run_refuses_when_every_endpoint_is_safety_retention(monkeypatch, capsys
 
 
 def test_catalog_records_allow_safety_retention():
-    args = make_args(allow_safety_retention="google")
+    args = make_args(safety_retention="google")
     models = [make_model(id="acme/model-a")]
     candidates, dropped = mc.build_candidates(
         models, args, {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"}
@@ -13755,6 +13755,51 @@ def test_help_documents_the_safety_retention_default(capsys):
     out = capsys.readouterr().out
     # the flag, its modes, and what it is for -- the help a reader needs to
     # understand why a Google model they can call is missing from a local run
-    assert "--allow-safety-retention {none,google,all}" in out
+    assert "--safety-retention {none,google,all}" in out
     assert "Safety Retention" in out
     assert "zero-data-retention" in out
+
+
+def test_help_has_an_examples_heading(capsys):
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "\nExamples:\n" in out
+
+
+def test_help_wraps_at_eighty_but_usage_follows_the_terminal(monkeypatch, capsys):
+    monkeypatch.setenv("COLUMNS", "200")
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--help"])
+    lines = capsys.readouterr().out.splitlines()
+    end = lines.index("")  # the blank line that closes the usage block
+    # the usage line is the one line allowed to follow the terminal
+    assert max(len(line) for line in lines[:end]) > 80
+    # everything after it is hard-wrapped, whatever the terminal is
+    assert max(len(line) for line in lines[end + 1 :]) <= 80
+
+
+def test_highlight_help_styles_values_options_headings_and_examples():
+    text = (
+        "usage: x [--detail {simple,expert}]\n"
+        "\n"
+        "output:\n"
+        "  --best  pick one\n"
+        "\n"
+        "Examples:\n"
+        "  x --best  the #1\n"
+    )
+    styled = mc.highlight_help(text, True)
+    assert f"{mc.SGR_CYAN}{{simple,expert}}{mc.SGR_RESET}" in styled
+    assert f"{mc.SGR_CYAN}--best{mc.SGR_RESET}" in styled
+    assert f"{mc.SGR_BOLD}output:{mc.SGR_RESET}" in styled
+    # the whole examples block is bold, heading included
+    assert f"{mc.SGR_BOLD}Examples:" in styled
+    assert styled.rstrip().endswith(mc.SGR_RESET)
+    assert mc.highlight_help(text, False) == text
+
+
+def test_help_is_plain_without_a_terminal(capsys):
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--help"])
+    assert "\x1b[" not in capsys.readouterr().out

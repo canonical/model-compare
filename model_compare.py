@@ -35,7 +35,7 @@ priority-dependent weights:
 
 Filters: a model needs at least one zero-data-retention (ZDR) endpoint.
 OpenRouter's ZDR list also carries Safety Retention endpoints, which may keep
-prompts and responses to investigate abuse; --allow-safety-retention decides
+prompts and responses to investigate abuse; --safety-retention decides
 whether they count (default: none; google admits them for Google's models
 only, which is what the published tables use; all admits anything listed).
 --no-zdr drops the check entirely.
@@ -43,13 +43,13 @@ only, which is what the published tables use; all admits anything listed).
 Examples:
   model_compare.py                          top 5, balanced
   model_compare.py --best                   print only "#1 opencode id" (openrouter/<model>)
-  model_compare.py --priority price --top 3 three cheapest-sensible picks
+  model_compare.py --priority price --top 3  three cheapest-sensible picks
   model_compare.py --discount               only currently-discounted models
   model_compare.py --off-peak               also list scheduled off-peak deals
   model_compare.py --detail simple          fewer columns, friendlier labels
   model_compare.py --bare                   just the table(s): no summary or legend
   model_compare.py --catalog                full catalog (ranked + filtered) as one JSON document
-  model_compare.py --allow-safety-retention google  match the published site's picks
+  model_compare.py --safety-retention google  match the published site's picks
   MODEL=$(model_compare.py --best)          shell integration (opencode --model $MODEL)
 """
 
@@ -62,8 +62,10 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.error
 import urllib.parse
@@ -83,7 +85,7 @@ OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
 # whose provider (or OpenRouter) may keep prompts and responses, flagged or
 # not, solely to detect and investigate abuse ("Safety Retention"). They never
 # train on the data but they do store it, so a guardrail that enforces ZDR
-# only can refuse them. --allow-safety-retention decides whether they count;
+# only can refuse them. --safety-retention decides whether they count;
 # see DESIGN.md ("Zero data retention") and zdr_eligible.
 SAFETY_RETENTION_MODES = ("none", "google", "all")
 GOOGLE_AUTHOR = "google"
@@ -1938,7 +1940,7 @@ def fetch_openrouter_frontend(args):
     # exactly True. A missing, null or non-boolean value lands in neither of
     # the latter two, so an unknown retention status is never strict and never
     # counts as the explicit Safety Retention a Google model may use -- fail
-    # closed, which is what --allow-safety-retention none and google refuse.
+    # closed, which is what --safety-retention none and google refuse.
     entries = payload.get("data") if isinstance(payload, dict) else None
     ids = set()
     strict_ids = set()
@@ -4251,7 +4253,7 @@ def build_candidates(
     # default mode. Callers that know the set is strict pass it explicitly.
     zdr_strict_ids = zdr_strict_ids or set()
     zdr_sr_ids = zdr_sr_ids or set()
-    safety_mode = getattr(args, "allow_safety_retention", "none")
+    safety_mode = getattr(args, "safety_retention", "none")
     dropped = {}
     candidates = []
 
@@ -5931,7 +5933,7 @@ def build_catalog(
             "recency_half_life": args.recency_half_life,
             "max_age_days": args.max_age_days,
             "zdr_required": not args.no_zdr,
-            "allow_safety_retention": getattr(args, "allow_safety_retention", "none"),
+            "allow_safety_retention": getattr(args, "safety_retention", "none"),
             "require_tools": not args.no_require_tools,
             "exclude_free": args.exclude_free,
             "include_batch": args.include_batch,
@@ -6162,17 +6164,115 @@ def paged_stdout(argv: list[str]):
 # ---------------------------------------------------------------------------
 
 
+# Help text is wrapped at a fixed width so it reads the same in any terminal;
+# the usage line keeps argparse's terminal-aware wrapping, because it is the
+# one line that must never clip.
+HELP_WIDTH = 80
+EPILOG_HEADING = "Examples:"
+# Help vocabulary: option names and their choice lists read as one thing, and
+# a group heading reads as another. Cyan and bold are the tool's own
+# attributes (see SGR_*), so help reuses them rather than inventing a palette.
+HELP_VALUE_RE = re.compile(r"\{[^{}\s]+\}")
+HELP_OPTION_RE = re.compile(r"(?m)^(?P<indent>\s*)(?P<flag>--?[a-zA-Z][\w-]*)")
+HELP_HEADING_RE = re.compile(r"(?m)^(?P<name>[a-z][a-z &]*):$")
+
+
+class HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Fixed-width help, dynamic usage.
+
+    RawDescriptionHelpFormatter keeps the description and the examples block
+    verbatim, so their line breaks are the author's; the option help is
+    wrapped by argparse at HELP_WIDTH. The usage line is re-wrapped at the
+    terminal's width, which is argparse's default behaviour.
+    """
+
+    def __init__(self, prog, **kwargs):
+        kwargs.setdefault("width", HELP_WIDTH)
+        super().__init__(prog, **kwargs)
+
+    def _format_usage(self, usage, actions, groups, prefix):
+        fixed, self._width = self._width, shutil.get_terminal_size().columns
+        try:
+            return super()._format_usage(usage, actions, groups, prefix)
+        finally:
+            self._width = fixed
+
+
+def format_examples(raw: str, width: int = HELP_WIDTH) -> str:
+    """Re-render the docstring's examples block at a fixed width.
+
+    The source lines are a two-column table (command, description). Their
+    columns are recomputed here so every line fits ``width``: a description
+    that does not fit wraps under its own column rather than past the edge.
+    """
+    rows = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        match = re.match(r"\s{2}(\S.*?)\s{2,}(\S.*)$", line)
+        rows.append(match.groups() if match else (line.strip(), ""))
+    if not rows:
+        return ""
+    # Descriptions start at least one space after the longest command, and
+    # never so far right that a description would have less than 20 columns.
+    column = min(max(len(command) for command, _ in rows) + 3, width - 20)
+    rendered = []
+    for command, description in rows:
+        if not description:
+            rendered.append("  " + command)
+            continue
+        wrapped = textwrap.wrap(description, width=width - column) or [""]
+        rendered.append("  " + command.ljust(column - 2) + wrapped[0])
+        rendered.extend(" " * column + part for part in wrapped[1:])
+    return "\n".join(rendered)
+
+
+def highlight_help(text: str, enabled: bool) -> str:
+    """Style the rendered help: cyan option values, a bold examples block.
+
+    Applied to the finished string, never to the inputs: ANSI escapes count as
+    characters, so colouring before argparse wraps would shorten every line.
+    """
+    if not enabled:
+        return text
+    at = text.find(EPILOG_HEADING)
+    head, tail = (text, "") if at < 0 else (text[:at], text[at:])
+    head = HELP_OPTION_RE.sub(
+        lambda m: f"{m.group('indent')}{SGR_CYAN}{m.group('flag')}{SGR_RESET}", head
+    )
+    head = HELP_VALUE_RE.sub(lambda m: f"{SGR_CYAN}{m.group(0)}{SGR_RESET}", head)
+    head = HELP_HEADING_RE.sub(lambda m: f"{SGR_BOLD}{m.group(0)}{SGR_RESET}", head)
+    if tail:
+        tail = f"{SGR_BOLD}{tail.rstrip()}{SGR_RESET}\n"
+    return head + tail
+
+
+class HelpParser(argparse.ArgumentParser):
+    """ArgumentParser that highlights its own help on a colour-capable stdout."""
+
+    def __init__(self, *args, **kwargs):
+        # Styling happens once, on the finished text: argparse's own colours
+        # (Python 3.14+) would nest resets inside them and read differently
+        # across versions, so they are turned off where the option exists.
+        try:
+            super().__init__(*args, color=False, **kwargs)
+        except TypeError:
+            super().__init__(*args, **kwargs)
+
+    def format_help(self):
+        return highlight_help(
+            super().format_help(), color_enabled("auto", sys.stdout)
+        )
+
+
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
+    parser = HelpParser(
         prog="model-compare",
-        description=(
-            "Pick the best value-for-money LLM on OpenRouter for coding-agent work.\n"
-            "Ranks only models with a zero-data-retention endpoint;\n"
-            "--allow-safety-retention decides whether endpoints that only offer\n"
-            "Safety Retention count (default: none)."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(__doc__ or "").split("Examples:", 1)[-1],
+        description="Pick the best value-for-money LLM on OpenRouter.",
+        formatter_class=HelpFormatter,
+        epilog=EPILOG_HEADING
+        + "\n"
+        + format_examples((__doc__ or "").split("Examples:", 1)[-1]),
     )
     parser.add_argument(
         "--version",
@@ -6319,12 +6419,12 @@ def parse_args(argv=None):
         help="consider all models, not just zero-data-retention (ZDR) ones",
     )
     filters.add_argument(
-        "--allow-safety-retention",
+        "--safety-retention",
         choices=SAFETY_RETENTION_MODES,
         default="none",
-        help="keep only models with a zero-data-retention endpoint; whether "
-        "endpoints that only offer Safety Retention count: none never, "
-        "google only for Google's models, all always",
+        help="whether endpoints that only offer Safety Retention count as "
+        "zero-data-retention: none never (default), google only for Google's "
+        "models, all always",
     )
     sources.add_argument(
         "--no-cache",

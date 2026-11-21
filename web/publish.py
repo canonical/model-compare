@@ -36,8 +36,8 @@ USER_AGENT = "model-compare (https://github.com/canonical/model-compare)"
 PRIORITIES = ("balanced", "price", "quality")
 # The mode every ranking run shares. The org's guardrail enforces ZDR and
 # allows Safety Retention for Google's models only, so the published tables
-# use the same rule; see model_compare.py --allow-safety-retention.
-MODEL_COMPARE_FILTER_ARGS = ["--allow-safety-retention", "google"]
+# use the same rule; see model_compare.py --safety-retention.
+MODEL_COMPARE_FILTER_ARGS = ["--safety-retention", "google"]
 PREV_HISTORY_URL = "https://canonical.github.io/model-compare/history.json"
 PREV_HIGHLIGHTS_URL = "https://canonical.github.io/model-compare/highlights.json"
 PREV_LITELLM_MERGED_URL = "https://canonical.github.io/model-compare/litellm.json"

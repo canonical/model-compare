@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `--allow-safety-retention {none,google,all}` (default `none`). OpenRouter's
+- `--safety-retention {none,google,all}` (default `none`). OpenRouter's
   ZDR list also carries Safety Retention endpoints, which may store prompts to
   investigate abuse; they are no longer counted as ZDR unless the mode allows
   them. `google` matches a guardrail that permits Safety Retention for Google's

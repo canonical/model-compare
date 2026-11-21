@@ -346,7 +346,7 @@ the *safety-retention* ones, with at least one entry whose `safety_retention`
 is exactly `True`. A missing, `null` or non-boolean value lands in neither of
 the latter two, so an unknown retention status is never strict and never
 counts as the explicit Safety Retention a Google model may use (fail closed).
-`--allow-safety-retention` decides which set survives: `none` (the default)
+`--safety-retention` decides which set survives: `none` (the default)
 keeps the strict set only; `google` also keeps an explicitly Safety Retention
 model whose author slug is `google`; and `all` keeps every listed model,
 including unknown-status ones, which is the behaviour before this distinction
@@ -361,8 +361,9 @@ Retention outright would remove 26 usable Google models from the tables,
 including the top balanced picks, so the published artifacts state the choice
 rather than hiding it.
 
-`parameters.allow_safety_retention` and the per-model `safety_retention` field
-are both additive — the meaning of `zdr` is unchanged — so `schema_version`
+`parameters.allow_safety_retention` (the policy, named for what it is rather
+than for the flag that sets it) and the per-model `safety_retention` field are
+both additive — the meaning of `zdr` is unchanged — so `schema_version`
 stays `6`. `web/build_site_data.py` accepts a catalog without them (written
 before this change) and checks them when present, including that no candidate
 depends on the allowance under `none` and that the field is `null` when no ZDR
