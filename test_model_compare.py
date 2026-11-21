@@ -13747,3 +13747,14 @@ def test_zdr_cache_round_trip_keeps_the_all_safety_retention_world(
     assert zdr_ids == {"google/sr"}
     assert zdr_strict_ids == set()
     assert zdr_sr_ids == {"google/sr"}
+
+
+def test_help_documents_the_safety_retention_default(capsys):
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--help"])
+    out = capsys.readouterr().out
+    # the flag, its modes, and what it is for -- the help a reader needs to
+    # understand why a Google model they can call is missing from a local run
+    assert "--allow-safety-retention {none,google,all}" in out
+    assert "Safety Retention" in out
+    assert "zero-data-retention" in out

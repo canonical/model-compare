@@ -33,6 +33,13 @@ priority-dependent weights:
   age_score      exponential decay with --recency-half-life (default 120
                  days): the fresher the listing, the better.
 
+Filters: a model needs at least one zero-data-retention (ZDR) endpoint.
+OpenRouter's ZDR list also carries Safety Retention endpoints, which may keep
+prompts and responses to investigate abuse; --allow-safety-retention decides
+whether they count (default: none; google admits them for Google's models
+only, which is what the published tables use; all admits anything listed).
+--no-zdr drops the check entirely.
+
 Examples:
   model_compare.py                          top 5, balanced
   model_compare.py --best                   print only "#1 opencode id" (openrouter/<model>)
@@ -42,6 +49,7 @@ Examples:
   model_compare.py --detail simple          fewer columns, friendlier labels
   model_compare.py --bare                   just the table(s): no summary or legend
   model_compare.py --catalog                full catalog (ranked + filtered) as one JSON document
+  model_compare.py --allow-safety-retention google  match the published site's picks
   MODEL=$(model_compare.py --best)          shell integration (opencode --model $MODEL)
 """
 
@@ -6157,7 +6165,12 @@ def paged_stdout(argv: list[str]):
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         prog="model-compare",
-        description="Pick the best value-for-money LLM on OpenRouter for coding-agent work.",
+        description=(
+            "Pick the best value-for-money LLM on OpenRouter for coding-agent work.\n"
+            "Ranks only models with a zero-data-retention endpoint;\n"
+            "--allow-safety-retention decides whether endpoints that only offer\n"
+            "Safety Retention count (default: none)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(__doc__ or "").split("Examples:", 1)[-1],
     )
