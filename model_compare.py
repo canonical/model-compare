@@ -6017,6 +6017,9 @@ SGR_YELLOW = "\x1b[33m"
 # CLI options own an attribute of their own: bold is already the term
 # label/header treatment, so a bold flag reads as another label.
 SGR_CYAN = "\x1b[36m"
+# The group headings ("options:", "filters:") are argparse's to style; the
+# examples heading is ours, and mirrors it rather than inventing an attribute.
+SGR_HEADING = "\x1b[1;34m"
 
 
 class Style:
@@ -6167,8 +6170,8 @@ def paged_stdout(argv: list[str]):
 # Help text is wrapped at a fixed width so it reads the same in any terminal;
 # the usage line keeps argparse's terminal-aware wrapping, because it is the
 # one line that must never clip.
-HELP_WIDTH = 80
-EPILOG_HEADING = "Examples:"
+HELP_WIDTH = 100
+EPILOG_HEADING = "examples:"
 # Help prose names things argparse leaves plain: other options (--catalog's
 # "ignores --top"), the values an option accepts (after "default:", or named in
 # the description), and the environment variables that can stand in for a flag.
@@ -6231,9 +6234,9 @@ def format_examples(raw: str, width: int = HELP_WIDTH) -> str:
         rows.append(match.groups() if match else (line.strip(), ""))
     if not rows:
         return ""
-    # Descriptions start at least one space after the longest command, and
+    # Descriptions start at least two spaces after the longest command, and
     # never so far right that a description would have less than 20 columns.
-    column = min(max(len(command) for command, _ in rows) + 3, width - 20)
+    column = min(max(len(command) for command, _ in rows) + 4, width - 20)
     rendered = []
     for command, description in rows:
         if not description:
@@ -6281,11 +6284,19 @@ def highlight_help_text(text: str, pattern) -> str:
 
 
 def highlight_epilog(text: str, enabled: bool) -> str:
-    """Bold the examples block, heading included; argparse styles none of it."""
+    """Style the examples block like the rest of the help.
+
+    Argparse styles no epilog at all, so the heading takes the group-heading
+    attribute and each example line takes the same prose treatment as an
+    option's description -- no block-wide bold.
+    """
     at = text.find(EPILOG_HEADING) if enabled else -1
     if at < 0:
         return text
-    return f"{text[:at]}{SGR_BOLD}{text[at:].rstrip()}{SGR_RESET}\n"
+    lines = text[at:].rstrip("\n").split("\n")
+    pattern = help_pattern(None)
+    body = [highlight_help_text(line, pattern) for line in lines[1:]]
+    return f"{text[:at]}{SGR_HEADING}{lines[0]}{SGR_RESET}\n" + "\n".join(body) + "\n"
 
 
 class HelpParser(argparse.ArgumentParser):

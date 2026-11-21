@@ -13764,19 +13764,19 @@ def test_help_has_an_examples_heading(capsys):
     with pytest.raises(SystemExit):
         mc.parse_args(["--help"])
     out = capsys.readouterr().out
-    assert "\nExamples:\n" in out
+    assert "\nexamples:\n" in out
 
 
-def test_help_wraps_at_eighty_but_usage_follows_the_terminal(monkeypatch, capsys):
+def test_help_wraps_at_a_hundred_but_usage_follows_the_terminal(monkeypatch, capsys):
     monkeypatch.setenv("COLUMNS", "200")
     with pytest.raises(SystemExit):
         mc.parse_args(["--help"])
     lines = capsys.readouterr().out.splitlines()
     end = lines.index("")  # the blank line that closes the usage block
     # the usage line is the one line allowed to follow the terminal
-    assert max(len(line) for line in lines[:end]) > 80
+    assert max(len(line) for line in lines[:end]) > 100
     # everything after it is hard-wrapped, whatever the terminal is
-    assert max(len(line) for line in lines[end + 1 :]) <= 80
+    assert max(len(line) for line in lines[end + 1 :]) <= 100
 
 
 def test_highlight_help_text_colours_the_vocabulary_of_a_line():
@@ -13807,11 +13807,14 @@ def test_highlight_help_text_keeps_a_multi_word_default_whole():
     assert f"default: {mc.SGR_YELLOW}21600 = 6h{mc.SGR_RESET}" in styled
 
 
-def test_highlight_epilog_bolds_the_examples_block():
-    text = "options:\n  --x  y\n\nExamples:\n  x --best  the #1\n"
+def test_highlight_epilog_styles_the_heading_and_the_prose():
+    text = "options:\n  --x  y\n\nexamples:\n  x --best  the #1\n"
     styled = mc.highlight_epilog(text, True)
-    assert f"{mc.SGR_BOLD}Examples:" in styled
-    assert styled.rstrip().endswith(mc.SGR_RESET)
+    # the heading reads as a group heading, not as a bold block
+    assert f"{mc.SGR_HEADING}examples:{mc.SGR_RESET}" in styled
+    # the lines take the ordinary prose treatment: options cyan, nothing bold
+    assert f"{mc.SGR_CYAN}--best{mc.SGR_RESET}" in styled
+    assert mc.SGR_BOLD not in styled
     assert mc.highlight_epilog(text, False) == text
 
 
@@ -13829,4 +13832,4 @@ def test_help_colours_accepted_values_on_a_colour_capable_stdout(monkeypatch, ca
         mc.parse_args(["--help"])
     out = capsys.readouterr().out
     assert f"{mc.SGR_YELLOW}none{mc.SGR_RESET} never (default)" in out
-    assert f"{mc.SGR_BOLD}Examples:" in out
+    assert f"{mc.SGR_HEADING}examples:{mc.SGR_RESET}" in out
