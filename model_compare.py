@@ -539,6 +539,65 @@ def is_variant_endpoint(endpoint) -> bool:
     )
 
 
+# Documented priority-tier labels an endpoint's badge/slug may carry while
+# service_tier names the normalised tier. A suffix that disagrees with the
+# field is a schema anomaly (live: wafer/fast with service_tier null).
+TIER_SUFFIX_TO_SERVICE_TIER = {
+    "flex": "flex",
+    "ultrafast": "ultrafast",
+    "priority": "priority",
+    "fast": "priority",
+    "turbo": "priority",
+    "highspeed": "priority",
+    "prime": "priority",
+}
+
+
+def endpoint_service_tier(endpoint) -> str:
+    """Classify one endpoint's service tier, fail-closed.
+
+    standard | flex | priority | ultrafast | unknown. `service_tier` is the
+    authority (null/"default"/"standard" -> standard; "priority"/"fast" ->
+    priority). The tag/slug suffix is a defensive cross-check: a final path
+    segment naming a documented priority or flex label must agree with the
+    field, else the endpoint is "unknown" and can never be quoted, ordered,
+    or treated as standard. Unknown labels and non-string values fail closed.
+    """
+    raw = endpoint.get("service_tier")
+    if raw is None or raw == "default" or raw == "standard":
+        tier = "standard"
+    elif raw == "flex":
+        tier = "flex"
+    elif raw == "priority" or raw == "fast":
+        tier = "priority"
+    elif raw == "ultrafast":
+        tier = "ultrafast"
+    else:
+        return "unknown"
+    for field in ("tag", "slug"):
+        value = endpoint.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        expected = TIER_SUFFIX_TO_SERVICE_TIER.get(value.rsplit("/", 1)[-1])
+        if expected is not None and expected != tier:
+            return "unknown"
+    return tier
+
+
+def baseline_tier_allowed(endpoint, args) -> bool:
+    """Tier gate for baseline eligibility (design section 4.3).
+
+    Standard endpoints always pass; Flex passes only with --flex. Priority,
+    ultrafast and unknown never do: they are opt-in tiers that a plain
+    request cannot reach (open-weight priority aside, which this tool
+    deliberately overrides), so quoting them would misstate the default.
+    """
+    tier = endpoint_service_tier(endpoint)
+    if tier == "standard":
+        return True
+    return tier == "flex" and getattr(args, "flex", False)
+
+
 def endpoint_schedule_ok(endpoint, args) -> bool:
     """False iff the endpoint's pricing.overrides fails the v2 schedule rule.
 
@@ -566,9 +625,11 @@ def _baseline_universe(endpoints: list[dict], args=None) -> list[dict]:
     """The shared derivation universe (design section 4.1).
 
     Live (status == 0), not a variant endpoint (:free/:batch marker or
-    zero-priced), and passing the schedule gate. Schedule-broken endpoints
-    must not pin the default that governs healthy endpoints, same rationale
-    as the variant exclusion. args defaults to the structural stand-in
+    zero-priced), passing the schedule gate, and tier `standard` -- plus
+    `flex` when --flex is set. Schedule-broken endpoints must not pin the
+    default that governs healthy endpoints, same rationale as the variant
+    exclusion; tier endpoints must not either, because precision describes
+    the model's standard offering. args defaults to the structural stand-in
     (see _SCHEDULE_GATE_ARGS); callers with real args pass them.
     """
     if args is None:
@@ -579,6 +640,7 @@ def _baseline_universe(endpoints: list[dict], args=None) -> list[dict]:
         if endpoint.get("status") == 0
         and not is_variant_endpoint(endpoint)
         and endpoint_schedule_ok(endpoint, args)
+        and baseline_tier_allowed(endpoint, args)
     ]
 
 
@@ -586,6 +648,10 @@ def derive_default_precision(endpoints: list[dict], author: str) -> str | None:
     """Derive a model's default precision from its endpoint list (section 4.1).
 
     Universe: live non-variant schedule-passing endpoints (_baseline_universe).
+    It deliberately passes the args-less _SCHEDULE_GATE_ARGS, so the tier
+    filter resolves to standard-only regardless of the caller's --flex:
+    precision is a property of the model's standard offering, never of a
+    service tier.
     Primary rule: the highest-ranked KNOWN quantization among the maker's
     endpoints -- matched by normalized author-slug equality only, so partner
     hosts never pin the maker's default (section 4.2 criterion 2 does not
@@ -631,8 +697,9 @@ def derive_default_precision(endpoints: list[dict], author: str) -> str | None:
 def baseline_eligible(endpoint, default_precision, author, args) -> bool:
     """Baseline-eligibility rule (design section 4.3, fail-closed).
 
-    True iff the endpoint is live (status == 0), not a variant, passes the
-    schedule gate, and then either:
+    True iff the endpoint's tier passes the gate (standard always; flex
+    only with --flex; priority/ultrafast/unknown never), it is live
+    (status == 0), not a variant, passes the schedule gate, and then either:
 
     * its quantization is a known ladder label with rank >=
       rank(default_precision) -- provider-blind (default_routing considers
@@ -650,7 +717,8 @@ def baseline_eligible(endpoint, default_precision, author, args) -> bool:
     to catch).
     """
     if (
-        endpoint.get("status") != 0
+        not baseline_tier_allowed(endpoint, args)
+        or endpoint.get("status") != 0
         or is_variant_endpoint(endpoint)
         or not endpoint_schedule_ok(endpoint, args)
     ):
@@ -687,6 +755,17 @@ def pick_baseline(
     still tied -- first in list order (deterministic; Python's sort is
     stable and the endpoints list order is the API's). Returns None when no
     eligible endpoint has a usable price (the caller owns the drop).
+
+    With --flex, the cheapest PUBLISHABLE eligible Flex endpoint wins even
+    when a standard endpoint is cheaper: the caller explicitly asked for the
+    Flex tier, and the quote must match the endpoint steering.order[0]
+    pins. Publishable means the effective and base prices are all finite
+    floats -- the same bar apply_endpoint_pricing enforces before it mutates
+    a candidate, so an endpoint that only resolves a tier price over a null
+    base can never be selected and then dropped while a usable alternative
+    exists. Publishable-first therefore applies in both modes; only when no
+    eligible endpoint is publishable does the pre-existing cheapest-eligible
+    rule (and its drop path) apply.
     """
     candidates = []
     for endpoint, eligible in zip(endpoints, eligible_flags):
@@ -705,6 +784,10 @@ def pick_baseline(
             continue  # unpriceable: no executable blended price
         blended = args.input_share * price_in + (1 - args.input_share) * price_out
         provider_name = endpoint.get("provider_name")
+        publishable = all(
+            isinstance(eff[key], float) and math.isfinite(eff[key])
+            for key in ("price_in", "price_out", "base_price_in", "base_price_out")
+        )
         candidates.append(
             (
                 blended,
@@ -713,10 +796,31 @@ def pick_baseline(
                 else "",
                 endpoint.get("tag") or "",
                 endpoint,
+                endpoint_service_tier(endpoint),
+                publishable,
             )
         )
     if not candidates:
         return None
+    if getattr(args, "flex", False):
+        # Flex-first: a publishable eligible Flex endpoint wins even when a
+        # standard endpoint is cheaper.
+        flex_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate[4] == "flex" and candidate[5]
+        ]
+        if flex_candidates:
+            return min(flex_candidates, key=lambda candidate: candidate[:3])[3]
+    # Prefer an endpoint the pricing stage can actually publish: a finite
+    # blended price over a null base would drop the model in
+    # apply_endpoint_pricing even when a usable endpoint exists. This
+    # applies in both modes, so build_steering's order[0] always matches the
+    # baseline; only when nothing is publishable does the generic
+    # cheapest-eligible rule preserve the pre-existing drop path.
+    publishable_candidates = [candidate for candidate in candidates if candidate[5]]
+    if publishable_candidates:
+        return min(publishable_candidates, key=lambda candidate: candidate[:3])[3]
     return min(candidates, key=lambda candidate: candidate[:3])[3]
 
 
@@ -758,16 +862,33 @@ def _flag_list(endpoints: list[dict], eligible_flags: list[bool]):
     return zip(endpoints, eligible_flags, strict=True)
 
 
+def _base_priceable(endpoint, args) -> bool:
+    """True iff the endpoint's base prices are finite floats.
+
+    The second half of the publishable bar (pick_baseline, apply_endpoint_pricing):
+    a tier price may resolve over a null base, and an endpoint in that state
+    cannot be quoted or ranked ahead of one that can.
+    """
+    eff = effective_pricing(endpoint.get("pricing"), args.min_context, args.input_share)
+    return all(
+        isinstance(eff[key], float) and math.isfinite(eff[key])
+        for key in ("base_price_in", "base_price_out")
+    )
+
+
 def NON_ELIGIBLE_UNIVERSE(endpoints: list[dict], eligible_flags: list[bool]) -> list:
     """The shared annotations universe (design section 4.6).
 
-    Live (status == 0), non-variant endpoints that are NOT baseline-eligible:
-    sub-default known quantization, third-party unknown/null quantization, or
-    schedule-gate-failed. All annotations derive from this one universe.
-    Eligibility comes from the parallel eligible_flags list (the
-    baseline_eligible verdicts); variants and non-live endpoints are excluded
-    even though they too are not eligible -- unlike the steering `ignore`
-    list, which includes live variants (section 4.7).
+    Live (status == 0), non-variant, standard-tier endpoints that are NOT
+    baseline-eligible: sub-default known quantization, third-party
+    unknown/null quantization, or schedule-gate-failed. All annotations
+    derive from this one universe. Eligibility comes from the parallel
+    eligible_flags list (the baseline_eligible verdicts); variants and
+    non-live endpoints are excluded even though they too are not eligible --
+    unlike the steering `ignore` list, which includes live variants (section
+    4.7). Tier endpoints (flex, priority, ultrafast, unknown) are excluded in
+    both modes: annotations describe the standard-tier quantization
+    landscape, not a different product.
 
     Raises ValueError when eligible_flags does not match endpoints in length.
     """
@@ -776,6 +897,7 @@ def NON_ELIGIBLE_UNIVERSE(endpoints: list[dict], eligible_flags: list[bool]) -> 
         for endpoint, eligible in _flag_list(endpoints, eligible_flags)
         if endpoint.get("status") == 0
         and not is_variant_endpoint(endpoint)
+        and endpoint_service_tier(endpoint) == "standard"
         and not eligible
     ]
 
@@ -796,6 +918,8 @@ def build_annotations(
     * price_spread: cheapest non-eligible blended price divided by the
       cheapest eligible blended price, both blended with the args'
       min_context and input_share (the shared --input-share convention).
+      Both sides are restricted to tier `standard`, so a Flex, priority,
+      ultrafast or unknown endpoint can never move the ratio.
       None when the universe is empty -- generalized to None when either
       side has no priceable member at all -- and None when either cheapest
       price is 0 (zero-priced endpoints are variants by definition, so the
@@ -831,7 +955,7 @@ def build_annotations(
             universe_prices.append(price)
     eligible_prices = []
     for endpoint, eligible in _flag_list(endpoints, eligible_flags):
-        if not eligible:
+        if not eligible or endpoint_service_tier(endpoint) != "standard":
             continue
         price = _blended_price(endpoint, args)
         if price is not None:
@@ -874,7 +998,7 @@ def build_annotations(
         non_eligible_weight += 1.0 / (price * price)
     eligible_weight = 0.0
     for endpoint, eligible in _flag_list(endpoints, eligible_flags):
-        if not eligible:
+        if not eligible or endpoint_service_tier(endpoint) != "standard":
             continue
         price = _blended_price(endpoint, args)
         if price is None or price <= 0:
@@ -909,18 +1033,24 @@ def build_steering(
     {"model": model_id, "provider": {"order": [...], "ignore": [...],
     "quantizations": [...], "allow_fallbacks": True}}.
 
-    * order: tags of the baseline-eligible endpoints, cheapest blended first
-      (blended price asc, ties broken by (normalized provider name, tag) --
-      the same comparator as pick_baseline, stable so the final tie is list
-      order). Eligible endpoints whose blended price is unpriceable cannot
-      be price-ranked; they are appended after the ranked ones (still
-      (provider, tag)-ordered) so every eligible endpoint keeps a place --
-      ranked last, never silently left to default priority.
-    * ignore: tags of EVERY live endpoint that is not baseline-eligible --
+    * order: tags of the baseline-eligible endpoints, grouped Flex-first
+      under --flex, each group cheapest blended first (blended price asc,
+      ties broken by (normalized provider name, tag) -- the same comparator
+      as pick_baseline, stable so the final tie is list order). Only
+      priceable endpoints join the ranked groups; eligible endpoints whose
+      blended price or base prices are unusable are appended after every
+      publishable one (still (provider, tag)-ordered) so every eligible
+      endpoint keeps a place. Under --flex the Flex group leads, so
+      order[0] is exactly pick_baseline's choice; without it the group is
+      empty (Flex is not eligible).
+    * ignore: tags of EVERY live endpoint that is not in `order` --
       sub-default quantization, third-party unknown/null, schedule-gate-
-      failed AND variants (variants are live but not eligible; the universal
-      quantifier includes them). Non-live (status != 0) endpoints are never
-      listed. List order (the API's).
+      failed, live variants (variants are live but not eligible), and every
+      tier endpoint outside `order` (Flex without --flex, priority,
+      ultrafast, unknown). Non-live (status != 0) endpoints are never
+      listed. There is no exemption: `order` is always emitted and
+      allow_fallbacks is true, so an endpoint in neither list would be an
+      unlisted billed fallback at its tier rate. List order (the API's).
     * quantizations: sorted KNOWN quantizations (PRECISION_LADDER labels)
       with rank >= rank(default_precision) among live non-variant endpoints,
       deduplicated -- no schedule or eligibility filter. OMITTED from the
@@ -936,12 +1066,10 @@ def build_steering(
 
     Raises ValueError when eligible_flags does not match endpoints in length.
     """
-    ignore = []
-    ranked = []  # (blended, normalized provider name, tag) -- pick_baseline order
-    unranked = []  # (normalized provider name, tag) -- eligible but unpriceable
+    ranked_flex = []  # (blended, normalized provider, tag, endpoint)
+    ranked_standard = []  # (blended, normalized provider, tag, endpoint)
+    unranked = []  # (normalized provider, tag, endpoint) -- eligible, unpublished
     for endpoint, eligible in _flag_list(endpoints, eligible_flags):
-        if endpoint.get("status") == 0 and not eligible:
-            ignore.append(endpoint.get("tag") or "")
         if not eligible:
             continue
         provider_name = endpoint.get("provider_name")
@@ -950,12 +1078,30 @@ def build_steering(
         )
         tag = endpoint.get("tag") or ""
         price = _blended_price(endpoint, args)
-        if price is None:
-            unranked.append((provider_key, tag))
+        if price is None or not _base_priceable(endpoint, args):
+            unranked.append((provider_key, tag, endpoint))
+        elif endpoint_service_tier(endpoint) == "flex":
+            ranked_flex.append((price, provider_key, tag, endpoint))
         else:
-            ranked.append((price, provider_key, tag))
-    ranked.sort()  # stable: the final tie is list order, as in pick_baseline
-    order = [tag for _, _, tag in ranked] + [tag for _, tag in sorted(unranked)]
+            ranked_standard.append((price, provider_key, tag, endpoint))
+    ranked_flex.sort(key=lambda row: row[:3])  # stable: final tie is list order
+    ranked_standard.sort(key=lambda row: row[:3])
+    unranked.sort(key=lambda row: row[:2])
+    order = (
+        [row[2] for row in ranked_flex]
+        + [row[2] for row in ranked_standard]
+        + [tag for _, tag, _ in unranked]
+    )
+    ordered_ids = (
+        {id(row[3]) for row in ranked_flex}
+        | {id(row[3]) for row in ranked_standard}
+        | {id(endpoint) for _, _, endpoint in unranked}
+    )
+    ignore = [
+        endpoint.get("tag") or ""
+        for endpoint in endpoints
+        if endpoint.get("status") == 0 and id(endpoint) not in ordered_ids
+    ]
 
     provider = {"order": order, "ignore": ignore}
     if default_precision is not None:
@@ -6420,6 +6566,12 @@ class HelpParser(argparse.ArgumentParser):
             return
         self._print_message(text, stream)
 
+_FLEX_HELP = (
+    "quote and steer the Flex service tier when available (typically "
+    "lower price, lower processing priority; can exceed another "
+    "provider's standard endpoint; default: standard tier only)"
+)
+
 
 def parse_args(argv=None):
     parser = HelpParser(
@@ -6515,6 +6667,7 @@ def parse_args(argv=None):
         default=0.75,
         help="input-token share used for the blended price, 0-1 (default: 0.75)",
     )
+    ranking.add_argument("--flex", action="store_true", help=_FLEX_HELP)
     ranking.add_argument(
         "--recency-half-life",
         type=float,

@@ -596,6 +596,17 @@ cheapest live (status-0) baseline-eligible endpoint at the model's default
 precision (ties break by provider name, then tag — deterministic; see the
 precision ladder, eligibility and derivation rules in
 `docs/superpowers/specs/2026-10-19-provider-aware-eval-design.md` §4.1–§4.5).
+Baseline eligibility is also **tier-aware**: standard-tier endpoints always
+qualify, Flex endpoints qualify only with `--flex`, and priority, ultrafast
+and unknown tiers never do. The default quote is therefore the standard-tier
+price — a floor, not a bill prediction, because OpenRouter may serve an
+unsteered open-weight request from a priority endpoint at a higher rate. With
+`--flex`, the cheapest publishable eligible Flex endpoint wins even when a
+standard endpoint is cheaper, so the quote matches `steering.order[0]`.
+Publishable (finite effective and base prices — the
+`apply_endpoint_pricing` bar) is preferred in both modes, so a cheap
+tier-priced-over-null-base endpoint cannot be selected and then dropped while
+a usable alternative exists.
 The block keeps its v2 shape — `input_per_1m`, `output_per_1m`,
 `blended_per_1m` in USD per 1M tokens (the tier in effect at a prompt size of
 `min_context` tokens), `base` (the baseline endpoint's base tier; for
@@ -625,7 +636,14 @@ The other per-model additive blocks:
   and the raw `overrides` list), `context_length`,
   `max_completion_tokens`, `status`
   (`0` = live; OpenRouter's `EndpointStatus` enum otherwise lists only
-  negative values) and `service_tier`. The per-model endpoint cache key is
+  negative values) and `service_tier`. `service_tier` is the tier authority:
+  `null`/`default`/`standard` -> standard, `flex` -> flex,
+  `priority`/`fast` -> priority, `ultrafast` -> ultrafast, anything else ->
+  unknown. A documented tier suffix on the endpoint's `tag`/`slug`
+  (`/priority`, `/flex`, `/ultrafast`, `/fast`, `/turbo`, `/highspeed`,
+  `/prime`) that disagrees with the field classifies the endpoint as unknown,
+  fail-closed.
+  The per-model endpoint cache key is
   `endpoints-v2:<id>`; the stale-annotation read uses the same helper.
 - `default_precision` — the precision the ranked price is quoted at (the
   maker's own best, else the best available in the derivation universe —
@@ -634,9 +652,11 @@ The other per-model additive blocks:
   quantization (common for closed models — eligibility then relies solely on
   the first-party carve-out).
 - `annotations` — quantization risk around the baseline, all four fields
-  derived from one shared universe: the live non-variant endpoints that are
-  **not** baseline-eligible (sub-default quantization, third-party
-  unknown/null, schedule-gate-failed).
+  derived from one shared universe: the live non-variant **standard-tier**
+  endpoints that are **not** baseline-eligible (sub-default quantization,
+  third-party unknown/null, schedule-gate-failed). The eligible denominator
+  is standard-only too, so Flex, priority, ultrafast and unknown tiers never
+  enter either side.
   - `price_spread`: cheapest non-eligible blended price ÷ cheapest eligible
     blended price (the `--input-share` blending convention on both sides);
     `null` when the universe is empty — generalized to `null` when either
@@ -655,10 +675,15 @@ The other per-model additive blocks:
     `context_length` is smaller than the catalog `context` (the models-API
     capability ceiling).
 - `steering` — the OpenRouter `provider` routing object for callers that
-  steer: `order` (baseline-eligible tags, cheapest first), `ignore` (every
-  live non-eligible endpoint, variants included), `quantizations` (known
+  steer: `order` (baseline-eligible tags, grouped Flex-first with `--flex`,
+  otherwise standard only; cheapest first), `ignore` (every live endpoint
+  not in `order`, variants included — no exemptions, because `order` is
+  always emitted and `allow_fallbacks` is true, so an endpoint in neither
+  list would be an unlisted billed fallback), `quantizations` (known
   quantizations ≥ default; omitted entirely when `default_precision` is
-  `null` — never an empty list) and `allow_fallbacks`. The endpoint stage
+  `null` — never an empty list) and `allow_fallbacks`. `order[0]` is always
+  the baseline endpoint.
+  The endpoint stage
   attaches it per candidate; both the `--json` rows and the catalog `models`
   entries publish it (an optional entry key — pre-endpoint documents may
   lack it, and candidates that skipped the stage carry `null`). The plugin,
@@ -702,7 +727,7 @@ pool-accounting invariant (`sum(dropped) + candidates == listed`, enforced by
 `pool.dropped`, break if a reason is produced but not registered.
 
 Version gates: catalog `schema_version` 6, `data.json` 3, and
-`history.json` 5 — each a strict identity check accepting exactly that value
+`history.json` 6 — each a strict identity check accepting exactly that value
 and rejecting anything else. The catalog producer in `model_compare.py` and
 its reader gate (`CATALOG_QUALITY_SCHEMA_VERSION`, derived from the producer)
 use v6; the web catalog validator in `web/build_site_data.py` also requires
@@ -716,7 +741,11 @@ required `quality_effort` and `default_effort` row keys, and the max-based
 history was not comparable with those scores. The v6 cutover changes the
 default meaning of catalog `quality` to the best measured selectable depth;
 old default-effort history is not comparable with those scores or ranks, so
-history moves from v4 to v5 and starts fresh. For backward compatibility,
+history moves from v4 to v5 and starts fresh. The history v6 cutover follows
+the Flex service-tier correction: 35 models' quoted prices moved from the
+opt-in Flex tier to the standard tier, a definitional change rather than a
+market move, so the diff starts clean instead of reporting ~35 false price
+rises. For backward compatibility,
 `merge_history` treats a prior document without `schema_version` as current;
 only an explicit version mismatch triggers the reset. `web/build_site_data.py` hosts
 the catalog, `data.json` and history gates; `web/publish.py` pins

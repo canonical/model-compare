@@ -5,12 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
 
 ### Added
 
-- `--safety-retention {none,google,all}` (default `none`). OpenRouter's
-  ZDR list also carries Safety Retention endpoints, which may store prompts to
+- `--safety-retention {none,google,all}` (default `none`). OpenRouter's ZDR
+  list also carries Safety Retention endpoints, which may store prompts to
   investigate abuse; they are no longer counted as ZDR unless the mode allows
   them. `google` matches a guardrail that permits Safety Retention for Google's
   models only, and is what the published site (and so the plugin's remote
@@ -19,6 +19,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The catalog records the choice: `parameters.allow_safety_retention`, a
   per-model `safety_retention` flag, and a `safety retention` drop reason.
   Both fields are additive — `schema_version` stays 6.
+- `--flex` quotes and steers the Flex service tier (lower price, lower
+  processing priority; can exceed another provider's standard endpoint).
+
+### Changed
+
+- Default quotes are standard-tier. Priority, ultrafast and unknown tiers are
+  never quotation candidates.
+- The per-model `steering` block orders the baseline first and ignores every
+  live endpoint outside `order`, so no fallback can bill a higher tier.
+
+### Fixed
+
+- Flex endpoints were quoted as the baseline price on 35 of 89 models,
+  understating the default quote (for example `google/gemini-4-carbon` showed
+  $1/$5 instead of its $2/$10 standard price).
+- `history.json` moves to schema 6 so the corrected prices are not reported as
+  price rises.
 
 ## [0.7.11] - 2026-11-20
 

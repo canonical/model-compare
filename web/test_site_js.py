@@ -903,6 +903,34 @@ def test_baseline_note_null_without_endpoints():
     assert run_js("baselineNote({endpoints: []})") is None
 
 
+def test_endpoint_rows_baseline_from_steering_order():
+    # Two standard endpoints at one price: the price rule is ambiguous,
+    # steering.order[0] is not.
+    entry = """
+    {
+      pricing: { input_per_1m: 2.0, output_per_1m: 10.0 },
+      steering: { model: 'm', provider: { order: ['p/b'], ignore: ['p/a'] } },
+      endpoints: [
+        { provider_name: 'a', tag: 'p/a', quantization: 'fp8',
+          pricing: { prompt: 2e-6, completion: 10e-6 }, status: 0,
+          context_length: 1000, service_tier: 'standard' },
+        { provider_name: 'b', tag: 'p/b', quantization: 'fp8',
+          pricing: { prompt: 2e-6, completion: 10e-6 }, status: 0,
+          context_length: 1000, service_tier: 'standard' }
+      ]
+    }
+    """
+    out = run_js(f"endpointRows({entry})")
+    assert [r["isBaseline"] for r in out] == [False, True]
+    assert run_js(f"baselineNote({entry})") is None
+
+
+def test_endpoint_rows_without_steering_keeps_price_fallback():
+    entry = CATALOG_ENTRY_JS.replace("annotations:", "steering: null,\n  annotations:")
+    out = run_js(f"endpointRows({entry})")
+    assert [r["isBaseline"] for r in out] == [True]
+
+
 def test_main_table_colspans_pin_header_counts():
     # The disclosure row must span the visible main-table width in both
     # views. The counts are named constants pinned to the actual <th>

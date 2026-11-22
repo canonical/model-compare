@@ -445,6 +445,22 @@ def test_steering_strict_profile():
     assert strict["quantizations"] == ["fp8"]
 
 
+def test_steering_strict_profile_keeps_flex_baseline():
+    # order[0] is the baseline, Flex or not: the strict profile must pin
+    # that exact tag and keep max_price on the baseline pricing.base.
+    catalog = _basic_catalog()
+    entry = catalog["models"][0]
+    entry["steering"]["provider"]["order"] = ["morph/fp8/flex", "deepinfra/fp8"]
+    entry["endpoints"][0]["tag"] = "morph/fp8/flex"
+    entry["endpoints"][0]["service_tier"] = "flex"
+    raw, warnings = _rate_card_bytes()
+    steering = bla.build_steering(catalog, raw, "deadbee", warnings)
+    strict = steering["openrouter/z-ai/glm-5.3"]["provider_strict"]
+    assert strict["order"] == ["morph/fp8/flex"]
+    assert strict["allow_fallbacks"] is False
+    assert strict["max_price"] == {"prompt": 0.022, "completion": 0.4}
+
+
 def test_steering_strict_quantization_comes_from_baseline_endpoint():
     catalog = _basic_catalog()
     entry = catalog["models"][0]

@@ -925,7 +925,7 @@ def make_history_snapshot(date, generated_at, **overrides):
 
 def make_history(**overrides):
     doc = {
-        "schema_version": 5,
+        "schema_version": 6,
         "updated_at": "2026-08-26T09:15:00+00:00",
         "snapshots": {
             "2026-08-26": make_history_snapshot(
@@ -1059,7 +1059,7 @@ def test_merge_history_upserts_and_prunes():
     assert len(merged["snapshots"]) == 10
     assert merged["snapshots"][today] == snap
     assert merged["updated_at"] == "2026-09-02T09:15:00+00:00"
-    assert merged["schema_version"] == 5
+    assert merged["schema_version"] == 6
 
 
 def test_merge_history_same_day_last_write_wins():
@@ -1126,12 +1126,12 @@ def test_merge_history_drops_prev_snapshot_with_corrupt_ranks():
 
 def test_merge_history_rejects_unknown_schema_version():
     prev = make_history()
-    prev["schema_version"] = 6
+    prev["schema_version"] = 7
     merged = bsd.merge_history(
         prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
     )
     assert list(merged["snapshots"]) == ["2026-09-02"]
-    assert merged["schema_version"] == 5
+    assert merged["schema_version"] == 6
 
 
 def test_merge_history_tolerates_prev_without_schema_version():
@@ -1968,7 +1968,7 @@ def test_merge_history_resets_v1():
         prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
     )
     assert list(merged["snapshots"]) == ["2026-09-02"]
-    assert merged["schema_version"] == 5
+    assert merged["schema_version"] == 6
 
 
 # ---------------------------------------------------------------------------
@@ -2255,14 +2255,14 @@ def test_rows_carry_new_keys_ordered_by_ranking():
 
 
 def test_merge_history_resets_on_v4_history():
-    # The live site's previous history (v4) must not be merged into a v5
+    # The live site's previous history (v4) must not be merged into a v6
     # document: any explicit version but the current one starts fresh.
     prev = make_history(schema_version=4)
     merged = bsd.merge_history(
         prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
     )
     assert list(merged["snapshots"]) == ["2026-09-02"]
-    assert merged["schema_version"] == 5
+    assert merged["schema_version"] == 6
 
 
 # ---------------------------------------------------------------------------
@@ -2323,11 +2323,11 @@ def test_data_v3_rows_require_depth_fields_and_drop_reasoning():
             bsd.build_data("acme/model-a", priorities)
 
 
-def test_history_v5_discards_v4_and_keeps_highlights_v1():
-    assert bsd.HISTORY_SCHEMA_VERSION == 5
+def test_history_v6_discards_v5_and_keeps_highlights_v1():
+    assert bsd.HISTORY_SCHEMA_VERSION == 6
     assert bsd.HIGHLIGHTS_SCHEMA_VERSION == 1
     prev = {
-        "schema_version": 4,
+        "schema_version": 5,
         "snapshots": {
             "2026-10-20": make_history_snapshot(
                 "2026-10-20", "2026-10-20T00:00:00+00:00"
@@ -2337,8 +2337,17 @@ def test_history_v5_discards_v4_and_keeps_highlights_v1():
     merged = bsd.merge_history(
         prev, make_history_snapshot("2026-10-26", "2026-10-26T00:00:00+00:00")
     )
-    assert merged["schema_version"] == 5
+    assert merged["schema_version"] == 6
     assert list(merged["snapshots"]) == ["2026-10-26"]
+
+
+def test_history_v6_discards_v5():
+    prev = make_history(schema_version=5)
+    merged = bsd.merge_history(
+        prev, make_history_snapshot("2026-11-22", "2026-11-22T09:15:00+00:00")
+    )
+    assert list(merged["snapshots"]) == ["2026-11-22"]
+    assert merged["schema_version"] == 6
 
 
 def test_validate_catalog_accepts_reasoning_block():
