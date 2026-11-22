@@ -760,7 +760,7 @@ def validate_catalog(document) -> None:
         raise ValueError("catalog parameters must set zdr_required")
     # Additive (schema v6, no bump): which retention tier counts as ZDR.
     # Optional so a catalog written before the flag existed still validates.
-    safety_mode = parameters.get("allow_safety_retention")
+    safety_mode = parameters.get("allow_safety_retention", "none")
     if (
         "allow_safety_retention" in parameters
         and safety_mode not in SAFETY_RETENTION_MODES
@@ -960,11 +960,11 @@ def validate_catalog(document) -> None:
                     f"models[{i}] safety_retention must be null when zdr is not "
                     "required"
                 )
-            if (
-                parameters["zdr_required"]
-                and safety_mode == "none"
-                and flag is True
-            ):
+            if parameters["zdr_required"] and flag is None:
+                raise ValueError(
+                    f"models[{i}] safety_retention must be a bool when zdr is required"
+                )
+            if parameters["zdr_required"] and safety_mode == "none" and flag is True:
                 raise ValueError(
                     f"models[{i}] depends on safety retention under "
                     "allow_safety_retention=none"

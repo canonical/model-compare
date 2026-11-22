@@ -2732,6 +2732,25 @@ def test_catalog_rejects_null_allow_safety_retention():
         bsd.validate_catalog(doc)
 
 
+def test_catalog_rejects_null_safety_retention_under_zdr_required():
+    # The producer writes null only when no ZDR gate ran; a null under the
+    # gate is a partial/broken catalog, not a valid additive omission.
+    doc = make_catalog()
+    doc["parameters"]["allow_safety_retention"] = "google"
+    doc["models"][0]["safety_retention"] = None
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_catalog_rejects_allowance_dependent_model_without_policy():
+    # An entry carrying safety_retention:true must come with the policy
+    # parameter; absent is treated as the default `none` for this invariant.
+    doc = make_catalog()
+    doc["models"][0]["safety_retention"] = True
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
 def test_catalog_accepts_null_safety_retention_when_zdr_not_required():
     doc = make_catalog()
     doc["parameters"]["zdr_required"] = False

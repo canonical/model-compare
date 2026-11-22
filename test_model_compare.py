@@ -991,8 +991,13 @@ def test_fmt_sched_detail_none_cases():
 def test_candidates_carry_effective_and_base_prices():
     models = [make_model(id="acme/model-a", pricing=haiku_pricing())]
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, []
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(min_context=1_000_000),
+        {},
+        {"acme/model-a"},
+        [],
+        zdr_strict_ids={"acme/model-a"},
+    )
     (cand,) = candidates
     assert cand["price_in"] == 0.5  # effective, USD per 1M
     assert cand["price_out"] == 2.5
@@ -1013,8 +1018,13 @@ def test_schedule_drop_reason():
     }
     models = [make_model(id="acme/model-a", pricing=broken)]
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=0), {}, {"acme/model-a"}, []
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(min_context=0),
+        {},
+        {"acme/model-a"},
+        [],
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates == []
     assert dropped["schedule"] == 1
     # mixed model with an invalid schedule: no top-level-base fallback
@@ -1028,8 +1038,13 @@ def test_schedule_drop_reason():
     }
     models = [make_model(id="acme/model-b", pricing=mixed)]
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=0), {}, {"acme/model-b"}, []
-    , zdr_strict_ids={"acme/model-b"})
+        models,
+        make_args(min_context=0),
+        {},
+        {"acme/model-b"},
+        [],
+        zdr_strict_ids={"acme/model-b"},
+    )
     assert candidates == []
     assert dropped["schedule"] == 1
 
@@ -1056,7 +1071,8 @@ def test_free_drop_runs_on_effective_prices():
         {},
         {"acme/tiered-free", "acme/plain-free"},
         [],
-     zdr_strict_ids={"acme/tiered-free", "acme/plain-free"})
+        zdr_strict_ids={"acme/tiered-free", "acme/plain-free"},
+    )
     assert [cand["id"] for cand in candidates] == ["acme/tiered-free"]
     assert dropped["free"] == 1
 
@@ -1075,8 +1091,13 @@ def test_base_validity_uses_base_prices():
     }
     models = [make_model(id="acme/model-a", pricing=pricing)]
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, []
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(min_context=1_000_000),
+        {},
+        {"acme/model-a"},
+        [],
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates == []
     assert dropped["pricing"] == 1
 
@@ -1138,8 +1159,13 @@ def test_windowed_model_with_invalid_top_level_dropped():
     }
     models = [make_model(id="acme/model-a", pricing=pricing)]
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=0), {}, {"acme/model-a"}, []
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(min_context=0),
+        {},
+        {"acme/model-a"},
+        [],
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates == []
     assert dropped["pricing"] == 1
 
@@ -2173,7 +2199,9 @@ def test_candidate_pricing_replaced_by_baseline(monkeypatch):
     eps = _endpoint_stage_eps()
     monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
     models = [make_model(id="z-ai/glm", name="Z.AI: GLM")]
-    candidates, dropped = mc.build_candidates(models, args, {}, {"z-ai/glm"}, [], zdr_strict_ids={"z-ai/glm"})
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"z-ai/glm"}, [], zdr_strict_ids={"z-ai/glm"}
+    )
     assert dropped == {}
     # Before the stage the candidate carries the models-API prices.
     assert candidates[0]["blended"] == pytest.approx(1.25)
@@ -2244,8 +2272,13 @@ def test_fetch_failure_drops_model_with_stale_annotations(monkeypatch):
 
     filtered = []
     candidates, dropped = mc.build_candidates(
-        models, args, {}, set(m["id"] for m in models), filtered
-    , zdr_strict_ids=set(m["id"] for m in models))
+        models,
+        args,
+        {},
+        set(m["id"] for m in models),
+        filtered,
+        zdr_strict_ids=set(m["id"] for m in models),
+    )
     assert dropped == {}
     candidates, extra = mc.apply_endpoint_pricing(candidates, args, filtered)
     assert candidates == []
@@ -2270,7 +2303,9 @@ def test_json_rows_carry_new_additive_keys(monkeypatch, capsys):
         mc, "fetch_model_endpoints", lambda mid, a: _endpoint_stage_eps()
     )
     models = [make_model(id="z-ai/glm", name="Z.AI: GLM")]
-    candidates, _ = mc.build_candidates(models, args, {}, {"z-ai/glm"}, [], zdr_strict_ids={"z-ai/glm"})
+    candidates, _ = mc.build_candidates(
+        models, args, {}, {"z-ai/glm"}, [], zdr_strict_ids={"z-ai/glm"}
+    )
     candidates, _ = mc.apply_endpoint_pricing(candidates, args, [])
     mc.compute_scores(candidates, args, {})
     mc.print_json(candidates)
@@ -2399,7 +2434,14 @@ def test_cli_table_shows_prec_column_and_risk_marker(monkeypatch, capsys):
 
     monkeypatch.setattr(mc, "fetch_model_endpoints", fake_fetch)
     args = make_args(min_context=0)
-    candidates, _ = mc.build_candidates(models, args, {}, {m["id"] for m in models}, [], zdr_strict_ids={m["id"] for m in models})
+    candidates, _ = mc.build_candidates(
+        models,
+        args,
+        {},
+        {m["id"] for m in models},
+        [],
+        zdr_strict_ids={m["id"] for m in models},
+    )
     candidates, _ = mc.apply_endpoint_pricing(candidates, args, [])
     mc.compute_scores(candidates, args, {})
     mc.print_table(candidates[:2], mc.PRIORITY_WEIGHTS["balanced"], None)
@@ -2421,7 +2463,9 @@ def test_json_rows_carry_quant_note(monkeypatch, capsys):
         mc, "fetch_model_endpoints", lambda mid, a: _endpoint_stage_eps()
     )
     models = [make_model(id="z-ai/glm", name="Z.AI: GLM")]
-    candidates, _ = mc.build_candidates(models, args, {}, {"z-ai/glm"}, [], zdr_strict_ids={"z-ai/glm"})
+    candidates, _ = mc.build_candidates(
+        models, args, {}, {"z-ai/glm"}, [], zdr_strict_ids={"z-ai/glm"}
+    )
     candidates, _ = mc.apply_endpoint_pricing(candidates, args, [])
     mc.compute_scores(candidates, args, {})
     mc.print_json(candidates)
@@ -2441,7 +2485,9 @@ def test_json_rows_carry_steering_block(monkeypatch, capsys):
         mc, "fetch_model_endpoints", lambda mid, a: _endpoint_stage_eps()
     )
     models = [make_model(id="z-ai/glm", name="Z.AI: GLM")]
-    candidates, _ = mc.build_candidates(models, args, {}, {"z-ai/glm"}, [], zdr_strict_ids={"z-ai/glm"})
+    candidates, _ = mc.build_candidates(
+        models, args, {}, {"z-ai/glm"}, [], zdr_strict_ids={"z-ai/glm"}
+    )
     candidates, _ = mc.apply_endpoint_pricing(candidates, args, [])
     mc.compute_scores(candidates, args, {})
     mc.print_json(candidates)
@@ -2485,8 +2531,8 @@ def test_endpoint_stage_applies_results_in_candidate_order(monkeypatch):
 
     monkeypatch.setattr(mc, "fetch_model_endpoints", fake_fetch)
     candidates, dropped = mc.build_candidates(
-        models, args, {}, {"a/slow", "a/fast"}, []
-    , zdr_strict_ids={"a/slow", "a/fast"})
+        models, args, {}, {"a/slow", "a/fast"}, [], zdr_strict_ids={"a/slow", "a/fast"}
+    )
     assert dropped == {}
     survivors, extra = mc.apply_endpoint_pricing(candidates, args, [])
     assert extra == {}
@@ -2518,8 +2564,13 @@ def _scored_candidates():
     ]
     args = make_args(min_context=1_000_000)
     candidates, dropped = mc.build_candidates(
-        models, args, {}, {"acme/tiered", "acme/plain"}, []
-    , zdr_strict_ids={"acme/tiered", "acme/plain"})
+        models,
+        args,
+        {},
+        {"acme/tiered", "acme/plain"},
+        [],
+        zdr_strict_ids={"acme/tiered", "acme/plain"},
+    )
     mc.compute_scores(candidates, args, {})
     return candidates
 
@@ -2544,7 +2595,9 @@ def test_json_additive_tier_keys(capsys):
 def test_json_time_schedule_string(capsys):
     models = [make_model(id="acme/hy4", pricing=hy4_pricing())]
     args = make_args(min_context=1_000_000)
-    candidates, _ = mc.build_candidates(models, args, {}, {"acme/hy4"}, [], zdr_strict_ids={"acme/hy4"})
+    candidates, _ = mc.build_candidates(
+        models, args, {}, {"acme/hy4"}, [], zdr_strict_ids={"acme/hy4"}
+    )
     mc.compute_scores(candidates, args, {})
     mc.print_json(candidates)
     (row,) = json.loads(capsys.readouterr().out)
@@ -3466,8 +3519,12 @@ def test_build_candidates_survives_string_context_length():
     # Regression: string context_length must not raise a TypeError.
     models = [make_model(context_length="2000000")]
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(min_context=1_000_000),
+        {},
+        {"acme/model-a"},
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert len(candidates) == 1
     assert candidates[0]["context"] == 2_000_000
     assert "context" not in dropped
@@ -3480,30 +3537,48 @@ def test_build_candidates_survives_string_context_length():
 
 def test_build_candidates_drops_malformed_id():
     models = [make_model(id="no-slash")]
-    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"})
+    candidates, dropped = mc.build_candidates(
+        models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"}
+    )
     assert candidates == []
     assert dropped["malformed id"] == 1
+
+
+@pytest.mark.parametrize("bad_id", [123, ["acme/model-a"], {"id": "acme/model-a"}])
+def test_build_candidates_drops_non_string_id(bad_id):
+    models = [make_model(id=bad_id)]
+    candidates, dropped = mc.build_candidates(models, make_args(), {}, set())
+    assert candidates == []
+    assert dropped == {"malformed id": 1}
 
 
 def test_build_candidates_drops_low_context():
     models = [make_model(context_length=1000)]
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(min_context=1_000_000),
+        {},
+        {"acme/model-a"},
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates == []
     assert dropped["context"] == 1
 
 
 def test_build_candidates_drops_bad_pricing():
     models = [make_model(pricing={"prompt": "x", "completion": "0.1"})]
-    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"})
+    candidates, dropped = mc.build_candidates(
+        models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"}
+    )
     assert candidates == []
     assert dropped["pricing"] == 1
 
 
 def test_build_candidates_drops_negative_pricing():
     models = [make_model(pricing={"prompt": "-1", "completion": "0.1"})]
-    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"})
+    candidates, dropped = mc.build_candidates(
+        models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"}
+    )
     assert candidates == []
     assert dropped["pricing"] == 1
 
@@ -3511,15 +3586,21 @@ def test_build_candidates_drops_negative_pricing():
 def test_build_candidates_exclude_free():
     models = [make_model(pricing={"prompt": "0", "completion": "0"})]
     candidates, dropped = mc.build_candidates(
-        models, make_args(exclude_free=True), {}, {"acme/model-a"}
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(exclude_free=True),
+        {},
+        {"acme/model-a"},
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates == []
     assert dropped["free"] == 1
 
 
 def test_build_candidates_drops_non_text_output():
     models = [make_model(architecture={"modality": "text->image"})]
-    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"})
+    candidates, dropped = mc.build_candidates(
+        models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"}
+    )
     assert candidates == []
     assert dropped["modality"] == 1
 
@@ -3527,8 +3608,12 @@ def test_build_candidates_drops_non_text_output():
 def test_build_candidates_requires_tools_when_asked():
     models = [make_model(supported_parameters=["tools"])]  # missing tool_choice
     candidates, dropped = mc.build_candidates(
-        models, make_args(no_require_tools=False), {}, {"acme/model-a"}
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(no_require_tools=False),
+        {},
+        {"acme/model-a"},
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates == []
     assert dropped["tool calling"] == 1
 
@@ -3536,8 +3621,12 @@ def test_build_candidates_requires_tools_when_asked():
 def test_build_candidates_blended_price():
     models = [make_model(pricing={"prompt": "0.000001", "completion": "0.000005"})]
     candidates, _ = mc.build_candidates(
-        models, make_args(input_share=0.75), {}, {"acme/model-a"}
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(input_share=0.75),
+        {},
+        {"acme/model-a"},
+        zdr_strict_ids={"acme/model-a"},
+    )
     cand = candidates[0]
     assert cand["price_in"] == pytest.approx(1.0)
     assert cand["price_out"] == pytest.approx(5.0)
@@ -3552,7 +3641,9 @@ def test_build_candidates_blended_price():
 
 def test_build_candidates_drops_batch_by_default():
     models = [make_model(id="acme/model-a:batch")]
-    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"})
+    candidates, dropped = mc.build_candidates(
+        models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"}
+    )
     assert candidates == []
     assert dropped["batch"] == 1
 
@@ -3560,8 +3651,12 @@ def test_build_candidates_drops_batch_by_default():
 def test_build_candidates_keeps_batch_with_include_batch():
     models = [make_model(id="acme/model-a:batch")]
     candidates, dropped = mc.build_candidates(
-        models, make_args(include_batch=True), {}, {"acme/model-a:batch"}
-    , zdr_strict_ids={"acme/model-a:batch"})
+        models,
+        make_args(include_batch=True),
+        {},
+        {"acme/model-a:batch"},
+        zdr_strict_ids={"acme/model-a:batch"},
+    )
     assert [c["id"] for c in candidates] == ["acme/model-a:batch"]
     assert not dropped
 
@@ -3569,8 +3664,12 @@ def test_build_candidates_keeps_batch_with_include_batch():
 def test_build_candidates_discount_filter_keeps_discounted_only():
     models = [make_model(id="acme/discounted"), make_model(id="acme/normal")]
     candidates, dropped = mc.build_candidates(
-        models, make_args(discount=True), {"acme/discounted": 0.5}, {"acme/discounted"}
-    , zdr_strict_ids={"acme/discounted"})
+        models,
+        make_args(discount=True),
+        {"acme/discounted": 0.5},
+        {"acme/discounted"},
+        zdr_strict_ids={"acme/discounted"},
+    )
     assert [c["id"] for c in candidates] == ["acme/discounted"]
     assert dropped["no discount"] == 1
     assert candidates[0]["discount"] == 0.5
@@ -3579,8 +3678,12 @@ def test_build_candidates_discount_filter_keeps_discounted_only():
 def test_build_candidates_discount_filter_without_data_drops_all():
     models = [make_model()]
     candidates, dropped = mc.build_candidates(
-        models, make_args(discount=True), {}, {"acme/model-a"}
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(discount=True),
+        {},
+        {"acme/model-a"},
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates == []
     assert dropped["no discount"] == 1
 
@@ -3588,8 +3691,12 @@ def test_build_candidates_discount_filter_without_data_drops_all():
 def test_build_candidates_discount_filter_ignores_negligible_discount():
     models = [make_model(id="acme/sliver")]
     candidates, dropped = mc.build_candidates(
-        models, make_args(discount=True), {"acme/sliver": 0.004}, {"acme/sliver"}
-    , zdr_strict_ids={"acme/sliver"})
+        models,
+        make_args(discount=True),
+        {"acme/sliver": 0.004},
+        {"acme/sliver"},
+        zdr_strict_ids={"acme/sliver"},
+    )
     assert candidates == []
     assert dropped["no discount"] == 1
 
@@ -3597,8 +3704,12 @@ def test_build_candidates_discount_filter_ignores_negligible_discount():
 def test_build_candidates_stores_discount():
     models = [make_model(id="acme/model-a")]
     candidates, _ = mc.build_candidates(
-        models, make_args(), {"acme/model-a": 0.75}, {"acme/model-a"}
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(),
+        {"acme/model-a": 0.75},
+        {"acme/model-a"},
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates[0]["discount"] == 0.75
 
 
@@ -3732,12 +3843,19 @@ def test_fetch_openrouter_frontend_derives_all_payloads(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
     stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=True))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=True))
     assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
     assert zdr_ids == {"acme/a", "acme/b:batch", "acme/sr", "acme/both"}
     assert zdr_strict_ids == {"acme/a", "acme/b:batch", "acme/both"}
+    assert zdr_sr_ids == {"acme/sr", "acme/both"}
     assert aa_by_id == {
         "acme/a": {
             "intelligence_index": 60.0,
@@ -3840,9 +3958,15 @@ def test_fetch_openrouter_frontend_zdr_excludes_unlisted_variant(monkeypatch, tm
     }
     calls = []
     stub_frontend(monkeypatch, calls, base, zdr)
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=True))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=True))
     assert zdr_ids == {"nvidia/nemotron-3-ultra-550b-a55b"}
     assert "nvidia/nemotron-3-ultra-550b-a55b:free" in discounts  # find has it
 
@@ -3871,9 +3995,15 @@ def test_fetch_openrouter_frontend_zdr_fails_closed_without_entries(
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
     stub_frontend(monkeypatch, calls, frontend_payload(), payload)
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
     assert zdr_ids == set()
     assert discounts  # base data unaffected
     assert "no ZDR entries found" in capsys.readouterr().err
@@ -3892,9 +4022,15 @@ def test_fetch_openrouter_frontend_ignores_stale_v2_zdr_cache(monkeypatch, tmp_p
         )
     calls = []
     stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
     assert zdr_ids == {"acme/a", "acme/b:batch", "acme/sr", "acme/both"}
     assert "zdr" not in cache_hits
     saved = json.loads((cache_dir / "openrouter-zdr-v5.json").read_text())
@@ -3924,9 +4060,15 @@ def test_fetch_openrouter_frontend_base_failure_keeps_zdr_decoupled(
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
     stub_frontend(monkeypatch, calls, RuntimeError("network down"), zdr_payload())
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=True))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=True))
     assert discounts == {}
     assert aa_by_id == {}
     assert zdr_ids == {"acme/a", "acme/b:batch", "acme/sr", "acme/both"}
@@ -3972,9 +4114,15 @@ def test_fetch_openrouter_frontend_treats_empty_cached_payloads_as_miss(
     (cache_dir / "openrouter-zdr-v5.json").write_text(
         json.dumps({"fetched_at": now, "payload": {"zdr": [], "strict": [], "sr": []}})
     )
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
     assert len(calls) == 2  # all three payloads empty in cache -> both fetches
     assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
     assert zdr_ids == {"acme/a", "acme/b:batch", "acme/sr", "acme/both"}
@@ -3994,9 +4142,15 @@ def test_fetch_openrouter_frontend_fresh_fetch_replaces_cached_discounts(
     (cache_dir / "openrouter-frontend-discounts.json").write_text(
         json.dumps({"fetched_at": time.time(), "payload": {"acme/cached": 0.1}})
     )
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
     assert len(calls) == 2  # aa not cached, so the base URL is hit anyway
     assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
     assert aa_by_id == {
@@ -4020,14 +4174,18 @@ def test_fetch_openrouter_frontend_fresh_fetch_replaces_cached_discounts(
 
 def test_build_candidates_drops_non_zdr_by_default():
     models = [make_model(id="acme/zdr"), make_model(id="acme/plain")]
-    candidates, dropped = mc.build_candidates(models, make_args(), {}, {"acme/zdr"}, zdr_strict_ids={"acme/zdr"})
+    candidates, dropped = mc.build_candidates(
+        models, make_args(), {}, {"acme/zdr"}, zdr_strict_ids={"acme/zdr"}
+    )
     assert [c["id"] for c in candidates] == ["acme/zdr"]
     assert dropped["not ZDR"] == 1
 
 
 def test_build_candidates_no_zdr_considers_all():
     models = [make_model(id="acme/zdr"), make_model(id="acme/plain")]
-    candidates, dropped = mc.build_candidates(models, make_args(no_zdr=True), {}, set(), zdr_strict_ids=set())
+    candidates, dropped = mc.build_candidates(
+        models, make_args(no_zdr=True), {}, set(), zdr_strict_ids=set()
+    )
     assert len(candidates) == 2
     assert not dropped
 
@@ -4036,8 +4194,12 @@ def test_build_candidates_zdr_variant_keys():
     # a :batch variant counts as ZDR only if that variant itself is listed
     models = [make_model(id="acme/m:batch"), make_model(id="acme/n:batch")]
     candidates, dropped = mc.build_candidates(
-        models, make_args(include_batch=True), {}, {"acme/m:batch"}
-    , zdr_strict_ids={"acme/m:batch"})
+        models,
+        make_args(include_batch=True),
+        {},
+        {"acme/m:batch"},
+        zdr_strict_ids={"acme/m:batch"},
+    )
     assert [c["id"] for c in candidates] == ["acme/m:batch"]
     assert dropped["not ZDR"] == 1
 
@@ -4050,8 +4212,13 @@ def test_build_candidates_collects_filtered_entries():
     ]
     filtered = []
     candidates, dropped = mc.build_candidates(
-        models, make_args(min_context=1_000_000), {}, {"acme/model-a"}, filtered
-    , zdr_strict_ids={"acme/model-a"})
+        models,
+        make_args(min_context=1_000_000),
+        {},
+        {"acme/model-a"},
+        filtered,
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert len(candidates) == 1
     # "no-slash" counts under malformed id but is withheld from filtered,
     # which only ever carries valid provider/model ids.
@@ -4068,8 +4235,8 @@ def test_build_candidates_empty_id_counted_not_listed():
     models = [make_model(id=""), make_model(id="acme/model-a")]
     filtered = []
     candidates, dropped = mc.build_candidates(
-        models, args, {}, {"acme/model-a"}, filtered
-    , zdr_strict_ids={"acme/model-a"})
+        models, args, {}, {"acme/model-a"}, filtered, zdr_strict_ids={"acme/model-a"}
+    )
     assert dropped == {"malformed id": 1}
     assert filtered == []
     mc.compute_scores(candidates, args, {})
@@ -4087,7 +4254,8 @@ def test_build_candidates_without_collector_matches_old_signature():
         make_args(min_context=1_000_000),
         {},
         {"acme/model-a"},
-     zdr_strict_ids={"acme/model-a"})
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates == []
     assert dropped == {"context": 1}
 
@@ -4099,7 +4267,8 @@ def test_build_candidates_additive_fields():
         make_args(),
         {},
         {"acme/model-a"},
-     zdr_strict_ids={"acme/model-a"})
+        zdr_strict_ids={"acme/model-a"},
+    )
     cand = candidates[0]
     assert cand["created"] == float(created)
     assert cand["tool_calling"] is True
@@ -4118,7 +4287,9 @@ def test_build_candidates_attaches_new_fields():
             "input_cache_write": "0.000001",
         },
     )
-    cands, _ = mc.build_candidates([model], make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"})
+    cands, _ = mc.build_candidates(
+        [model], make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"}
+    )
     cand = cands[0]
     assert cand["max_output_tokens"] == 64000
     assert cand["input_modalities"] == ["text", "image"]
@@ -4155,7 +4326,8 @@ def test_apply_endpoint_pricing_uses_baseline_new_fields(monkeypatch):
         {},
         {"z-ai/glm"},
         [],
-     zdr_strict_ids={"z-ai/glm"})
+        zdr_strict_ids={"z-ai/glm"},
+    )
     candidates, _ = mc.apply_endpoint_pricing(candidates, args, [])
     cand = candidates[0]
     assert cand["max_output_tokens"] == 943718
@@ -4185,7 +4357,9 @@ def test_build_catalog_emits_new_fields():
         },
     )
     args = make_args(min_context=0)
-    candidates, dropped = mc.build_candidates([model], args, {}, {"acme/model-a"}, [], zdr_strict_ids={"acme/model-a"})
+    candidates, dropped = mc.build_candidates(
+        [model], args, {}, {"acme/model-a"}, [], zdr_strict_ids={"acme/model-a"}
+    )
     quality_by_id, quality_source_by_id = mc.resolve_quality(
         candidates, {}, {}, {}, "AA API v2"
     )
@@ -4248,8 +4422,12 @@ def test_build_schedules_emits_cache_rates():
 
 def test_build_candidates_zdr_null_under_no_zdr():
     candidates, _ = mc.build_candidates(
-        [make_model(id="acme/model-a")], make_args(no_zdr=True), {}, set()
-    , zdr_strict_ids=set())
+        [make_model(id="acme/model-a")],
+        make_args(no_zdr=True),
+        {},
+        set(),
+        zdr_strict_ids=set(),
+    )
     assert candidates[0]["zdr"] is None
 
 
@@ -4259,7 +4437,8 @@ def test_build_candidates_tool_calling_false_when_relaxed():
         make_args(no_require_tools=True),
         {},
         {"acme/model-a"},
-     zdr_strict_ids={"acme/model-a"})
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates[0]["tool_calling"] is False
 
 
@@ -4313,9 +4492,15 @@ def test_fetch_openrouter_frontend_no_zdr_skips_zdr_fetch_but_still_loads_base(
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     calls = []
     stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=True, no_zdr=True))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=True, no_zdr=True))
     assert zdr_ids == set()
     assert discounts != {}
     assert aa_by_id != {}
@@ -4357,9 +4542,15 @@ def test_fetch_openrouter_frontend_aa_cache_hit_skips_base_fetch(monkeypatch, tm
             }
         )
     )
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
     assert len(calls) == 1  # only the ZDR URL
     assert discounts == {"acme/a": 0.5}
     assert aa_by_id == {"acme/a": {"intelligence_index": 57.5}}
@@ -4470,7 +4661,9 @@ def test_best_prints_provider_qualified_id(monkeypatch, capsys):
         mc, "fetch_openrouter_models", lambda a: ([make_model()], False)
     )
     monkeypatch.setattr(
-        mc, "fetch_openrouter_frontend", lambda a: ({}, {"acme/model-a"}, {"acme/model-a"}, set(), {}, set(), [])
+        mc,
+        "fetch_openrouter_frontend",
+        lambda a: ({}, {"acme/model-a"}, {"acme/model-a"}, set(), {}, set(), []),
     )
     monkeypatch.setattr(mc, "fetch_aa_entries", lambda a: ([], None, False, None))
     # Unkeyed runs hydrate quality from the published catalog (Task 4);
@@ -5191,7 +5384,8 @@ def test_build_candidates_drops_unsupported_effort():
                 "is_reasoning": True,
             }
         },
-     zdr_strict_ids=set())
+        zdr_strict_ids=set(),
+    )
     assert candidates == []
     assert dropped["reasoning effort"] == 1
 
@@ -5214,7 +5408,8 @@ def test_build_candidates_keeps_effective_default_effort_outside_supported_list(
         {},
         set(),
         reasoning_by_id={"acme/model-a": dict(reasoning)},
-     zdr_strict_ids=set())
+        zdr_strict_ids=set(),
+    )
     assert [c["id"] for c in candidates] == ["acme/model-a"]
     assert "reasoning effort" not in dropped
 
@@ -5235,7 +5430,8 @@ def test_build_candidates_effort_filter_control_cases():
         {},
         set(),
         reasoning_by_id={"acme/model-a": dict(supported)},
-     zdr_strict_ids=set())
+        zdr_strict_ids=set(),
+    )
     assert [c["id"] for c in candidates] == ["acme/model-a"]
     assert "reasoning effort" not in dropped
 
@@ -5255,7 +5451,8 @@ def test_build_candidates_effort_filter_control_cases():
         {},
         set(),
         reasoning_by_id={"acme/model-a": dict(high_default)},
-     zdr_strict_ids=set())
+        zdr_strict_ids=set(),
+    )
     assert candidates == []
     assert dropped["reasoning effort"] == 1
 
@@ -5679,7 +5876,8 @@ def test_build_candidates_attaches_reasoning_fields():
         {},
         {"acme/model-a"},
         reasoning_by_id={"acme/model-a": reasoning},
-     zdr_strict_ids={"acme/model-a"})
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert dropped == {}
     assert candidates[0]["reasoning"] == reasoning
     assert candidates[0]["default_effort"] == "high"
@@ -5702,7 +5900,8 @@ def test_build_candidates_default_effort_does_not_filter():
                 "is_reasoning": None,
             }
         },
-     zdr_strict_ids={"acme/model-a"})
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert len(candidates) == 1
     assert dropped == {}
     assert candidates[0]["default_effort"] is None
@@ -5727,7 +5926,8 @@ def test_build_candidates_reasoning_filter_appends_filtered_entry():
                 "is_reasoning": True,
             }
         },
-     zdr_strict_ids={"acme/model-a"})
+        zdr_strict_ids={"acme/model-a"},
+    )
     assert candidates == []
     assert dropped == {"reasoning effort": 1}
     assert filtered == [
@@ -6227,9 +6427,15 @@ def test_fetch_openrouter_frontend_realistic_slugs(monkeypatch, tmp_path):
     stub_frontend(
         monkeypatch, calls, _realistic_openrouter_payload(), _realistic_zdr_payload()
     )
-    discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits, frontend_models = (
-        mc.fetch_openrouter_frontend(make_args(no_cache=True))
-    )
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=True))
     assert discounts == {
         "openai/gpt-4o": 0.5,
         "openai/gpt-4o:free": 0.0,
@@ -8884,8 +9090,13 @@ def catalog_pool(**overrides):
     ]
     filtered = []
     candidates, dropped = mc.build_candidates(
-        models, args, {"acme/model-a": 0.5}, {"acme/model-a", "acme/model-b"}, filtered
-    , zdr_strict_ids={"acme/model-a", "acme/model-b"})
+        models,
+        args,
+        {"acme/model-a": 0.5},
+        {"acme/model-a", "acme/model-b"},
+        filtered,
+        zdr_strict_ids={"acme/model-a", "acme/model-b"},
+    )
     quality_by_id, quality_source_by_id = mc.resolve_quality(
         candidates, aa_by_id, {}, {}, overrides.get("aa_source", "AA API v2")
     )
@@ -9133,7 +9344,9 @@ def _doc_with(models, min_context=1_000_000, zdr_ids=None, aa_by_id=None):
     args = make_args(min_context=min_context)
     filtered = []
     zdr = {m["id"] for m in models} if zdr_ids is None else zdr_ids
-    candidates, dropped = mc.build_candidates(models, args, {}, zdr, filtered, zdr_strict_ids=zdr)
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, zdr, filtered, zdr_strict_ids=zdr
+    )
     mc.compute_scores(candidates, args, {})
     return mc.build_catalog(
         args, models, candidates, dropped, filtered, {}, {}, None, aa_by_id or {}, {}
@@ -9263,7 +9476,9 @@ def test_catalog_future_created_age_days_clamped():
     created = time.time() + 86400
     args = make_args(min_context=0)
     models = [make_model(id="acme/model-a", created=created)]
-    candidates, dropped = mc.build_candidates(models, args, {}, {"acme/model-a"}, [], zdr_strict_ids={"acme/model-a"})
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/model-a"}, [], zdr_strict_ids={"acme/model-a"}
+    )
     mc.compute_scores(candidates, args, {})
     doc = mc.build_catalog(args, models, candidates, dropped, [], {}, {}, None, {}, {})
     (entry,) = doc["models"]
@@ -9741,7 +9956,9 @@ def _cli_order(priority):
 def _inverting_catalog():
     args, models, zdr, quality_by_id = inverting_pool()
     filtered = []
-    candidates, dropped = mc.build_candidates(models, args, {}, zdr, filtered, zdr_strict_ids=zdr)
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, zdr, filtered, zdr_strict_ids=zdr
+    )
     mc.compute_scores(candidates, args, quality_by_id)
     return mc.build_catalog(
         args, models, candidates, dropped, filtered, {}, quality_by_id, None, {}, {}
@@ -9859,7 +10076,9 @@ def test_cli_json_rows_project_cleanly_onto_catalog_rankings(capsys):
     for priority in mc.PRIORITY_WEIGHTS:
         args, models, zdr, quality_by_id = inverting_pool()
         args.priority = priority
-        candidates, _ = mc.build_candidates(models, args, {}, zdr, [], zdr_strict_ids=zdr)
+        candidates, _ = mc.build_candidates(
+            models, args, {}, zdr, [], zdr_strict_ids=zdr
+        )
         mc.compute_scores(candidates, args, quality_by_id)
         mc.print_json(candidates[:2])
         priorities[priority] = json.loads(capsys.readouterr().out)
@@ -10024,7 +10243,9 @@ def _provenance_pool():
     ]
     filtered = []
     zdr = {m["id"] for m in models}
-    candidates, dropped = mc.build_candidates(models, args, {}, zdr, filtered, zdr_strict_ids=zdr)
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, zdr, filtered, zdr_strict_ids=zdr
+    )
     aa_api_entries = [
         {"key": "acme/d", "name": "D", "index": 45.1, "as_of": "2026-10-23T13:15:07Z"},
         {"key": "acme/e", "name": "E", "index": 42.4, "as_of": "2026-10-23T13:15:07Z"},
@@ -10239,7 +10460,9 @@ def test_catalog_no_zdr_marks_skipped(monkeypatch, capsys):
     # keyless path so the suite never touches the network for it.
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setattr(
-        mc, "fetch_openrouter_frontend", lambda args: ({}, set(), set(), set(), {}, set(), [])
+        mc,
+        "fetch_openrouter_frontend",
+        lambda args: ({}, set(), set(), set(), {}, set(), []),
     )
     monkeypatch.setattr(mc, "fetch_aa_entries", lambda args: ([], None, False, None))
     # Unkeyed runs hydrate quality from the published catalog (Task 4);
@@ -10264,7 +10487,9 @@ def test_catalog_no_zdr_marks_skipped(monkeypatch, capsys):
 
 def test_catalog_fails_closed_without_zdr(monkeypatch, capsys):
     monkeypatch.setattr(
-        mc, "fetch_openrouter_frontend", lambda args: ({}, set(), set(), set(), {}, set(), [])
+        mc,
+        "fetch_openrouter_frontend",
+        lambda args: ({}, set(), set(), set(), {}, set(), []),
     )
     monkeypatch.setattr(mc, "fetch_aa_entries", lambda args: ([], None, False, None))
     models = [make_model(id="acme/model-a")]
@@ -12971,8 +13196,13 @@ def test_overall_scores_matches_build_catalog():
     models = [make_model(id="acme/hy4", pricing=hy4_pricing())]
     args = make_args(min_context=1_000_000)
     candidates, dropped = mc.build_candidates(
-        models, args, {}, {m["id"] for m in models}, []
-    , zdr_strict_ids={m["id"] for m in models})
+        models,
+        args,
+        {},
+        {m["id"] for m in models},
+        [],
+        zdr_strict_ids={m["id"] for m in models},
+    )
     mc.compute_scores(candidates, args, {})
     doc = mc.build_catalog(args, models, candidates, dropped, [], {}, {}, None, {}, {})
     (entry,) = doc["models"]
@@ -13296,7 +13526,9 @@ def test_footer_aa_version_prefix_only_on_aa_block():
 def test_weights_percentages_sum_to_100_quality_blind(capsys):
     models = [make_model(id="acme/a"), make_model(id="acme/b")]
     args = make_args(min_context=1_000_000)
-    candidates, _ = mc.build_candidates(models, args, {}, {"acme/a", "acme/b"}, [], zdr_strict_ids={"acme/a", "acme/b"})
+    candidates, _ = mc.build_candidates(
+        models, args, {}, {"acme/a", "acme/b"}, [], zdr_strict_ids={"acme/a", "acme/b"}
+    )
     weights = mc.compute_scores(candidates, args, {})  # quality-blind pool
     mc.print_table(candidates, weights, None)
     line = next(
@@ -13444,7 +13676,9 @@ def test_run_bare_keeps_zdr_refusal_warning(monkeypatch, capsys):
     models = [make_model(id="acme/model-a", name="Acme: A")]
     _stub_quality_run(monkeypatch, models, aa_raises=True)
     monkeypatch.setattr(
-        mc, "fetch_openrouter_frontend", lambda a: ({}, set(), set(), set(), {}, set(), [])
+        mc,
+        "fetch_openrouter_frontend",
+        lambda a: ({}, set(), set(), set(), {}, set(), []),
     )
     assert mc.run(make_args(bare=True), models, False) == 1
     captured = capsys.readouterr()
@@ -13496,12 +13730,17 @@ def test_zdr_eligible_rejects_unknown_mode():
         mc.zdr_eligible("acme/x", {"acme/x"}, {"acme/x"}, set(), "some")
 
 
+@pytest.mark.parametrize("bad_id", [123, ["acme/x"], {"id": "acme/x"}])
+def test_zdr_eligible_rejects_non_string_ids(bad_id):
+    # A malformed models entry must fail closed, not raise on set membership
+    # (lists/dicts) and not be admitted merely because the key is hashable.
+    ids = {bad_id} if isinstance(bad_id, int) else set()
+    assert mc.zdr_eligible(bad_id, ids, ids, ids, "all") is False
+
+
 def test_safety_retention_default_and_choices():
     assert mc.parse_args([]).safety_retention == "none"
-    assert (
-        mc.parse_args(["--safety-retention", "google"]).safety_retention
-        == "google"
-    )
+    assert mc.parse_args(["--safety-retention", "google"]).safety_retention == "google"
     with pytest.raises(SystemExit):
         mc.parse_args(["--safety-retention", "bogus"])
 
@@ -13524,6 +13763,7 @@ def test_fetch_openrouter_frontend_splits_strict_and_safety_retention(
     assert zdr_ids == {"acme/a", "acme/b:batch", "acme/sr", "acme/both"}
     # a model with one strict and one Safety Retention endpoint is strict
     assert zdr_strict_ids == {"acme/a", "acme/b:batch", "acme/both"}
+    assert zdr_sr_ids == {"acme/sr", "acme/both"}
 
 
 def test_fetch_openrouter_frontend_missing_safety_retention_is_not_strict(
@@ -13576,6 +13816,44 @@ def test_fetch_openrouter_frontend_ignores_v3_zdr_cache(monkeypatch, tmp_path):
     assert zdr_strict_ids == {"acme/a", "acme/b:batch", "acme/both"}
 
 
+@pytest.mark.parametrize(
+    "cached_payload",
+    [
+        {"zdr": ["acme/stale"], "strict": ["acme/stale"]},
+        ["acme/stale"],
+    ],
+    ids=["two-list", "bare-list"],
+)
+def test_fetch_openrouter_frontend_ignores_non_v5_zdr_cache_shapes(
+    monkeypatch, tmp_path, cached_payload
+):
+    # The v5 key must not trust a payload that lacks the third list (a
+    # two-list v4 shape) or is not a dict at all (a bare id list): either
+    # would make "explicit Safety Retention" and "unknown" indistinguishable.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    cache_dir = tmp_path / "model-compare"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "openrouter-zdr-v5.json").write_text(
+        json.dumps({"fetched_at": time.time(), "payload": cached_payload})
+    )
+    calls = []
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
+    (
+        discounts,
+        zdr_ids,
+        zdr_strict_ids,
+        zdr_sr_ids,
+        aa_by_id,
+        cache_hits,
+        frontend_models,
+    ) = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
+    assert mc.OPENROUTER_ZDR_URL in calls
+    assert zdr_ids == {"acme/a", "acme/b:batch", "acme/sr", "acme/both"}
+    assert zdr_strict_ids == {"acme/a", "acme/b:batch", "acme/both"}
+    assert zdr_sr_ids == {"acme/sr", "acme/both"}
+    assert "zdr" not in cache_hits
+
+
 def test_build_candidates_safety_retention_modes():
     models = [
         make_model(id="google/sr"),
@@ -13616,8 +13894,27 @@ def test_build_candidates_safety_retention_field():
         models, args, {}, zdr, zdr_strict_ids=strict, zdr_sr_ids={"google/sr"}
     )
     flags = {c["id"]: c["safety_retention"] for c in kept}
-    # "depends on the allowance", not "has an SR endpoint"
+    # explicit Safety Retention and no strict endpoint -- not the broader
+    # "not strict" (an unknown-status model admitted by `all` is false)
     assert flags == {"google/sr": True, "acme/strict": False}
+
+
+def test_build_candidates_unknown_retention_under_all_is_not_flagged():
+    # `all` admits unknown-status models, but the per-model field means
+    # "has an explicit Safety Retention endpoint and is not strict" -- not
+    # the broader "is not strict". Pin that distinction.
+    models = [make_model(id="google/unknown")]
+    kept, dropped = mc.build_candidates(
+        models,
+        make_args(safety_retention="all"),
+        {},
+        {"google/unknown"},
+        zdr_strict_ids=set(),
+        zdr_sr_ids=set(),
+    )
+    assert [c["id"] for c in kept] == ["google/unknown"]
+    assert kept[0]["safety_retention"] is False
+    assert "safety retention" not in dropped
 
 
 def test_build_candidates_no_zdr_nulls_safety_retention():
@@ -13628,12 +13925,13 @@ def test_build_candidates_no_zdr_nulls_safety_retention():
     assert kept[0]["safety_retention"] is None
 
 
-def test_build_candidates_without_strict_set_treats_all_as_strict():
-    # backward compatibility: one id set means "all of these are strict"
+def test_build_candidates_without_strict_set_fails_closed():
+    # The shipped default is fail-closed: one id set cannot prove any model
+    # has a strict endpoint, so even a listed model is dropped under `none`.
     models = [make_model(id="acme/model-a")]
-    kept, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"}, zdr_strict_ids={"acme/model-a"})
-    assert [c["id"] for c in kept] == ["acme/model-a"]
-    assert "safety retention" not in dropped
+    kept, dropped = mc.build_candidates(models, make_args(), {}, {"acme/model-a"})
+    assert kept == []
+    assert dropped["safety retention"] == 1
 
 
 def test_run_refuses_when_every_endpoint_is_safety_retention(monkeypatch, capsys):
@@ -13654,8 +13952,10 @@ def test_run_refuses_when_every_endpoint_is_safety_retention(monkeypatch, capsys
     monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: [_endpoint()])
     models = [make_model(id="google/sr")]
     assert mc.run(make_args(), models, False) == 2
+    err = capsys.readouterr().err
     # the reason is recorded, not inferred: the pool drop is named
-    assert "no models satisfy the filters" in capsys.readouterr().err
+    assert "no models satisfy the filters" in err
+    assert "safety retention" in err
 
 
 def test_catalog_records_allow_safety_retention():
@@ -13673,7 +13973,9 @@ def test_catalog_records_allow_safety_retention():
 def test_catalog_dropped_carries_zero_filled_safety_retention():
     args = make_args()
     models = [make_model(id="acme/model-a")]
-    candidates, dropped = mc.build_candidates(models, args, {}, {"acme/model-a"}, [], zdr_strict_ids={"acme/model-a"})
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/model-a"}, [], zdr_strict_ids={"acme/model-a"}
+    )
     mc.compute_scores(candidates, args, {})
     doc = mc.build_catalog(args, models, candidates, dropped, [], {}, {}, None, {}, {})
     assert doc["pool"]["dropped"]["safety retention"] == 0
@@ -13758,6 +14060,13 @@ def test_help_documents_the_safety_retention_default(capsys):
     assert "--safety-retention {none,google,all}" in out
     assert "Safety Retention" in out
     assert "zero-data-retention" in out
+    assert "none never (default)" in out
+
+
+def test_help_description_is_exact(capsys):
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--help"])
+    assert "Pick the best value-for-money LLM on OpenRouter." in capsys.readouterr().out
 
 
 def test_help_has_an_examples_heading(capsys):
@@ -13819,9 +14128,25 @@ def test_highlight_epilog_styles_the_heading_and_the_prose():
 
 
 def test_help_is_plain_without_a_terminal(capsys):
+    with pytest.raises(SystemExit) as exc:
+        mc.parse_args(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert out
+    assert "usage:" in out
+    assert "\x1b[" not in out
+
+
+def test_help_visible_width_stays_a_hundred_with_colour(monkeypatch, capsys):
+    monkeypatch.setenv("COLUMNS", "200")
+    monkeypatch.setattr(mc, "color_enabled", lambda mode, stream: True)
     with pytest.raises(SystemExit):
         mc.parse_args(["--help"])
-    assert "\x1b[" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "\x1b[" in out
+    visible = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in out.splitlines()]
+    end = visible.index("")
+    assert max(len(line) for line in visible[end + 1 :]) <= 100
 
 
 def test_help_colours_accepted_values_on_a_colour_capable_stdout(monkeypatch, capsys):
@@ -13846,16 +14171,19 @@ class _TTY(io.StringIO):
         return True
 
 
-def _capture_pager(monkeypatch, written):
+def _capture_pager(monkeypatch, written, returncode=0):
     import contextlib
 
     @contextlib.contextmanager
     def fake(argv):
         buffer = io.StringIO()
         original = sys.stdout
+        result = mc.PagerResult()
+        result.started = True
+        result.returncode = returncode
         sys.stdout = buffer
         try:
-            yield True
+            yield result
         finally:
             sys.stdout = original
             written.append((argv, buffer.getvalue()))
@@ -13873,6 +14201,50 @@ def test_page_help_pages_a_help_longer_than_the_viewport(monkeypatch):
     text = "line\n" * 40
     assert mc.page_help(text, _TTY()) is True
     assert written == [(["less"], text)]
+
+
+def test_page_help_pages_wrapped_lines_at_80x100(monkeypatch):
+    # 100-column help on an 80-column terminal wraps: 60 logical lines are
+    # ~120 screen rows, which exceeds a 100-row viewport even though the
+    # logical line count does not.
+    written = []
+    _capture_pager(monkeypatch, written)
+    monkeypatch.setattr(mc, "pager_argv", lambda: ["less"])
+    monkeypatch.setattr(
+        mc.shutil, "get_terminal_size", lambda: os.terminal_size((80, 100))
+    )
+    text = ("x" * 100 + "\n") * 60
+    assert mc.page_help(text, _TTY()) is True
+    assert written == [(["less"], text)]
+
+
+def test_page_help_falls_back_when_pager_exits_nonzero(monkeypatch):
+    written = []
+    _capture_pager(monkeypatch, written, returncode=1)
+    monkeypatch.setattr(mc, "pager_argv", lambda: ["false"])
+    monkeypatch.setattr(
+        mc.shutil, "get_terminal_size", lambda: os.terminal_size((80, 1))
+    )
+    text = "line\n" * 5
+    assert mc.page_help(text, _TTY()) is False
+    # The text was offered to the pager, but the failed run does not count
+    # as success; print_help's fallback prints it again to the terminal.
+    assert written == [(["false"], text)]
+
+
+def test_print_help_prints_when_page_help_declines(monkeypatch, capsys):
+    parser = mc.HelpParser(prog="model_compare.py", formatter_class=mc.HelpFormatter)
+    monkeypatch.setattr(mc, "page_help", lambda text, stream: False)
+    parser.print_help()
+    assert "usage: model_compare.py" in capsys.readouterr().out
+
+
+def test_help_pager_interrupt_exits_130(monkeypatch):
+    def interrupted(text, stream):
+        raise mc.PagerInterrupted
+
+    monkeypatch.setattr(mc, "page_help", interrupted)
+    assert mc.main(["--help"]) == 130
 
 
 def test_page_help_prints_a_help_that_fits(monkeypatch):

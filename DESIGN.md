@@ -558,8 +558,10 @@ the models-API `top_provider.max_completion_tokens`; null when neither is
 known), `input_modalities` (the models-API `architecture.input_modalities`
 list, possibly empty),
 `listed_at`, `age_days`, `tool_calling`, `zdr`, `safety_retention` (`true`
-when every ZDR-list endpoint the model has is a Safety Retention one, so it
-survives only because the mode allows it; `null` under `--no-zdr`),
+when the model has an explicit Safety Retention endpoint and no strict
+endpoint, so it survives only because the mode allows it; a model with only
+unknown-status endpoints, admitted by `all`, is `false`; `null` under
+`--no-zdr`),
 `discount`, `expired`,
 `quality` (the AA intelligence index at the scored effort — best measured
 selectable by default, or the exact explicit effort — or `null`), `aa` (the

@@ -1790,14 +1790,17 @@ def fetch_openrouter_frontend(args):
     independently under its own key and is cached only when non-empty, so a
     degraded payload self-heals on the next run. A base-URL outage never
     blocks the ZDR fetch, and vice versa. Returns
-    (discounts, zdr_ids, zdr_strict_ids, aa_by_id, cache_hits,
+    (discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits,
     frontend_models) where zdr_ids is every model with a ZDR-list endpoint,
     zdr_strict_ids the subset with at least one endpoint whose
-    safety_retention is exactly False, cache_hits names the payloads served
-    from cache ("discounts", "zdr", "aa"), and frontend_models is the
-    frontend listing projected to the
-    fields build_reasoning_metadata needs (slug, permaslug,
-    supports_reasoning, reasoning_config).
+    safety_retention is exactly False, zdr_sr_ids the subset with at least
+    one endpoint whose safety_retention is exactly True, cache_hits names the
+    payloads served from cache ("discounts", "zdr", "aa"), and
+    frontend_models is the frontend listing projected to the fields
+    build_reasoning_metadata needs (slug, permaslug, supports_reasoning,
+    reasoning_config). The v5 ZDR cache payload is
+    {"zdr": [...], "strict": [...], "sr": [...]}; older keys and shapes are
+    ignored.
     """
     discounts = {}
     aa_by_id = {}
@@ -4218,6 +4221,8 @@ def zdr_eligible(model_id, zdr_ids, zdr_strict_ids, zdr_sr_ids, mode) -> bool:
     OpenRouter's per-model-group guardrail split; ``all`` admits anything
     listed, as before this distinction existed.
     """
+    if not isinstance(model_id, str):
+        return False
     if mode not in SAFETY_RETENTION_MODES:
         raise ValueError(f"unknown safety retention mode: {mode!r}")
     if model_id not in (zdr_ids or set()):
@@ -4227,7 +4232,6 @@ def zdr_eligible(model_id, zdr_ids, zdr_strict_ids, zdr_sr_ids, mode) -> bool:
     if mode == "google":
         return (
             model_id in (zdr_sr_ids or set())
-            and isinstance(model_id, str)
             and "/" in model_id
             and model_id.partition("/")[0] == GOOGLE_AUTHOR
         )
@@ -4263,14 +4267,15 @@ def build_candidates(
             return
         # Empty/malformed ids would fail the site validator's filtered-id
         # rule, so they stay counted in dropped only.
-        if not model_id or "/" not in model_id:
+        if not isinstance(model_id, str) or not model_id or "/" not in model_id:
             return
         filtered_out.append(
             {"id": model_id, "name": name or model_id, "reasons": [reason]}
         )
 
     for model in models:
-        model_id = model.get("id") or ""
+        raw_id = model.get("id")
+        model_id = raw_id if isinstance(raw_id, str) else ""
         if "/" not in model_id:
             drop("malformed id", model_id, model.get("name"))
             continue
@@ -6062,6 +6067,22 @@ class PagerInterrupted(Exception):
     """Ctrl-C reached the parent while the pager was running."""
 
 
+class PagerResult:
+    """Outcome of one pager run; truthy when the pager started.
+
+    ``returncode`` is filled from the child after it is reaped, so callers
+    that need to distinguish "the reader quit" from "the pager failed" can
+    inspect it once the context manager has exited.
+    """
+
+    def __init__(self):
+        self.started = False
+        self.returncode = None
+
+    def __bool__(self):
+        return self.started
+
+
 def pager_argv() -> list[str]:
     """The pager command: $PAGER verbatim, else the built-in fallback.
 
@@ -6099,14 +6120,16 @@ def resolve_pager(args) -> list[str] | None:
 
 @contextmanager
 def paged_stdout(argv: list[str]):
-    """Run argv as a pager taking over sys.stdout; yield True when paged.
+    """Run argv as a pager taking over sys.stdout; yield a PagerResult.
 
-    False (direct output) when the pager cannot be started -- startup
-    problems never lose output. Restores sys.stdout in a finally, closes
-    the pager's stdin guarded against EPIPE and reaps the child. A
-    KeyboardInterrupt from the block, the close or the reap terminates the
-    pager (plain less ignores SIGINT without -K) and surfaces as
-    PagerInterrupted; the pager's own exit status is never propagated.
+    A truthy result means the pager started; its ``returncode`` is filled
+    after the child is reaped. False (direct output) when the pager cannot
+    be started -- startup problems never lose output. Restores sys.stdout
+    in a finally, closes the pager's stdin guarded against EPIPE and reaps
+    the child. A KeyboardInterrupt from the block, the close or the reap
+    terminates the pager (plain less ignores SIGINT without -K) and
+    surfaces as PagerInterrupted; the pager's own exit status is exposed on
+    the result rather than raised.
     """
     if not argv:
         yield False
@@ -6140,9 +6163,11 @@ def paged_stdout(argv: list[str]):
     except OSError:
         yield False
         return
+    result = PagerResult()
+    result.started = True
     try:
         sys.stdout = proc.stdin
-        yield True
+        yield result
     except KeyboardInterrupt:
         interrupted = True
     finally:
@@ -6165,6 +6190,9 @@ def paged_stdout(argv: list[str]):
                 proc.wait()
             except KeyboardInterrupt:
                 pass
+        # Real Popen objects expose returncode after wait(); lightweight
+        # test doubles may not, and a clean reap is the honest default.
+        result.returncode = getattr(proc, "returncode", 0)
     if interrupted:
         raise PagerInterrupted
 
@@ -6179,6 +6207,9 @@ def paged_stdout(argv: list[str]):
 # one line that must never clip.
 HELP_WIDTH = 100
 EPILOG_HEADING = "examples:"
+# SGR only: help colour is applied after wrapping, but the pager decision
+# must measure the visible text, not the escape bytes.
+HELP_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 # Help prose names things argparse leaves plain: other options (--catalog's
 # "ignores --top"), the values an option accepts (after "default:", or named in
 # the description), and the environment variables that can stand in for a flag.
@@ -6306,31 +6337,48 @@ def highlight_epilog(text: str, enabled: bool) -> str:
     return f"{text[:at]}{SGR_HEADING}{lines[0]}{SGR_RESET}\n" + "\n".join(body) + "\n"
 
 
+def help_screen_lines(text: str, columns: int) -> int:
+    """Number of terminal rows ``text`` occupies when wrapped at ``columns``.
+
+    SGR escapes are stripped first: they are zero-width and must not make a
+    line look wider than it is. Blank lines count as one row, and a line
+    longer than the terminal wraps into as many rows as needed.
+    """
+    width = max(columns, 1)
+    visible = HELP_SGR_RE.sub("", text)
+    lines = visible.splitlines() or [""]
+    return sum(max(1, (len(line) + width - 1) // width) for line in lines)
+
+
 def page_help(text: str, stream) -> bool:
     """Page the help when it is longer than the viewport; False to print it.
 
     Only a terminal is paged: a pipe keeps its plain text, and output that
-    fits one screen is printed directly so a short help never clears the
+    fits the screen is printed directly so a short help never clears the
     screen for a one-screen pager. The text is built before the pager starts,
     so its colours are decided against the terminal, not against the pipe
     the pager reads; `less` renders them through its raw-control-chars flags.
+    A pager that starts but exits nonzero without delivering the text is not
+    treated as success: the caller prints directly instead.
     """
     if not getattr(stream, "isatty", lambda: False)():
         return False
-    if len(text.splitlines()) <= shutil.get_terminal_size().lines:
+    size = shutil.get_terminal_size()
+    if help_screen_lines(text, size.columns) <= size.lines:
         return False
-    try:
-        with paged_stdout(pager_argv()) as paged:
-            if not paged:
-                return False
-            try:
-                sys.stdout.write(text)
-                sys.stdout.flush()
-            except (BrokenPipeError, PagerInterrupted):
-                # The reader quit early -- that is what a pager is for.
-                pass
-    except PagerInterrupted:
-        pass
+    with paged_stdout(pager_argv()) as paged:
+        if not paged:
+            return False
+        try:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+        except BrokenPipeError:
+            # The reader quit early -- that is what a pager is for. Whether
+            # that was a clean quit or a failed pager is decided by the
+            # returncode below.
+            pass
+    if getattr(paged, "returncode", 0) not in (0, None):
+        return False
     return True
 
 
@@ -6562,7 +6610,10 @@ def parse_args(argv=None):
 
 
 def main(argv=None) -> int:
-    args = parse_args(argv)
+    try:
+        args = parse_args(argv)
+    except PagerInterrupted:
+        return 130
     try:
         models, or_cached = fetch_openrouter_models(args)
     except Exception as exc:
@@ -6653,10 +6704,18 @@ def run(args, models, or_cached) -> int:
             bits = ", ".join(f"{k}={v}" for k, v in counts.items())
             warn(f"no models after the endpoint stage: {bits}")
         else:
+            bits = ", ".join(
+                f"{value} {reason}"
+                for reason, value in sorted(
+                    dropped.items(), key=lambda item: (-item[1], item[0])
+                )
+                if value
+            )
+            detail = f"; dropped: {bits}" if bits else ""
             warn(
                 f"no models satisfy the filters (min-context={args.min_context}, "
-                f"tools={'off' if args.no_require_tools else 'required'}); "
-                "relax them and retry"
+                f"tools={'off' if args.no_require_tools else 'required'}){detail}; "
+                "relax them or check the ZDR/safety-retention data and retry"
             )
         return 2
 
