@@ -1077,7 +1077,7 @@ def validate_catalog(document) -> None:
         _validate_catalog_session_cost(document["session_cost"])
 
 
-HISTORY_SCHEMA_VERSION = 5
+HISTORY_SCHEMA_VERSION = 6
 HISTORY_RETENTION = 10
 HISTORY_TOP_N = 20
 
