@@ -825,6 +825,16 @@ def test_v1_history_treated_as_absent():
     assert diff["baseline_present"] is False
 
 
+def test_v5_history_treated_as_absent():
+    # HISTORY_SCHEMA_VERSION is 6: a v5 document predates the Flex
+    # service-tier price correction and must not seed the weekly diff.
+    history = make_diff_history()
+    history["schema_version"] = 5
+    assert gh.usable_history(history) == {}
+    diff = gh.build_diff(make_diff_catalog(), gh.usable_history(history))
+    assert diff["baseline_present"] is False
+
+
 def test_v2_and_versionless_histories_are_usable():
     history = make_diff_history()
     history["schema_version"] = gh.HISTORY_SCHEMA_VERSION

@@ -73,6 +73,7 @@ def make_args(**overrides):
         reasoning_effort="default",
         # Depth details are opt-in (--depths).
         depths=False,
+        flex=False,
         detail="expert",
         off_peak=False,
         bare=False,
@@ -1366,6 +1367,68 @@ def test_endpoint_schedule_gate_uses_full_schedule_error():
     assert not mc.endpoint_schedule_ok(broken, make_args())
 
 
+def test_endpoint_service_tier_maps_labels():
+    assert mc.endpoint_service_tier(_endpoint(service_tier=None)) == "standard"
+    assert mc.endpoint_service_tier(_endpoint(service_tier="default")) == "standard"
+    assert mc.endpoint_service_tier(_endpoint(service_tier="standard")) == "standard"
+    assert mc.endpoint_service_tier(_endpoint(service_tier="flex")) == "flex"
+    assert mc.endpoint_service_tier(_endpoint(service_tier="priority")) == "priority"
+    assert mc.endpoint_service_tier(_endpoint(service_tier="fast")) == "priority"
+    assert mc.endpoint_service_tier(_endpoint(service_tier="ultrafast")) == "ultrafast"
+    assert mc.endpoint_service_tier(_endpoint(service_tier="")) == "unknown"
+    assert mc.endpoint_service_tier(_endpoint(service_tier="turbo")) == "unknown"
+    assert mc.endpoint_service_tier(_endpoint(service_tier=["flex"])) == "unknown"
+
+
+def test_endpoint_service_tier_cross_checks_tag_suffix():
+    # Live anomaly: deepseek/deepseek-v4-flash-0731 endpoint wafer/fast
+    # carries service_tier null. A tier-suffixed tag that disagrees with
+    # the field is a schema anomaly -- fail closed.
+    assert (
+        mc.endpoint_service_tier(_endpoint(tag="wafer/fast", service_tier=None))
+        == "unknown"
+    )
+    assert (
+        mc.endpoint_service_tier(_endpoint(tag="x/prime", service_tier=None))
+        == "unknown"
+    )
+    assert (
+        mc.endpoint_service_tier(_endpoint(tag="x/flex", service_tier="priority"))
+        == "unknown"
+    )
+    # Consistent pairs stay classified.
+    assert (
+        mc.endpoint_service_tier(_endpoint(tag="morph/fast", service_tier="priority"))
+        == "priority"
+    )
+    assert (
+        mc.endpoint_service_tier(
+            _endpoint(tag="deepinfra/fp8/flex", service_tier="flex")
+        )
+        == "flex"
+    )
+    # Missing/non-string tags never crash and never invent a conflict.
+    assert mc.endpoint_service_tier(_endpoint(tag=None)) == "standard"
+    assert mc.endpoint_service_tier({"service_tier": None}) == "standard"
+    # A path segment that merely starts with a tier word is not a suffix.
+    assert (
+        mc.endpoint_service_tier(_endpoint(tag="fastmodel/fp8", service_tier=None))
+        == "standard"
+    )
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    ["flex", "ultrafast", "priority", "fast", "turbo", "highspeed", "prime"],
+)
+def test_every_documented_tier_suffix_fails_closed_on_null(suffix):
+    # The API has already emitted a tier-labelled tag with service_tier
+    # null (wafer/fast): every documented suffix must classify unknown
+    # rather than standard, so a future /priority label cannot be quoted.
+    ep = _endpoint(tag=f"provider/fp8/{suffix}", service_tier=None)
+    assert mc.endpoint_service_tier(ep) == "unknown"
+
+
 def test_load_cache_expired_returns_stale_payload(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     mc.save_cache("k", {"v": 1})
@@ -1430,6 +1493,53 @@ def _schedule_broken(**fields):
         },
     )
     return _endpoint(**fields)
+
+
+def test_flex_ineligible_by_default_eligible_with_flag():
+    ep = _endpoint(service_tier="flex")
+    assert not mc.baseline_eligible(ep, "fp8", "z-ai", make_args())
+    assert mc.baseline_eligible(ep, "fp8", "z-ai", make_args(flex=True))
+
+
+def test_priority_ultrafast_unknown_never_eligible():
+    for tier in ("priority", "ultrafast", "turbo"):
+        ep = _endpoint(
+            service_tier=tier,
+            pricing={"prompt": "0.00000001", "completion": "0.00000001"},
+        )
+        assert not mc.baseline_eligible(ep, "fp8", "z-ai", make_args())
+        assert not mc.baseline_eligible(ep, "fp8", "z-ai", make_args(flex=True))
+
+
+def test_precision_derivation_ignores_tier_endpoints():
+    # Standard fp8 outranks a Flex bf16: precision is a property of the
+    # standard offering, so Flex never pins the default.
+    eps = [
+        _endpoint(quantization="fp8"),
+        _endpoint(tag="z-ai/flex", service_tier="flex", quantization="bf16"),
+    ]
+    assert mc.derive_default_precision(eps, "z-ai") == "fp8"
+
+
+def test_precision_derivation_none_when_only_flex_names_quantization():
+    eps = [
+        _endpoint(tag="z-ai/unknown", quantization="unknown"),
+        _endpoint(tag="z-ai/flex", service_tier="flex", quantization="bf16"),
+    ]
+    assert mc.derive_default_precision(eps, "z-ai") is None
+
+
+def test_baseline_universe_tier_filter():
+    eps = [
+        _endpoint(tag="z-ai/fp8"),
+        _endpoint(tag="z-ai/flex", service_tier="flex"),
+        _endpoint(tag="z-ai/prime", service_tier="priority"),
+    ]
+    assert [ep["tag"] for ep in mc._baseline_universe(eps, make_args())] == ["z-ai/fp8"]
+    assert [ep["tag"] for ep in mc._baseline_universe(eps, make_args(flex=True))] == [
+        "z-ai/fp8",
+        "z-ai/flex",
+    ]
 
 
 def test_maker_quantization_pins_default():
@@ -1613,6 +1723,174 @@ def test_baseline_cheapest_with_pinned_tiebreak():
     assert mc.pick_baseline(eps, [False, False], args) is None
 
 
+def _carbon_eps():
+    return [
+        _endpoint(
+            provider_name="Google",
+            tag="google-ai-studio/flex",
+            service_tier="flex",
+            pricing={"prompt": "0.000001", "completion": "0.000005"},
+        ),
+        _endpoint(
+            provider_name="Google",
+            tag="google-vertex/global",
+            pricing={"prompt": "0.000002", "completion": "0.00001"},
+        ),
+        _endpoint(
+            provider_name="Google",
+            tag="google-vertex/global/priority",
+            service_tier="priority",
+            pricing={"prompt": "0.0000036", "completion": "0.000018"},
+        ),
+    ]
+
+
+def test_pick_baseline_default_skips_flex():
+    eps = _carbon_eps()
+    args = make_args()
+    flags = [mc.baseline_eligible(ep, "fp8", "google", args) for ep in eps]
+    assert flags == [False, True, False]
+    assert mc.pick_baseline(eps, flags, args)["tag"] == "google-vertex/global"
+
+
+def test_pick_baseline_flex_prefers_flex_even_when_standard_cheaper():
+    eps = [
+        _endpoint(
+            provider_name="Google",
+            tag="google/flex",
+            service_tier="flex",
+            pricing={"prompt": "0.000002", "completion": "0.000002"},
+        ),
+        _endpoint(
+            provider_name="Google",
+            tag="google/standard",
+            pricing={"prompt": "0.000001", "completion": "0.000001"},
+        ),
+    ]
+    args = make_args(flex=True)
+    flags = [True, True]
+    assert mc.pick_baseline(eps, flags, args)["tag"] == "google/flex"
+
+
+def test_pick_baseline_flex_falls_back_when_unpublishable_base():
+    # Blended price resolves from a token tier while the base stays null:
+    # selecting it would drop the model in apply_endpoint_pricing.
+    eps = [
+        _endpoint(
+            provider_name="Google",
+            tag="google/flex",
+            service_tier="flex",
+            pricing={
+                "prompt": None,
+                "completion": None,
+                "overrides": [
+                    {
+                        "min_prompt_tokens": 1000,
+                        "prompt": "0.0000001",
+                        "completion": "0.0000002",
+                    }
+                ],
+            },
+        ),
+        _endpoint(
+            provider_name="Google",
+            tag="google/standard",
+            pricing={"prompt": "0.0000002", "completion": "0.000001"},
+        ),
+    ]
+    args = make_args(flex=True, min_context=2000)
+    assert mc.pick_baseline(eps, [True, True], args)["tag"] == "google/standard"
+
+
+def test_pick_baseline_flex_without_flex_endpoint_matches_default():
+    # No Flex endpoint: --flex must behave exactly like the default,
+    # including when a cheap standard endpoint cannot be published (null
+    # base over a token tier).
+    eps = [
+        _endpoint(
+            provider_name="Google",
+            tag="google/tiered",
+            pricing={
+                "prompt": None,
+                "completion": None,
+                "overrides": [
+                    {
+                        "min_prompt_tokens": 1000,
+                        "prompt": "0.0000001",
+                        "completion": "0.0000002",
+                    }
+                ],
+            },
+        ),
+        _endpoint(
+            provider_name="Google",
+            tag="google/standard",
+            pricing={"prompt": "0.0000002", "completion": "0.000001"},
+        ),
+    ]
+    flex_args = make_args(flex=True, min_context=2000)
+    default_args = make_args(min_context=2000)
+    flags = [True, True]
+    assert (
+        mc.pick_baseline(eps, flags, flex_args)["tag"]
+        == mc.pick_baseline(eps, flags, default_args)["tag"]
+    )
+    assert mc.pick_baseline(eps, flags, flex_args)["tag"] == "google/standard"
+
+
+def test_pick_baseline_default_skips_unpublishable_base():
+    # A finite blended price over a null base would drop the model in
+    # apply_endpoint_pricing even though a usable endpoint exists. The
+    # publishable preference applies in default mode too, so the steering
+    # order starts with the endpoint the quote actually uses.
+    eps = [
+        _endpoint(
+            provider_name="Google",
+            tag="google/tiered",
+            pricing={
+                "prompt": None,
+                "completion": None,
+                "overrides": [
+                    {
+                        "min_prompt_tokens": 1000,
+                        "prompt": "0.0000001",
+                        "completion": "0.0000002",
+                    }
+                ],
+            },
+        ),
+        _endpoint(
+            provider_name="Google",
+            tag="google/standard",
+            pricing={"prompt": "0.0000002", "completion": "0.000001"},
+        ),
+    ]
+    args = make_args(min_context=2000)
+    flags = [True, True]
+    baseline = mc.pick_baseline(eps, flags, args)
+    assert baseline["tag"] == "google/standard"
+    steering = mc.build_steering("m", eps, flags, "fp8", args)
+    assert steering["provider"]["order"][0] == baseline["tag"]
+    assert steering["provider"]["ignore"] == []
+
+
+def test_pick_baseline_flex_falls_back_when_flex_ineligible():
+    # A sub-default Flex endpoint is never eligible, even with --flex.
+    eps = [
+        _endpoint(
+            provider_name="Google",
+            tag="google/flex",
+            service_tier="flex",
+            quantization="fp4",
+        ),
+        _endpoint(provider_name="Google", tag="google/standard"),
+    ]
+    args = make_args(flex=True)
+    flags = [mc.baseline_eligible(ep, "fp8", "google", args) for ep in eps]
+    assert flags == [False, True]
+    assert mc.pick_baseline(eps, flags, args)["tag"] == "google/standard"
+
+
 # ---------------------------------------------------------------------------
 # Provider-aware eval: annotations + steering builder
 # ---------------------------------------------------------------------------
@@ -1675,6 +1953,91 @@ def test_price_spread_direction_and_null():
         mc.build_annotations(eps, [True, False], eps[0], 262144, args)["price_spread"]
         is None
     )
+
+
+def test_annotations_standard_only_on_both_sides():
+    args = make_args(flex=True)
+    eps = [
+        _endpoint(
+            provider_name="Z.AI",
+            tag="z-ai/fp8",
+            pricing={"prompt": "0.0000002", "completion": "0.000001"},
+        ),
+        _endpoint(
+            provider_name="Z.AI",
+            tag="z-ai/flex",
+            service_tier="flex",
+            pricing={"prompt": "0.0000001", "completion": "0.0000002"},
+        ),
+        _endpoint(
+            provider_name="DeepInfra",
+            tag="deepinfra/fp4",
+            quantization="fp4",
+            pricing={"prompt": "0.00000005", "completion": "0.0000001"},
+        ),
+    ]
+    flags = [mc.baseline_eligible(ep, "fp8", "z-ai", args) for ep in eps]
+    assert flags == [True, True, False]
+    ann = mc.build_annotations(eps, flags, eps[0], 262144, args)
+    # The eligible denominator is the standard fp8 endpoint only; the
+    # cheaper eligible Flex endpoint must not move the spread.
+    assert ann["price_spread"] == pytest.approx(0.15625)
+    assert ann["cheapest_quantized"]["provider"] == "DeepInfra"
+
+    # Identical to the same model without the Flex endpoint at all.
+    without = mc.build_annotations(
+        [eps[0], eps[2]], [True, False], eps[0], 262144, args
+    )
+    assert ann == without
+
+    # The annotations universe itself is standard-only.
+    assert [ep["tag"] for ep in mc.NON_ELIGIBLE_UNIVERSE(eps, flags)] == [
+        "deepinfra/fp4"
+    ]
+
+
+def test_risk_flag_eligible_weight_is_standard_only():
+    # Two cheap standard non-eligible endpoints outweigh the standard
+    # eligible one, so risk_flag is True. A cheap eligible Flex endpoint
+    # would dominate the inverse-square sum if it leaked into the eligible
+    # weight and silently flip the flag to False -- it must not.
+    args = make_args(flex=True)
+    eps = [
+        _endpoint(
+            provider_name="Z.AI",
+            tag="z-ai/fp8",
+            pricing={"prompt": "0.000001", "completion": "0.000001"},
+        ),
+        _endpoint(
+            provider_name="Z.AI",
+            tag="z-ai/flex",
+            service_tier="flex",
+            pricing={"prompt": "0.0000001", "completion": "0.0000001"},
+        ),
+        _endpoint(
+            provider_name="DeepInfra",
+            tag="deepinfra/fp4",
+            quantization="fp4",
+            pricing={"prompt": "0.000001", "completion": "0.000001"},
+        ),
+        _endpoint(
+            provider_name="BetaHost",
+            tag="beta/int8",
+            quantization="int8",
+            pricing={"prompt": "0.000001", "completion": "0.000001"},
+        ),
+    ]
+    flags = [mc.baseline_eligible(ep, "fp8", "z-ai", args) for ep in eps]
+    assert flags == [True, True, False, False]
+    assert mc.build_annotations(eps, flags, eps[0], 262144, args)["risk_flag"] is True
+    without_flex = mc.build_annotations(
+        [eps[0], eps[2], eps[3]],
+        [True, False, False],
+        eps[0],
+        262144,
+        args,
+    )
+    assert without_flex["risk_flag"] is True
 
 
 def test_price_spread_null_when_no_non_eligible():
@@ -1961,6 +2324,134 @@ def test_steering_omits_quantizations_when_default_null():
     assert provider["ignore"] == ["relace/unknown", "anthropic:free"]
     assert "quantizations" not in provider
     assert provider["allow_fallbacks"] is True
+
+
+def _tiered_eps():
+    return [
+        _endpoint(
+            provider_name="Google",
+            tag="google-ai-studio/flex",
+            service_tier="flex",
+            pricing={"prompt": "0.000001", "completion": "0.000005"},
+        ),
+        _endpoint(
+            provider_name="Google",
+            tag="google-vertex/global",
+            pricing={"prompt": "0.000002", "completion": "0.00001"},
+        ),
+        _endpoint(
+            provider_name="Google",
+            tag="google-vertex/global/priority",
+            service_tier="priority",
+            pricing={"prompt": "0.0000036", "completion": "0.000018"},
+        ),
+        _endpoint(
+            provider_name="OpenAI",
+            tag="openai/ultrafast",
+            service_tier="ultrafast",
+            pricing={"prompt": "0.000006", "completion": "0.00003"},
+        ),
+    ]
+
+
+def test_steering_default_orders_standard_and_ignores_every_tier():
+    args = make_args()
+    eps = _tiered_eps()
+    flags = [mc.baseline_eligible(ep, "fp8", "google", args) for ep in eps]
+    assert flags == [False, True, False, False]
+    steering = mc.build_steering("google/gemini-4-carbon", eps, flags, "fp8", args)
+    provider = steering["provider"]
+    assert provider["order"] == ["google-vertex/global"]
+    assert provider["ignore"] == [
+        "google-ai-studio/flex",
+        "google-vertex/global/priority",
+        "openai/ultrafast",
+    ]
+    assert provider["order"][0] == mc.pick_baseline(eps, flags, args)["tag"]
+
+
+def test_steering_flex_mode_orders_flex_first_then_standard():
+    args = make_args(flex=True)
+    eps = _tiered_eps()
+    flags = [mc.baseline_eligible(ep, "fp8", "google", args) for ep in eps]
+    assert flags == [True, True, False, False]
+    steering = mc.build_steering("google/gemini-4-carbon", eps, flags, "fp8", args)
+    provider = steering["provider"]
+    assert provider["order"] == [
+        "google-ai-studio/flex",
+        "google-vertex/global",
+    ]
+    assert provider["ignore"] == [
+        "google-vertex/global/priority",
+        "openai/ultrafast",
+    ]
+    assert provider["order"][0] == mc.pick_baseline(eps, flags, args)["tag"]
+
+
+def test_steering_priority_ignored_regardless_of_default_precision():
+    eps = [
+        _endpoint(tag="google/standard"),
+        _endpoint(
+            tag="google/fast",
+            service_tier="priority",
+            pricing={"prompt": "0.0000003", "completion": "0.0000006"},
+        ),
+    ]
+    for default_precision in (None, "fp8"):
+        flags = [
+            mc.baseline_eligible(ep, default_precision, "google", make_args())
+            for ep in eps
+        ]
+        steering = mc.build_steering("m", eps, flags, default_precision, make_args())
+        assert "google/fast" in steering["provider"]["ignore"]
+
+
+def test_steering_priority_variant_is_ignored():
+    eps = [
+        _endpoint(tag="google/standard"),
+        _endpoint(
+            tag="google/fast:free",
+            service_tier="priority",
+            pricing={"prompt": "0", "completion": "0"},
+        ),
+    ]
+    flags = [mc.baseline_eligible(ep, "fp8", "google", make_args()) for ep in eps]
+    assert flags == [True, False]
+    steering = mc.build_steering("m", eps, flags, "fp8", make_args())
+    assert steering["provider"]["order"] == ["google/standard"]
+    assert steering["provider"]["ignore"] == ["google/fast:free"]
+
+
+def test_steering_flex_unpublishable_appended_after_baseline():
+    args = make_args(flex=True, min_context=2000)
+    eps = [
+        _endpoint(
+            provider_name="Google",
+            tag="google/flex",
+            service_tier="flex",
+            pricing={
+                "prompt": None,
+                "completion": None,
+                "overrides": [
+                    {
+                        "min_prompt_tokens": 1000,
+                        "prompt": "0.0000001",
+                        "completion": "0.0000002",
+                    }
+                ],
+            },
+        ),
+        _endpoint(
+            provider_name="Google",
+            tag="google/standard",
+            pricing={"prompt": "0.0000002", "completion": "0.000001"},
+        ),
+    ]
+    steering = mc.build_steering("m", eps, [True, True], "fp8", args)
+    provider = steering["provider"]
+    assert provider["order"] == ["google/standard", "google/flex"]
+    assert provider["order"][0] == mc.pick_baseline(eps, [True, True], args)["tag"]
+    assert provider["ignore"] == []
 
 
 def test_flag_list_mismatch_raises():
@@ -2497,6 +2988,61 @@ def test_catalog_drop_reasons_carry_endpoint_stage_drops():
     # the publish drop-rate gate reads the endpoint-derived reasons.
     for reason in ("no_baseline_eligible_endpoint", "endpoint_fetch_failed"):
         assert reason in mc.CATALOG_DROP_REASONS
+
+
+def test_endpoint_stage_quotes_standard_and_orders_it_first(monkeypatch):
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        provider_name="Google",
+                        tag="google-ai-studio/flex",
+                        service_tier="flex",
+                        quantization="unknown",
+                        pricing={"prompt": "0.000001", "completion": "0.000005"},
+                    ),
+                    _endpoint(
+                        provider_name="Google",
+                        tag="google-vertex/global",
+                        quantization="unknown",
+                        pricing={"prompt": "0.000002", "completion": "0.00001"},
+                    ),
+                    _endpoint(
+                        provider_name="Google",
+                        tag="google-vertex/global/priority",
+                        service_tier="priority",
+                        quantization="unknown",
+                        pricing={
+                            "prompt": "0.0000036",
+                            "completion": "0.000018",
+                        },
+                    ),
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    models = [make_model(id="google/gemini-4-carbon")]
+    for flex, expected_in, first in (
+        (False, 2.0, "google-vertex/global"),
+        (True, 1.0, "google-ai-studio/flex"),
+    ):
+        args = make_args(min_context=0, flex=flex)
+        cands, _ = mc.build_candidates(models, args, {}, {"google/gemini-4-carbon"}, [])
+        cands, _ = mc.apply_endpoint_pricing(cands, args, [])
+        (cand,) = cands
+        assert cand["price_in"] == pytest.approx(expected_in)
+        assert cand["default_precision"] is None
+        steering = cand["steering"]["provider"]
+        assert steering["order"][0] == first
+        if flex:
+            assert steering["ignore"] == ["google-vertex/global/priority"]
+        else:
+            assert steering["ignore"] == [
+                "google-ai-studio/flex",
+                "google-vertex/global/priority",
+            ]
 
 
 def test_parse_args_openrouter_api_key_flag():
@@ -10287,6 +10833,16 @@ def test_parse_args_accepts_catalog_alone():
 def test_parse_args_no_pager_flag():
     assert mc.parse_args(["--no-pager"]).no_pager is True
     assert mc.parse_args([]).no_pager is False
+
+
+def test_parse_args_flex_defaults_off():
+    assert mc.parse_args([]).flex is False
+    assert mc.parse_args(["--flex"]).flex is True
+
+
+def test_parse_args_flex_help_mentions_standard_default():
+    assert "standard tier only" in mc._FLEX_HELP
+    assert "can exceed another provider's standard endpoint" in mc._FLEX_HELP
 
 
 MC_SCRIPT = Path(__file__).resolve().parent / "model_compare.py"

@@ -491,11 +491,13 @@
       // endpointRows(catalogEntry): normalized rows for the per-model
       // endpoint disclosure. Nulls map to their display defaults (no
       // pricing -> "-", no status -> "non-live", no tier -> "-", no
-      // quantization -> "unknown"); the baseline endpoint is the one whose
-      // per-1M in/out prices match the entry's baseline pricing scalars
-      // (the pricing block IS the baseline endpoint's pricing, so exactly
-      // one endpoint should match -- if more do, the marker is withheld:
-      // ambiguous beats wrong).
+      // quantization -> "unknown"). The baseline marker comes from
+      // steering.order[0] when the catalog entry carries a steering block:
+      // the baseline IS that endpoint, and the pricing scalars can match
+      // several endpoints (one standard-tier price repeats across
+      // providers), which would otherwise clear the marker. Older entries
+      // without steering fall back to the price scalars -- if more than one
+      // matches, the marker is withheld: ambiguous beats wrong.
       function endpointRows(entry) {
         if (!entry || !Array.isArray(entry.endpoints)) return [];
         var base = entry.pricing || {};
@@ -507,6 +509,12 @@
           typeof base.output_per_1m === "number" && isFinite(base.output_per_1m)
             ? base.output_per_1m
             : null;
+        var order =
+          entry.steering &&
+          entry.steering.provider &&
+          entry.steering.provider.order;
+        var baselineTag =
+          Array.isArray(order) && typeof order[0] === "string" ? order[0] : null;
         var matches = 0;
         var rows = entry.endpoints.map(function (endpoint) {
           var pricing = endpoint.pricing || {};
@@ -519,7 +527,9 @@
               ? pricing.completion
               : null;
           var isBaseline = false;
-          if (
+          if (baselineTag !== null) {
+            isBaseline = endpoint.tag === baselineTag;
+          } else if (
             prompt !== null &&
             completion !== null &&
             baseIn !== null &&
@@ -528,8 +538,8 @@
             Math.abs(completion * 1e6 - baseOut) < 1e-9
           ) {
             isBaseline = true;
-            matches += 1;
           }
+          if (isBaseline) matches += 1;
           return {
             provider: endpoint.provider_name || "unknown",
             badge: endpoint.quantization || "unknown",

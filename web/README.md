@@ -22,6 +22,10 @@ All web assets, generators, and site tests are maintained in this directory. The
 | `highlights.json`                                                                              | Prose summaries rendered under **Weekly highlights** on `index.html`                                                                                                                                                                       |
 | `litellm_rate_card.json`, `litellm_steering.json`, `litellm.json`, `litellm_merge_status.json` | LiteLLM cost-map fragment, steering companion, merged upstream cost map, and merge health status                                                                                                                                           |
 
+The Flex service-tier correction bumped `history.json` to schema 6, so the
+`7-DAY` column and the price-move highlights restart blank for one week
+after the first v6 publish.
+
 ## Local preview
 
 Preview the site locally at `http://127.0.0.1:8734`:
