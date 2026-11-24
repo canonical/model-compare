@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The catalog records the choice: `parameters.allow_safety_retention`, a
   per-model `safety_retention` flag, and a `safety retention` drop reason.
   Both fields are additive — `schema_version` stays 6.
+- Endpoint-level ZDR/Safety Retention filtering: the quoted baseline must
+  itself be a listed endpoint with an allowed `safety_retention`, not just a
+  sibling of one. The per-endpoint policy caches in the v6 ZDR payload.
+- `--byok`, `--no-moderation` and `--include-deranked` endpoint-policy gates,
+  plus a `training: true` exclusion under the default ZDR mode. The catalog
+  records all three flags in `parameters`. The policy is keyed by candidate
+  id (variant suffix kept) and inherits provider-wide moderation/training
+  flags across regional siblings.
+- The quoted endpoint must advertise tool calling and enough prompt context
+  (`max_prompt_tokens`, else `context_length`) for the run's flags.
+- Genuinely free models (all endpoints zero-priced) keep a baseline and rank;
+  `--exclude-free` still drops them at the model level.
 - `--flex` quotes and steers the Flex service tier (lower price, lower
   processing priority; can exceed another provider's standard endpoint).
 
@@ -28,12 +40,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never quotation candidates.
 - The per-model `steering` block orders the baseline first and ignores every
   live endpoint outside `order`, so no fallback can bill a higher tier.
+- First-party host detection keys on the stable endpoint tag slug
+  (`amazon-bedrock`, `azure`, `google-vertex`, `claude-on-aws`) instead of
+  display names, so a provider rename cannot silently disable the carve-out.
 
 ### Fixed
 
 - Flex endpoints were quoted as the baseline price on 35 of 89 models,
   understating the default quote (for example `google/gemini-4-carbon` showed
   $1/$5 instead of its $2/$10 standard price).
+- The default run no longer quotes non-ZDR endpoints of admitted models
+  (for example `deepseek/deepseek-v4-pro-0813` now quotes DeepInfra
+  $1.3/$2.6, not Baidu $0.132/$0.396), nor Safety Retention endpoints for
+  models whose strict sibling was chosen.
+- Closed models served only by Bedrock, Vertex or Claude-on-AWS keep their
+  baselines instead of losing the first-party carve-out to stale display
+  names.
+- `meta/muse-ember` and the other Meta Safety Retention models no longer
+  rank; Google's Safety Retention models stay under
+  `--safety-retention google`.
+- `max_prompt_tokens` below `--min-context` now drops the endpoint even when
+  `context_length` is large enough, so a 1M-context quote can accept a 1M
+  prompt.
 - `history.json` moves to schema 6 so the corrected prices are not reported as
   price rises.
 

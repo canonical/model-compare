@@ -75,9 +75,12 @@ RANK  MODEL               DEPTH  QUAL  $IN/M  $OUT/M  DISC  PREC  TIER   CTX    
 | `--quality-ref N` | `70` | AA intelligence index treated as a full `1.0` quality score |
 | `--recency-half-life D` | `120` | Listing-age decay half-life in days |
 | `--max-age-days D` | off | Drop models listed more than `D` days ago |
-| `--no-zdr` | off | Include providers without zero-data-retention (ZDR) guarantees |
+| `--no-zdr` | off | Include providers without zero-data-retention (ZDR) guarantees, including endpoints whose provider trains on prompts |
 | `--flex` | off | Quote and steer the Flex service tier (typically lower price, lower processing priority; can exceed another provider's standard endpoint) |
 | `--safety-retention {none,google,all}` | `none` | Whether endpoints that only offer Safety Retention count as ZDR: never, only for Google's models, or always |
+| `--byok` | off | Include BYOK-only endpoints, which need your own provider key and are excluded by default |
+| `--no-moderation` | off | Exclude endpoints whose provider requires moderation |
+| `--include-deranked` | off | Include endpoints OpenRouter deprioritises in default routing |
 | `--no-require-tools` | off | Include models that don't support tool/function calling |
 | `--exclude-free` | off | Drop zero-cost `:free` listings |
 | `--include-batch` | off | Keep asynchronous `:batch` variants (requires `--no-zdr` in practice) |
@@ -90,14 +93,14 @@ RANK  MODEL               DEPTH  QUAL  $IN/M  $OUT/M  DISC  PREC  TIER   CTX    
 
 ## How rankings work
 
-Out of the box, `model_compare.py` filters for models suitable for day-to-day coding agents: text output, tool-calling support, at least a **1M-token context window**, no asynchronous `:batch` listings, and at least one live **zero-data-retention (ZDR)** endpoint. Every one of those checks can be relaxed with the flags above.
+Out of the box, `model_compare.py` filters for models suitable for day-to-day coding agents: text output, tool-calling support, at least a **1M-token context window**, no asynchronous `:batch` listings, and at least one live **zero-data-retention (ZDR)** endpoint. Every one of those checks can be relaxed with the flags above. The ZDR check is applied to the quoted endpoint too, not just the model: a model cannot borrow compliance from a sibling endpoint that OpenRouter would not route to by default.
 
 OpenRouter's ZDR list is wider than zero data retention: it also carries **Safety Retention** endpoints, which may keep prompts and responses, flagged or not, solely to investigate abuse. They never train on the data but they do store it, so a guardrail that enforces ZDR can refuse them. They do not count by default; `--safety-retention google` admits them for Google's models only, which is what the published tables use because that is what the org's guardrail permits.
 
 Surviving models are scored across four normalized dimensions — **quality**, **price**, **context headroom**, and **listing age**:
 
 - **Quality (`QUAL` and `DEPTH`):** sourced from the Artificial Analysis intelligence index (`0`–`100`). With `AA_API_KEY` set, scores come straight from the live AA v2 API; without a key, local runs hydrate from [`model-compare.dev/catalog.json`](https://model-compare.dev/catalog.json) so your terminal matches the website out of the box. Because reasoning models score differently depending on thinking budget, each model is scored at its **best measured depth that OpenRouter lets you select** (shown in `DEPTH`).
-- **Endpoint pricing and steering (`PREC` and `TIER`):** one model ID on OpenRouter is often hosted by multiple providers at different quantizations and service tiers. Rather than trusting OpenRouter's headline number, `model_compare.py` quotes the **cheapest baseline-eligible standard-tier endpoint** at the **1M-token prompt tier**, blended 75% input / 25% output. That quote is a standard-tier **floor**, not a bill prediction: a plain request never reaches Flex or ultrafast endpoints (nor a closed-weight model's priority endpoint), but OpenRouter may serve an unsteered open-weight request from a priority endpoint at a higher rate. Pass the per-model `steering` block from `--json` or `catalog.json` to pin routing — it ignores every tier endpoint outside `order`, removing that exposure. Flex is never quoted unless you pass `--flex`. A trailing `!` on `PREC` warns that OpenRouter's unsteered routing would send most traffic to cheaper, more heavily quantized providers.
+- **Endpoint pricing and steering (`PREC` and `TIER`):** one model ID on OpenRouter is often hosted by multiple providers at different quantizations and service tiers. Rather than trusting OpenRouter's headline number, `model_compare.py` quotes the **cheapest baseline-eligible standard-tier endpoint** at the **1M-token prompt tier**, blended 75% input / 25% output. Eligibility is endpoint-level: the quote must itself be ZDR-compliant, advertise the required tools and prompt context, and — when OpenRouter's frontend reports the endpoint's policy — be callable without a BYOK key unless `--byok` is set; a deranked endpoint is skipped while a better default route exists. That quote is a standard-tier **floor**, not a bill prediction: a plain request never reaches Flex or ultrafast endpoints (nor a closed-weight model's priority endpoint), but OpenRouter may serve an unsteered open-weight request from a priority endpoint at a higher rate. Pass the per-model `steering` block from `--json` or `catalog.json` to pin routing — it ignores every tier endpoint outside `order`, removing that exposure. Flex is never quoted unless you pass `--flex`. A trailing `!` on `PREC` warns that OpenRouter's unsteered routing would send most traffic to cheaper, more heavily quantized providers.
 
 For the full scoring formulas, quality-source reconciliation rules, `catalog.json` v6 schema contract, and LiteLLM integration internals, see [DESIGN.md](DESIGN.md) and the [site FAQ](https://model-compare.dev/faq.html). For the static site pipeline, see [web/README.md](web/README.md).
 

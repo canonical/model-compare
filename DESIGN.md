@@ -94,6 +94,56 @@ a zero-data-retention (ZDR) endpoint by default (`--no-zdr` to consider
 everything), (with `--exclude-free`) rate-limited `:free` variants, and (with
 `--reasoning-effort <effort>`) models that cannot run the selected effort.
 
+The baseline endpoint must also carry the capability the model advertised:
+when the endpoint's own `supported_parameters` list omits `tools` or
+`tool_choice`, it is not quoted while tools are required; when its
+`max_prompt_tokens` (or, failing that, `context_length`) is below
+`--min-context`, it cannot serve the requested prompt and is not quoted.
+Missing endpoint metadata falls back to the model-level check. The
+`max_prompt_tokens` rule is deliberately stricter than the catalog context
+filter: `context_length` is prompt plus completion capacity, so an endpoint
+can advertise a 1M window and still be unable to accept a 1M-token prompt.
+Several OpenAI endpoints sit just below the 1M prompt floor (922k) while
+their total window is 1.05M; they are dropped rather than quoted as 1M-context
+models that cannot serve the job.
+
+The frontend `models/find` rows also carry per-endpoint policy flags the
+public endpoint payload lacks. A baseline endpoint whose row is marked
+`is_byok_only` is not quoted unless `--byok` is set, because a plain
+OpenRouter key cannot call it; one marked `is_deranked` is not quoted while a
+non-deranked endpoint exists, because OpenRouter's default routing
+deprioritises it; one marked `moderation_required` is not quoted under
+`--no-moderation`; and one whose data policy says `training: true` is not
+quoted under the default ZDR mode, because a provider that trains on prompts
+is not zero-data-retention even if OpenRouter's ZDR list includes the
+endpoint. A model whose only standard endpoint is deranked keeps that
+baseline as a last resort (`--include-deranked` quotes deranked endpoints
+unconditionally; `--no-zdr` is the explicit opt-out for training endpoints).
+
+Rows are keyed by the **candidate id** — a `:free`/`:batch` row keeps its
+variant suffix, mirroring the discount keying, so a variant candidate finds
+its own policy instead of colliding with the standard row. Because the
+frontend reports moderation and training **provider-wide** but lists rows
+per region/quantization, each row also produces a provider-level entry keyed
+by the base model id and the tag's first segment (`amazon-bedrock` for
+`amazon-bedrock/eu-west-1`), carrying only those two flags. A baseline on an
+unlisted regional sibling therefore inherits them, and a batch-only row
+still informs the base candidate (provider-wide flags do not vary by
+variant). `is_byok_only` and `is_deranked` stay endpoint-level: they
+genuinely differ per endpoint/variant. When the endpoint's `data_policy` and
+the provider's `provider_info.dataPolicy` disagree about `training`, the
+stricter value wins for that **endpoint** (either saying True marks it as
+training); the provider-wide entry takes only the provider-level value, so a
+`:free` variant's endpoint-level training flag cannot reject its paid
+sibling. The frontend listing only covers the endpoints the site shows, so
+an endpoint absent from both entries is allowed (fail-open on unknown
+policy, fail-closed on a known rejection).
+
+A genuinely free model — one whose endpoints are all zero-priced — keeps a
+baseline: the zero-price "variant" rule identifies a cheap variant of a
+*paid* model, so it only applies when the model has at least one paid
+endpoint. `--exclude-free` still drops free models at the model level.
+
 ## Quality sources and reconciliation
 
 Every quality value is a record, not a bare float:
@@ -283,7 +333,11 @@ normalization is.
 Responses are cached under `~/.cache/model-compare/` (`XDG_CACHE_HOME` is
 honored) with a 6-hour TTL (`--cache-ttl`); `--no-cache` forces a refetch. The
 cache keeps repeated invocations (e.g. in shell prompts or wrappers) fast and
-polite.
+polite. The frontend payload caches in four independent slices — discounts,
+AA benchmarks, the reasoning projection, and the per-endpoint policy flags
+(`is_byok_only`, `moderation_required`, `is_deranked`, and the provider data
+policy's `training`) — so a payload that changes shape in one slice cannot
+poison the others.
 
 ## Discounts
 
@@ -294,10 +348,45 @@ which the listed price is currently discounted (e.g. `75%`). The endpoint is
 undocumented, so the tool degrades gracefully — if it breaks, every model
 shows `--` and `--discount` returns nothing.
 
-Ranking always uses the listed (undiscounted) prices; the discount is shown
-as information. Variants are matched individually, so a `:batch` twin of a
+Ranking uses the endpoint's net price: OpenRouter's endpoint `pricing`
+already has the discount applied, while the frontend's `pricing_json` (and
+`discount_to_user`) carries the pre-discount base price and the discount
+fraction. The discount is therefore shown as information and is not applied a
+second time. Variants are matched individually, so a `:batch` twin of a
 discounted model only shows a discount when that variant itself is
 discounted.
+
+## What the price does not model
+
+The quote is a per-token text price. Four audited cost surfaces are
+deliberately outside it because their direction depends on the workload
+rather than on the endpoint:
+
+- **Caching.** `input_cache_read` and `input_cache_write` rates are parsed
+  and published, but the blended price uses the prompt price. Repeated-prefix
+  workloads pay less than the quote when a provider caches; one-off prompts
+  do not. Folding a cache-hit rate into the default ranking would impose one
+  workload's assumption on every user.
+- **Regional endpoints.** The endpoint tag's region segment is not filtered
+  or preferred. OpenRouter's default routing behaviour for regional endpoints
+  is not documented consistently enough to rank them differently, and the
+  audited effect runs in both directions (some regions cheaper, some
+  pricier).
+- **Web search, image and audio surcharges.** `web_search`, `image`,
+  `image_token`, `image_output` and `audio` prices are per-use charges on
+  top of tokens. They are omitted from the blended price because the default
+  ranking is a text-agent workload; a search- or image-heavy run must budget
+  them separately. Server-tool charges (`server_tool_cost` in the
+  observability payloads) are post-hoc actuals and likewise outside the
+  quote.
+- **`internal_reasoning`.** The completion price is used for all output
+  tokens. One audited endpoint prices internal reasoning tokens differently;
+  the effect is below the ranking's precision and is not modelled.
+
+These are documented limits, not silent drops: `parse_endpoints` keeps the
+token and cache rates in the catalog's endpoint block, but it does not keep
+the per-use surcharge keys, so a consumer that needs them must read
+OpenRouter's endpoint API directly.
 
 ## Zero data retention
 
@@ -327,6 +416,19 @@ ids it lacked were `:batch` or `:free` variants. If the list cannot be fetched
 or yields no entries, the tool refuses to rank rather than silently
 considering non-ZDR models; pass `--no-zdr` to explicitly consider everything.
 
+The model-level test is necessary but not sufficient: a model in the list may
+also be served by endpoints that are not in it. The baseline endpoint is
+therefore filtered at the endpoint level as well. `fetch_openrouter_frontend`
+builds a policy keyed by `(model_id, tag)` for the live (`status == 0`) list
+entries; `baseline_eligible` admits an endpoint only when its key is present
+and its `safety_retention` is allowed by the run's mode. An endpoint absent
+from the policy is never a baseline, so the quoted price and the steering
+`order[0]` always describe a ZDR-compliant endpoint. The policy rides on the
+`FrontendResult` tuple's `zdr_endpoints` attribute and is cached in the v6 ZDR
+cache payload (`{"zdr": [...], "strict": [...], "sr": [...],
+"endpoints": [[model_id, tag, safety_retention], ...]}`). Under `--no-zdr`
+the policy is `None` and the endpoint gate is skipped.
+
 ### Safety Retention
 
 The list is wider than zero data retention. Each entry also carries a
@@ -352,6 +454,11 @@ model whose author slug is `google`; and `all` keeps every listed model,
 including unknown-status ones, which is the behaviour before this distinction
 existed. The drop is reported as `safety retention`, distinct from `not ZDR`
 (absent from the list entirely), and `--no-zdr` makes the whole knob inert.
+The same split applies at the endpoint level: the baseline must be an endpoint
+whose own `safety_retention` is allowed by the mode, so a strict model cannot
+quote a retaining endpoint merely because another endpoint of the same model
+is strict. The model-level `safety_retention` field stays as it was: `true`
+when the model has an explicit Safety Retention endpoint and no strict one.
 
 The default is `none` because it is the only setting that is right for a
 stranger running the script against their own account. The published site
@@ -367,7 +474,9 @@ both additive — the meaning of `zdr` is unchanged — so `schema_version`
 stays `6`. `web/build_site_data.py` accepts a catalog without them (written
 before this change) and checks them when present, including that no candidate
 depends on the allowance under `none` and that the field is `null` when no ZDR
-gate ran.
+gate ran. The same block records `byok`, `no_moderation` and
+`include_deranked`, so a published artifact states which endpoint-policy gates
+were active; they are additive and carry the run's defaults on the site.
 
 ## CLI output
 
@@ -644,13 +753,18 @@ The other per-model additive blocks:
   `/prime`) that disagrees with the field classifies the endpoint as unknown,
   fail-closed.
   The per-model endpoint cache key is
-  `endpoints-v2:<id>`; the stale-annotation read uses the same helper.
+  `endpoints-v3:<id>`; the stale-annotation read uses the same helper.
 - `default_precision` — the precision the ranked price is quoted at (the
   maker's own best, else the best available in the derivation universe —
   live non-variant endpoints that pass the schedule gate); one of the
   precision-ladder labels, or `null` when no live endpoint names a known
   quantization (common for closed models — eligibility then relies solely on
-  the first-party carve-out).
+  the first-party carve-out). The carve-out matches the maker's own author
+  slug or a partner host by the endpoint's stable provider slug (the first
+  segment of its `tag`, e.g. `amazon-bedrock`), never by display name; a
+  display-name rename cannot silently disable it. The partner-host list is a
+  short policy list; its slugs were live-verified against
+  `/api/v1/providers` and should be re-checked when the catalog changes.
 - `annotations` — quantization risk around the baseline, all four fields
   derived from one shared universe: the live non-variant **standard-tier**
   endpoints that are **not** baseline-eligible (sub-default quantization,

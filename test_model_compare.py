@@ -1219,48 +1219,59 @@ def test_normalize_provider_strips_punctuation():
 
 def test_first_party_author_and_partner():
     assert is_first_party("Z.AI", "z-ai")
-    assert is_first_party("AWS Bedrock", "anthropic")
-    assert not is_first_party("OpenInference", "z-ai")
+    # A partner host is first-party through its stable tag slug, even when
+    # the display name does not normalize to the author.
+    assert is_first_party("AWS Bedrock", "anthropic", tag="amazon-bedrock/us-east-1")
+    assert not is_first_party("OpenInference", "z-ai", tag="openinference/fp8")
+
+
+def test_provider_slug_from_tag_handles_bad_input():
+    assert mc.provider_slug_from_tag("amazon-bedrock/eu-west-1") == "amazon-bedrock"
+    assert mc.provider_slug_from_tag("google-vertex") == "google-vertex"
+    assert mc.provider_slug_from_tag("") == ""
+    assert mc.provider_slug_from_tag(None) == ""
+    assert mc.provider_slug_from_tag(123) == ""
 
 
 @pytest.mark.parametrize(
-    ("provider_name", "author"),
+    ("provider_name", "author", "tag"),
     [
-        ("Amazon Bedrock", "amazon"),
-        ("Google AI Studio", "google"),
-        ("Mistral", "mistralai"),
+        ("Amazon Bedrock", "amazon", "amazon-bedrock"),
+        ("Google AI Studio", "google", "google-ai-studio"),
+        ("Mistral", "mistralai", "mistral"),
     ],
 )
-def test_first_party_alias_matches_verified_live_names(provider_name, author):
-    # Live-verified §4.2 pairs (2026-10-20, task-13-fix-report.md 8b): these
-    # makers self-name differently than their author slugs -- normalization
-    # alone cannot bridge "Amazon Bedrock" to "amazon". The alias pair does.
-    assert is_first_party(provider_name, author)
+def test_first_party_alias_matches_verified_live_slugs(provider_name, author, tag):
+    # Live-verified §4.2 pairs (2026-11-22): these makers self-name
+    # differently than their author slugs. The alias is keyed by the stable
+    # provider slug (the tag prefix), so a display-name rename cannot break
+    # it. Amazon Bedrock is also a partner host, so its slug matches every
+    # author; the other two aliases bind to one author.
+    assert is_first_party(provider_name, author, tag=tag)
     # Both sides compare normalized, so case/punctuation variants match.
-    assert is_first_party(provider_name.upper(), author.upper())
-    assert is_first_party(provider_name.lower(), author.replace("-", "_"))
+    assert is_first_party(provider_name.upper(), author.upper(), tag=tag.upper())
+    assert is_first_party(provider_name.lower(), author.replace("-", "_"), tag=tag)
 
 
 @pytest.mark.parametrize(
-    ("provider_name", "author"),
+    ("provider_name", "author", "tag"),
     [
-        ("Amazon Bedrock", "google"),
-        ("Google AI Studio", "mistralai"),
-        ("Mistral", "amazon"),
+        ("Google AI Studio", "mistralai", "google-ai-studio"),
+        ("Mistral", "amazon", "mistral"),
+        ("Baidu", "deepseek", "baidu/fp8"),
     ],
 )
-def test_first_party_alias_requires_author_match(provider_name, author):
-    # The alias binds a provider name to ONE author slug: the same provider
-    # name stays third-party for every other author (an alias must never
-    # hand a model a first-party carve-out it did not verify for).
-    assert not is_first_party(provider_name, author)
+def test_first_party_alias_requires_author_match(provider_name, author, tag):
+    # The alias binds a provider slug to ONE author slug: the same provider
+    # stays third-party for every other author (an alias must never hand a
+    # model a first-party carve-out it did not verify for).
+    assert not is_first_party(provider_name, author, tag=tag)
 
 
 def test_default_precision_derivation_uses_alias():
     # The live amazon/nova-2-lite-v1 shape, offline: an all-unknown-quant
     # maker endpoint gets default_precision None (nothing ranks) and is
-    # ineligible for a third-party author -- but eligible through the
-    # carve-out for the alias-matched author, becoming the baseline.
+    # eligible through the partner-host carve-out for Amazon Bedrock.
     args = make_args()
     eps = mc.parse_endpoints(
         {
@@ -1276,9 +1287,10 @@ def test_default_precision_derivation_uses_alias():
         }
     )
     assert mc.derive_default_precision(eps, "amazon") is None
-    # A different author gets no carve-out from this provider.
-    assert not mc.baseline_eligible(eps[0], None, "acme", args)
-    # The alias-matched author does, and the endpoint is the only baseline.
+    # Bedrock is a partner host, so it is first-party for any author.
+    assert mc.baseline_eligible(eps[0], None, "acme", args)
+    # The maker's own author also qualifies, and the endpoint is the only
+    # baseline.
     assert mc.baseline_eligible(eps[0], None, "amazon", args)
     assert mc.pick_baseline(eps, [True], args)["tag"] == "amazon-bedrock"
 
@@ -1355,9 +1367,55 @@ def test_parse_endpoints_new_fields_default_to_null():
     assert ep["pricing"]["input_cache_read"] is None
     assert ep["pricing"]["input_cache_write"] is None
     assert ep["pricing"]["input_cache_write_1h"] is None
+    assert ep["supported_parameters"] is None
+    assert ep["max_prompt_tokens"] is None
 
 
-def test_fetch_model_endpoints_uses_v2_cache(monkeypatch):
+def test_parse_endpoints_keeps_endpoint_capabilities():
+    ep = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        supported_parameters=["tools", "tool_choice", "temperature"],
+                        max_prompt_tokens=524288,
+                    )
+                ]
+            }
+        }
+    )[0]
+    assert ep["supported_parameters"] == ["tools", "tool_choice", "temperature"]
+    assert ep["max_prompt_tokens"] == 524288
+
+
+def test_baseline_eligible_requires_tools_on_endpoint():
+    args = make_args(no_require_tools=False)
+    without_tools = _endpoint(supported_parameters=["temperature", "top_p"])
+    with_tools = _endpoint(supported_parameters=["tools", "tool_choice"])
+    assert not mc.baseline_eligible(without_tools, "fp8", "z-ai", args)
+    assert mc.baseline_eligible(with_tools, "fp8", "z-ai", args)
+    # Missing endpoint metadata falls back to the model-level gate.
+    assert mc.baseline_eligible(_endpoint(), "fp8", "z-ai", args)
+
+
+def test_baseline_eligible_requires_endpoint_context_floor():
+    args = make_args(min_context=1_000_000)
+    short = _endpoint(max_prompt_tokens=524288)
+    fallback_short = _endpoint(context_length=524288)
+    enough = _endpoint(max_prompt_tokens=1_000_000)
+    # max_prompt_tokens is the authority when present, even when the
+    # catalog context_length looks large enough.
+    masked = _endpoint(max_prompt_tokens=524288, context_length=2_000_000)
+    unknown = _endpoint(context_length=None)
+    assert not mc.baseline_eligible(short, "fp8", "z-ai", args)
+    assert not mc.baseline_eligible(fallback_short, "fp8", "z-ai", args)
+    assert not mc.baseline_eligible(masked, "fp8", "z-ai", args)
+    assert mc.baseline_eligible(enough, "fp8", "z-ai", args)
+    # Missing endpoint metadata falls back to the model-level check.
+    assert mc.baseline_eligible(unknown, "fp8", "z-ai", args)
+
+
+def test_fetch_model_endpoints_uses_v3_cache(monkeypatch):
     seen = []
 
     def fake_load(name, ttl):
@@ -1368,7 +1426,7 @@ def test_fetch_model_endpoints_uses_v2_cache(monkeypatch):
     monkeypatch.setattr(mc, "save_cache", lambda *a, **k: None)
     monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: {"data": {"endpoints": []}})
     mc.fetch_model_endpoints("z-ai/glm-5.3", make_args(no_cache=False, cache_ttl=60))
-    assert seen == ["endpoints-v2:z-ai_glm-5.3"]
+    assert seen == ["endpoints-v3:z-ai_glm-5.3"]
 
 
 def test_variant_detection_marker_and_zero_price():
@@ -1486,8 +1544,8 @@ def test_fetch_model_endpoints_round_trip(monkeypatch):
     eps = mc.fetch_model_endpoints("z-ai/glm", args)
     assert calls == [mc.OPENROUTER_ENDPOINTS_URL.format(id="z-ai/glm")]
     assert eps == mc.parse_endpoints(payload)
-    # Saved under the flattened v2 cache name ("/" -> "_", hyphen kept).
-    assert Path(mc.cache_path("endpoints-v2:z-ai_glm")).exists()
+    # Saved under the flattened v3 cache name ("/" -> "_", hyphen kept).
+    assert Path(mc.cache_path("endpoints-v3:z-ai_glm")).exists()
     # Second call: served from cache, no refetch.
     assert mc.fetch_model_endpoints("z-ai/glm", args) == eps
     assert len(calls) == 1
@@ -1689,6 +1747,548 @@ def test_unrecognized_quantization_fails_closed():
     assert (
         mc.derive_default_precision([_endpoint(quantization="int16")], "z-ai") is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Endpoint-level ZDR policy
+# ---------------------------------------------------------------------------
+
+
+def test_build_zdr_endpoint_policy_keeps_live_entries():
+    policy = mc.build_zdr_endpoint_policy(
+        [
+            {
+                "model_id": "acme/a",
+                "tag": "acme/fp8",
+                "status": 0,
+                "safety_retention": False,
+            },
+            {
+                "model_id": "acme/a",
+                "tag": "acme/fp4",
+                "status": 0,
+                "safety_retention": True,
+            },
+            {
+                "model_id": "acme/a",
+                "tag": "acme/dead",
+                "status": -1,
+                "safety_retention": False,
+            },
+            {
+                "model_id": "acme/a",
+                "tag": "",
+                "status": 0,
+                "safety_retention": False,
+            },
+            {
+                "model_id": "",
+                "tag": "acme/fp8",
+                "status": 0,
+                "safety_retention": False,
+            },
+            "not-a-dict",
+        ]
+    )
+    # Only live entries with both a model id and a tag survive; a non-bool
+    # retention flag is unknown (None), never strict.
+    assert policy == {
+        ("acme/a", "acme/fp8"): {"safety_retention": False},
+        ("acme/a", "acme/fp4"): {"safety_retention": True},
+    }
+
+
+def test_endpoint_zdr_allowed_modes():
+    policy = {
+        ("acme/a", "acme/fp8"): {"safety_retention": False},
+        ("acme/a", "acme/fp4"): {"safety_retention": True},
+        ("acme/a", "acme/unknown"): {"safety_retention": None},
+        ("google/a", "acme/fp4"): {"safety_retention": True},
+    }
+    strict = _endpoint(tag="acme/fp8")
+    sr = _endpoint(tag="acme/fp4")
+    unknown = _endpoint(tag="acme/unknown")
+    not_zdr = _endpoint(tag="acme/other")
+
+    for mode in ("none", "google", "all"):
+        args = make_args(safety_retention=mode)
+        assert mc.endpoint_zdr_allowed(strict, "acme/a", "acme", args, policy)
+
+    args = make_args(safety_retention="none")
+    assert not mc.endpoint_zdr_allowed(sr, "acme/a", "acme", args, policy)
+    assert not mc.endpoint_zdr_allowed(unknown, "acme/a", "acme", args, policy)
+    assert not mc.endpoint_zdr_allowed(not_zdr, "acme/a", "acme", args, policy)
+
+    args = make_args(safety_retention="google")
+    assert mc.endpoint_zdr_allowed(sr, "google/a", "google", args, policy)
+    assert not mc.endpoint_zdr_allowed(sr, "acme/a", "acme", args, policy)
+    assert not mc.endpoint_zdr_allowed(unknown, "acme/a", "acme", args, policy)
+
+    args = make_args(safety_retention="all")
+    assert mc.endpoint_zdr_allowed(sr, "acme/a", "acme", args, policy)
+    assert mc.endpoint_zdr_allowed(unknown, "acme/a", "acme", args, policy)
+    assert not mc.endpoint_zdr_allowed(not_zdr, "acme/a", "acme", args, policy)
+
+
+def test_baseline_eligible_rejects_non_zdr_endpoint():
+    args = make_args()
+    policy = {("acme/a", "acme/fp8"): {"safety_retention": False}}
+    zdr = _endpoint(provider_name="Acme", tag="acme/fp8", quantization="fp8")
+    non_zdr = _endpoint(provider_name="Acme", tag="acme/fp4", quantization="fp8")
+
+    assert mc.baseline_eligible(
+        zdr, "fp8", "acme", args, model_id="acme/a", zdr_policy=policy
+    )
+    assert not mc.baseline_eligible(
+        non_zdr, "fp8", "acme", args, model_id="acme/a", zdr_policy=policy
+    )
+    # No policy (older caller / test stub): the endpoint gate stays off.
+    assert mc.baseline_eligible(non_zdr, "fp8", "acme", args)
+    # --no-zdr also turns the gate off.
+    no_zdr = make_args(no_zdr=True)
+    assert mc.baseline_eligible(
+        non_zdr, "fp8", "acme", no_zdr, model_id="acme/a", zdr_policy=policy
+    )
+
+
+def test_is_variant_endpoint_zero_price_is_model_relative():
+    free = _endpoint(pricing={"prompt": "0", "completion": "0"})
+    # Default: a zero-priced endpoint is a variant of a paid model.
+    assert mc.is_variant_endpoint(free)
+    # A genuinely free model: its zero-priced endpoints are not variants.
+    assert not mc.is_variant_endpoint(free, zero_price_is_variant=False)
+    # The :free/:batch marker still applies even for a free model.
+    assert mc.is_variant_endpoint(
+        _endpoint(tag="acme:free", pricing={"prompt": "0", "completion": "0"}),
+        zero_price_is_variant=False,
+    )
+
+
+def test_model_has_paid_endpoint():
+    assert not mc.model_has_paid_endpoint(
+        [_endpoint(pricing={"prompt": "0", "completion": "0"})]
+    )
+    assert mc.model_has_paid_endpoint(
+        [
+            _endpoint(pricing={"prompt": "0", "completion": "0"}),
+            _endpoint(pricing={"prompt": "0.0000001", "completion": "0"}),
+        ]
+    )
+    # A non-serving endpoint's stale positive price does not make a free
+    # model "paid" (and must not turn its live free endpoints into variants).
+    assert not mc.model_has_paid_endpoint(
+        [
+            _endpoint(pricing={"prompt": "0", "completion": "0"}),
+            _endpoint(status=-2, pricing={"prompt": "0.0000001", "completion": "0"}),
+        ]
+    )
+    # Negative prices are not paid.
+    assert not mc.model_has_paid_endpoint(
+        [_endpoint(pricing={"prompt": "-0.0000001", "completion": "0"})]
+    )
+    assert not mc.model_has_paid_endpoint([])
+    assert not mc.model_has_paid_endpoint(None)
+
+
+def test_baseline_eligible_allows_free_model_endpoint():
+    args = make_args()
+    free = _endpoint(
+        provider_name="Acme",
+        tag="acme/fp8",
+        quantization="fp8",
+        pricing={"prompt": "0", "completion": "0"},
+    )
+    # Default: the zero-priced endpoint is a variant and never a baseline.
+    assert not mc.baseline_eligible(free, "fp8", "acme", args)
+    # A genuinely free model: the same endpoint is a real baseline.
+    assert mc.baseline_eligible(free, "fp8", "acme", args, zero_price_is_variant=False)
+
+
+def test_build_endpoint_policy_projects_frontend_rows():
+    policy = mc.build_endpoint_policy(
+        [
+            {
+                "slug": "acme/a",
+                "endpoint": {
+                    "provider_slug": "acme",
+                    "is_byok_only": True,
+                    "moderation_required": False,
+                    "is_deranked": True,
+                    "provider_info": {
+                        "dataPolicy": {"training": True},
+                    },
+                },
+            },
+            {
+                "slug": "acme/a",
+                "endpoint": {
+                    "provider_slug": "acme/fp8",
+                    "data_policy": {"training": False},
+                },
+            },
+            {
+                "slug": "acme/a",
+                "endpoint": {"provider_slug": "acme/not-bool"},
+            },
+            {"slug": "acme/a", "endpoint": {"provider_slug": ""}},
+            {"slug": "", "endpoint": {"provider_slug": "acme"}},
+            {"slug": "acme/a", "endpoint": "not-a-dict"},
+            "not-a-dict",
+        ]
+    )
+    assert policy == {
+        ("acme/a", "acme"): {
+            "byok_only": True,
+            "moderation_required": False,
+            "deranked": True,
+            "training": True,
+        },
+        ("acme/a", "acme/fp8"): {
+            "byok_only": None,
+            "moderation_required": None,
+            "deranked": None,
+            "training": False,
+        },
+        ("acme/a", "acme/not-bool"): {
+            "byok_only": None,
+            "moderation_required": None,
+            "deranked": None,
+            "training": None,
+        },
+    }
+
+
+def test_build_endpoint_policy_keys_variants():
+    # The frontend lists one row per variant under the same base slug; a
+    # :free/:batch candidate id must find its own row instead of colliding
+    # with the standard row (and letting API row order decide the flags).
+    policy = mc.build_endpoint_policy(
+        [
+            {
+                "slug": "acme/a",
+                "endpoint": {
+                    "provider_slug": "acme",
+                    "variant": "standard",
+                    "is_byok_only": False,
+                    "moderation_required": False,
+                },
+            },
+            {
+                "slug": "acme/a",
+                "endpoint": {
+                    "provider_slug": "acme",
+                    "variant": "free",
+                    "is_byok_only": True,
+                    "moderation_required": False,
+                },
+            },
+            {
+                "slug": "acme/a",
+                "endpoint": {
+                    "provider_slug": "acme",
+                    "variant": "batch",
+                    "is_deranked": True,
+                },
+            },
+        ]
+    )
+    assert policy[("acme/a", "acme")]["byok_only"] is False
+    assert policy[("acme/a:free", "acme")]["byok_only"] is True
+    assert policy[("acme/a:batch", "acme")]["deranked"] is True
+    # The variant ids are exactly the candidate/ZDR ids, so a lookup by the
+    # candidate id hits and the gates apply.
+    assert not mc.endpoint_policy_allowed(
+        _endpoint(tag="acme"), "acme/a:free", make_args(), policy
+    )
+    # Provider-wide rows are variant-agnostic: the batch row's provider-level
+    # flags still apply to the base candidate (byok does not leak, because it
+    # is endpoint-level; the batch row has no moderation flag here).
+    assert policy[("acme/a", "acme")]["moderation_required"] is False
+
+
+def test_build_endpoint_policy_batch_only_row_informs_base_provider():
+    policy = mc.build_endpoint_policy(
+        [
+            {
+                "slug": "acme/a",
+                "endpoint": {
+                    "provider_slug": "acme",
+                    "variant": "batch",
+                    "is_byok_only": True,
+                    "moderation_required": True,
+                },
+            }
+        ]
+    )
+    # The exact entry (batch candidate) carries the endpoint-level byok.
+    assert policy[("acme/a:batch", "acme")]["byok_only"] is True
+    # The base entry exists only as a provider-wide row: no byok/deranked,
+    # but the provider-level moderation still reaches the base candidate.
+    provider = policy[("acme/a", "acme")]
+    assert provider["byok_only"] is None
+    assert provider["moderation_required"] is True
+    assert not mc.endpoint_policy_allowed(
+        _endpoint(tag="acme"),
+        "acme/a",
+        make_args(no_moderation=True),
+        policy,
+    )
+    assert mc.endpoint_policy_allowed(
+        _endpoint(tag="acme"), "acme/a", make_args(), policy
+    )
+
+
+def test_build_endpoint_policy_provider_flags_inherit_across_regions():
+    # moderation_required and training are provider-wide in the live payload
+    # but the rows are per region/quantization. A baseline on an unlisted
+    # sibling tag must inherit them; byok/deranked must NOT leak across
+    # endpoints because they really differ per endpoint/variant.
+    policy = mc.build_endpoint_policy(
+        [
+            {
+                "slug": "amazon/nova-2-lite-v1",
+                "endpoint": {
+                    "provider_slug": "amazon-bedrock/eu-west-1",
+                    "is_byok_only": False,
+                    "moderation_required": True,
+                    "is_deranked": False,
+                    "provider_info": {
+                        "slug": "amazon-bedrock",
+                        "dataPolicy": {"training": False},
+                    },
+                },
+            }
+        ]
+    )
+    exact = policy[("amazon/nova-2-lite-v1", "amazon-bedrock/eu-west-1")]
+    provider = policy[("amazon/nova-2-lite-v1", "amazon-bedrock")]
+    assert exact["moderation_required"] is True
+    assert exact["training"] is False
+    assert provider == {
+        "byok_only": None,
+        "moderation_required": True,
+        "deranked": None,
+        "training": False,
+    }
+    sibling = _endpoint(tag="amazon-bedrock")
+    assert not mc.endpoint_policy_allowed(
+        sibling,
+        "amazon/nova-2-lite-v1",
+        make_args(no_moderation=True),
+        policy,
+    )
+    assert mc.endpoint_policy_allowed(
+        sibling, "amazon/nova-2-lite-v1", make_args(), policy
+    )
+    # The provider-level entry carries no endpoint identity, so it must not
+    # make the sibling BYOK-only or deranked on its own.
+    assert (
+        mc.endpoint_policy_allowed(
+            sibling,
+            "amazon/nova-2-lite-v1",
+            make_args(no_moderation=True, byok=True),
+            policy,
+        )
+        is False
+    )
+    assert mc.endpoint_policy_allowed(
+        sibling, "amazon/nova-2-lite-v1", make_args(byok=False), policy
+    )
+
+
+def test_endpoint_policy_cache_round_trip():
+    policy = {
+        ("acme/a", "acme"): {
+            "byok_only": True,
+            "moderation_required": False,
+            "deranked": None,
+            "training": True,
+        },
+        ("acme/a", "acme/eu"): {
+            "byok_only": None,
+            "moderation_required": True,
+            "deranked": False,
+            "training": None,
+        },
+        ("acme/a:free", "acme"): {
+            "byok_only": False,
+            "moderation_required": None,
+            "deranked": True,
+            "training": False,
+        },
+    }
+    rows = mc._endpoint_policy_cache_rows(policy)
+    assert mc._endpoint_policy_from_cache_rows(rows) == policy
+    # A row with the wrong width is skipped, never half-read.
+    assert mc._endpoint_policy_from_cache_rows([["acme/a", "acme", True]]) == {}
+
+
+def test_build_endpoint_policy_endpoint_training_stays_on_its_variant():
+    # The live particle-ai shape: the :free row's endpoint-level data_policy
+    # says training=True while the provider policy and the paid standard row
+    # say False. The free row's own entry must reject it; the base provider
+    # entry must not, or the paid sibling would be dropped for the free
+    # variant's policy.
+    policy = mc.build_endpoint_policy(
+        [
+            {
+                "slug": "particle-ai/particle-1",
+                "endpoint": {
+                    "provider_slug": "particle-ai/us",
+                    "variant": "free",
+                    "data_policy": {"training": True},
+                    "provider_info": {"dataPolicy": {"training": False}},
+                },
+            },
+            {
+                "slug": "particle-ai/particle-1",
+                "endpoint": {
+                    "provider_slug": "particle-ai/us",
+                    "variant": "standard",
+                    "data_policy": {"training": False},
+                    "provider_info": {"dataPolicy": {"training": False}},
+                },
+            },
+        ]
+    )
+    assert policy[("particle-ai/particle-1:free", "particle-ai/us")]["training"] is True
+    assert policy[("particle-ai/particle-1", "particle-ai/us")]["training"] is False
+    # The paid sibling's endpoint is admitted under the default ZDR mode.
+    assert mc.endpoint_policy_allowed(
+        _endpoint(tag="particle-ai/us"),
+        "particle-ai/particle-1",
+        make_args(),
+        policy,
+    )
+
+
+def test_build_endpoint_policy_training_stricter_level_wins():
+    def training_for(endpoint_policy, provider_policy):
+        endpoint = {"provider_slug": "acme", "is_byok_only": False}
+        if endpoint_policy is not None:
+            endpoint["data_policy"] = {"training": endpoint_policy}
+        if provider_policy is not None:
+            endpoint["provider_info"] = {"dataPolicy": {"training": provider_policy}}
+        policy = mc.build_endpoint_policy([{"slug": "acme/a", "endpoint": endpoint}])
+        return policy[("acme/a", "acme")]["training"]
+
+    # Either level saying True wins (the stricter value, fail closed).
+    assert training_for(True, False) is True
+    assert training_for(False, True) is True
+    assert training_for(True, True) is True
+    # False only when every known value is False.
+    assert training_for(False, False) is False
+    assert training_for(False, None) is False
+    assert training_for(None, False) is False
+    assert training_for(None, None) is None
+
+
+def test_build_endpoint_policy_merges_duplicate_rows_fail_closed():
+    # Duplicate rows for one key (e.g. repeated variant rows) must not let
+    # row order decide: any True wins, then any False, else unknown.
+    policy = mc.build_endpoint_policy(
+        [
+            {
+                "slug": "acme/a",
+                "endpoint": {"provider_slug": "acme", "is_byok_only": False},
+            },
+            {
+                "slug": "acme/a",
+                "endpoint": {"provider_slug": "acme", "is_byok_only": True},
+            },
+        ]
+    )
+    assert policy[("acme/a", "acme")]["byok_only"] is True
+
+
+def test_endpoint_policy_allowed_modes():
+    policy = {
+        ("acme/a", "acme/byok"): {
+            "byok_only": True,
+            "moderation_required": False,
+            "deranked": False,
+            "training": False,
+        },
+        ("acme/a", "acme/mod"): {
+            "byok_only": False,
+            "moderation_required": True,
+            "deranked": False,
+            "training": False,
+        },
+        ("acme/a", "acme/deranked"): {
+            "byok_only": False,
+            "moderation_required": False,
+            "deranked": True,
+            "training": False,
+        },
+        ("acme/a", "acme/ok"): {
+            "byok_only": False,
+            "moderation_required": False,
+            "deranked": False,
+            "training": False,
+        },
+        ("acme/a", "acme/training"): {
+            "byok_only": False,
+            "moderation_required": False,
+            "deranked": False,
+            "training": True,
+        },
+    }
+    byok = _endpoint(tag="acme/byok")
+    mod = _endpoint(tag="acme/mod")
+    deranked = _endpoint(tag="acme/deranked")
+    ok = _endpoint(tag="acme/ok")
+    training = _endpoint(tag="acme/training")
+
+    args = make_args()
+    assert not mc.endpoint_policy_allowed(byok, "acme/a", args, policy)
+    assert mc.endpoint_policy_allowed(ok, "acme/a", args, policy)
+    assert mc.endpoint_policy_allowed(mod, "acme/a", args, policy)
+    assert not mc.endpoint_policy_allowed(deranked, "acme/a", args, policy)
+    # A training endpoint is not ZDR; only --no-zdr admits it.
+    assert not mc.endpoint_policy_allowed(training, "acme/a", args, policy)
+    assert mc.endpoint_policy_allowed(
+        training, "acme/a", make_args(no_zdr=True), policy
+    )
+    # Absent key: no known policy, so allowed.
+    assert mc.endpoint_policy_allowed(
+        _endpoint(tag="acme/other"), "acme/a", args, policy
+    )
+    # No policy at all: the gate stays off.
+    assert mc.endpoint_policy_allowed(byok, "acme/a", args, None)
+
+    assert mc.endpoint_policy_allowed(byok, "acme/a", make_args(byok=True), policy)
+    assert not mc.endpoint_policy_allowed(
+        mod, "acme/a", make_args(no_moderation=True), policy
+    )
+    assert mc.endpoint_policy_allowed(
+        deranked, "acme/a", make_args(include_deranked=True), policy
+    )
+
+
+def test_baseline_eligible_rejects_gated_endpoint():
+    args = make_args()
+    policy = {
+        ("acme/a", "acme/byok"): {
+            "byok_only": True,
+            "moderation_required": False,
+            "deranked": False,
+        }
+    }
+    byok = _endpoint(provider_name="Acme", tag="acme/byok", quantization="fp8")
+    assert not mc.baseline_eligible(
+        byok, "fp8", "acme", args, model_id="acme/a", endpoint_policy=policy
+    )
+    assert mc.baseline_eligible(
+        byok,
+        "fp8",
+        "acme",
+        make_args(byok=True),
+        model_id="acme/a",
+        endpoint_policy=policy,
+    )
+    # No policy (older caller / test stub): the gate stays off.
+    assert mc.baseline_eligible(byok, "fp8", "acme", args)
 
 
 def test_baseline_cheapest_with_pinned_tiebreak():
@@ -2740,6 +3340,252 @@ def test_candidate_pricing_replaced_by_baseline(monkeypatch):
             "allow_fallbacks": True,
         },
     }
+
+
+def test_apply_endpoint_pricing_skips_non_zdr_cheapest_endpoint(monkeypatch):
+    # The cheap endpoint is not in the ZDR policy; the compliant endpoint is
+    # pricier. The baseline must be the compliant one, not the cheapest.
+    args = make_args(min_context=0)
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        provider_name="Cheap",
+                        tag="cheap/fp8",
+                        quantization="fp8",
+                        pricing={"prompt": "0.0000001", "completion": "0.0000002"},
+                    ),
+                    _endpoint(
+                        provider_name="Acme",
+                        tag="acme/fp8",
+                        quantization="fp8",
+                        pricing={"prompt": "0.0000002", "completion": "0.0000004"},
+                    ),
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    models = [make_model(id="acme/a", name="Acme: A")]
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/a"}, [], zdr_strict_ids={"acme/a"}
+    )
+    assert dropped == {}
+    policy = {("acme/a", "acme/fp8"): {"safety_retention": False}}
+    candidates, extra = mc.apply_endpoint_pricing(
+        candidates, args, [], zdr_policy=policy
+    )
+    assert extra == {}
+    cand = candidates[0]
+    assert cand["price_in"] == pytest.approx(0.2)
+    assert cand["price_out"] == pytest.approx(0.4)
+    assert cand["steering"]["provider"]["order"] == ["acme/fp8"]
+
+
+def test_apply_endpoint_pricing_skips_endpoint_without_tools(monkeypatch):
+    # The cheap endpoint advertises no tool support; the tool-capable
+    # endpoint is pricier. The baseline must be the tool-capable one.
+    args = make_args(min_context=0, no_require_tools=False)
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        provider_name="Cheap",
+                        tag="cheap/fp8",
+                        quantization="fp8",
+                        supported_parameters=["temperature", "top_p"],
+                        pricing={"prompt": "0.0000001", "completion": "0.0000002"},
+                    ),
+                    _endpoint(
+                        provider_name="Acme",
+                        tag="acme/fp8",
+                        quantization="fp8",
+                        supported_parameters=["tools", "tool_choice"],
+                        pricing={"prompt": "0.0000002", "completion": "0.0000004"},
+                    ),
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    models = [make_model(id="acme/a", name="Acme: A")]
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/a"}, [], zdr_strict_ids={"acme/a"}
+    )
+    assert dropped == {}
+    candidates, extra = mc.apply_endpoint_pricing(candidates, args, [])
+    assert extra == {}
+    cand = candidates[0]
+    assert cand["price_in"] == pytest.approx(0.2)
+    assert cand["price_out"] == pytest.approx(0.4)
+    assert cand["steering"]["provider"]["order"] == ["acme/fp8"]
+
+
+def test_apply_endpoint_pricing_skips_endpoint_below_context_floor(monkeypatch):
+    # The cheap endpoint serves less than --min-context; the endpoint with
+    # enough prompt context is pricier. The baseline must be the usable one.
+    args = make_args(min_context=1_000_000)
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        provider_name="Cheap",
+                        tag="cheap/fp8",
+                        quantization="fp8",
+                        context_length=524288,
+                        max_prompt_tokens=524288,
+                        pricing={"prompt": "0.0000001", "completion": "0.0000002"},
+                    ),
+                    _endpoint(
+                        provider_name="Acme",
+                        tag="acme/fp8",
+                        quantization="fp8",
+                        context_length=2_000_000,
+                        max_prompt_tokens=1_000_000,
+                        pricing={"prompt": "0.0000002", "completion": "0.0000004"},
+                    ),
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    models = [make_model(id="acme/a", name="Acme: A")]
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/a"}, [], zdr_strict_ids={"acme/a"}
+    )
+    assert dropped == {}
+    candidates, extra = mc.apply_endpoint_pricing(candidates, args, [])
+    assert extra == {}
+    cand = candidates[0]
+    assert cand["price_in"] == pytest.approx(0.2)
+    assert cand["price_out"] == pytest.approx(0.4)
+    assert cand["steering"]["provider"]["order"] == ["acme/fp8"]
+
+
+def test_apply_endpoint_pricing_skips_byok_endpoint(monkeypatch):
+    # The cheap endpoint needs a BYOK key; the callable endpoint is pricier.
+    # The baseline must be the callable one.
+    args = make_args(min_context=0)
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        provider_name="Cheap",
+                        tag="cheap/fp8",
+                        quantization="fp8",
+                        pricing={"prompt": "0.0000001", "completion": "0.0000002"},
+                    ),
+                    _endpoint(
+                        provider_name="Acme",
+                        tag="acme/fp8",
+                        quantization="fp8",
+                        pricing={"prompt": "0.0000002", "completion": "0.0000004"},
+                    ),
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    models = [make_model(id="acme/a", name="Acme: A")]
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/a"}, [], zdr_strict_ids={"acme/a"}
+    )
+    assert dropped == {}
+    policy = {
+        ("acme/a", "cheap/fp8"): {
+            "byok_only": True,
+            "moderation_required": False,
+            "deranked": False,
+        }
+    }
+    candidates, extra = mc.apply_endpoint_pricing(
+        candidates, args, [], endpoint_policy=policy
+    )
+    assert extra == {}
+    cand = candidates[0]
+    assert cand["price_in"] == pytest.approx(0.2)
+    assert cand["price_out"] == pytest.approx(0.4)
+    assert cand["steering"]["provider"]["order"] == ["acme/fp8"]
+
+
+def test_apply_endpoint_pricing_keeps_free_model_baseline(monkeypatch):
+    # A genuinely free model has only zero-priced endpoints. It must keep a
+    # baseline instead of being dropped as no_baseline_eligible_endpoint.
+    args = make_args(min_context=0)
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        provider_name="Acme",
+                        tag="acme/fp8",
+                        quantization="fp8",
+                        pricing={"prompt": "0", "completion": "0"},
+                    )
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    models = [make_model(id="acme/a", name="Acme: A")]
+    candidates, dropped = mc.build_candidates(
+        models, args, {}, {"acme/a"}, [], zdr_strict_ids={"acme/a"}
+    )
+    assert dropped == {}
+    candidates, extra = mc.apply_endpoint_pricing(candidates, args, [])
+    assert extra == {}
+    assert len(candidates) == 1
+    cand = candidates[0]
+    assert cand["price_in"] == pytest.approx(0.0)
+    assert cand["price_out"] == pytest.approx(0.0)
+    assert cand["steering"]["provider"]["order"] == ["acme/fp8"]
+
+
+def test_apply_endpoint_pricing_keeps_deranked_only_model(monkeypatch):
+    # The model's only standard endpoint is deranked. It must keep a baseline
+    # (last-resort fallback) rather than being dropped.
+    args = make_args(min_context=0)
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        provider_name="Google AI Studio",
+                        tag="google-ai-studio",
+                        service_tier="standard",
+                        pricing={"prompt": "0.000001", "completion": "0.000002"},
+                    )
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda model_id, args: eps)
+    candidates, dropped = mc.build_candidates(
+        [make_model(id="google/a")],
+        args,
+        {},
+        {"google/a"},
+        [],
+        zdr_strict_ids={"google/a"},
+    )
+    assert dropped == {}
+    policy = {
+        ("google/a", "google-ai-studio"): {
+            "byok_only": False,
+            "moderation_required": False,
+            "deranked": True,
+        }
+    }
+    candidates, extra = mc.apply_endpoint_pricing(
+        candidates, args, [], endpoint_policy=policy
+    )
+    assert extra == {}
+    assert len(candidates) == 1
+    assert candidates[0]["steering"]["provider"]["order"] == ["google-ai-studio"]
 
 
 def test_fetch_failure_drops_model_with_stale_annotations(monkeypatch):
@@ -4286,6 +5132,7 @@ def frontend_payload():
                     "permaslug": "acme/a-20260826",
                     "endpoint": {
                         "variant": "standard",
+                        "provider_slug": "acme",
                         "pricing": {"discount": 0.5, "prompt": "0.1"},
                     },
                 },
@@ -4294,25 +5141,42 @@ def frontend_payload():
                     "permaslug": "acme/a-20260915",
                     "endpoint": {
                         "variant": "standard",
+                        "provider_slug": "acme",
                         "pricing": {"discount": 0.5, "prompt": "0.1"},
                     },
                 },
                 {
                     "slug": "acme/b",
-                    "endpoint": {"variant": "free", "pricing": {"discount": 0}},
+                    "endpoint": {
+                        "variant": "free",
+                        "provider_slug": "acme",
+                        "pricing": {"discount": 0},
+                    },
                 },
                 {
                     "slug": "acme/c",
-                    "endpoint": {"variant": "batch", "pricing": {"discount": 0.75}},
+                    "endpoint": {
+                        "variant": "batch",
+                        "provider_slug": "acme",
+                        "pricing": {"discount": 0.75},
+                    },
                 },
                 {
                     "slug": "~acme/private",
-                    "endpoint": {"variant": "standard", "pricing": {"discount": 0.9}},
+                    "endpoint": {
+                        "variant": "standard",
+                        "provider_slug": "acme",
+                        "pricing": {"discount": 0.9},
+                    },
                 },
                 {"slug": "acme/no-endpoint", "endpoint": None},
                 {
                     "slug": "acme/no-discount-field",
-                    "endpoint": {"variant": "standard", "pricing": {}},
+                    "endpoint": {
+                        "variant": "standard",
+                        "provider_slug": "acme",
+                        "pricing": {},
+                    },
                 },
             ],
             "benchmarks": {
@@ -4433,6 +5297,27 @@ def test_fetch_openrouter_frontend_derives_all_payloads(monkeypatch, tmp_path):
     assert set(frontend_models[0]) == set(mc.FRONTEND_REASONING_FIELDS)
 
 
+def test_fetch_openrouter_frontend_returns_endpoint_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
+    result = mc.fetch_openrouter_frontend(make_args(no_cache=True))
+    # The historical 7-tuple still unpacks; the policy rides on an attribute.
+    discounts, *rest = result
+    assert discounts == {"acme/a": 0.5, "acme/b:free": 0.0, "acme/c:batch": 0.75}
+    assert len(result) == 7
+    policy = getattr(result, "endpoint_policy", None)
+    assert policy is not None
+    assert policy[("acme/a", "acme")] == {
+        "byok_only": None,
+        "moderation_required": None,
+        "deranked": None,
+        "training": None,
+    }
+    # A plain 7-tuple stub has no attribute, so the gate stays off.
+    assert getattr((), "endpoint_policy", None) is None
+
+
 def test_fetch_openrouter_frontend_caches_reasoning_entries(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     payload = {
@@ -4443,7 +5328,11 @@ def test_fetch_openrouter_frontend_caches_reasoning_entries(monkeypatch, tmp_pat
                     "permaslug": "acme/a-20261017",
                     "supports_reasoning": True,
                     "reasoning_config": {"supported_reasoning_efforts": ["high"]},
-                    "endpoint": {"variant": "standard", "pricing": {"discount": 0}},
+                    "endpoint": {
+                        "variant": "standard",
+                        "provider_slug": "acme",
+                        "pricing": {"discount": 0},
+                    },
                 }
             ],
             # A benchmark entry keeps the AA cache warm too, so the second
@@ -4560,7 +5449,7 @@ def test_fetch_openrouter_frontend_zdr_fails_closed_without_entries(
     assert zdr_ids == set()
     assert discounts  # base data unaffected
     assert "no ZDR entries found" in capsys.readouterr().err
-    assert not (tmp_path / "model-compare" / "openrouter-zdr-v5.json").exists()
+    assert not (tmp_path / "model-compare" / "openrouter-zdr-v6.json").exists()
 
 
 def test_fetch_openrouter_frontend_ignores_stale_v2_zdr_cache(monkeypatch, tmp_path):
@@ -4586,11 +5475,19 @@ def test_fetch_openrouter_frontend_ignores_stale_v2_zdr_cache(monkeypatch, tmp_p
     ) = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
     assert zdr_ids == {"acme/a", "acme/b:batch", "acme/sr", "acme/both"}
     assert "zdr" not in cache_hits
-    saved = json.loads((cache_dir / "openrouter-zdr-v5.json").read_text())
+    saved = json.loads((cache_dir / "openrouter-zdr-v6.json").read_text())
     assert saved["payload"] == {
         "zdr": ["acme/a", "acme/b:batch", "acme/both", "acme/sr"],
         "strict": ["acme/a", "acme/b:batch", "acme/both"],
         "sr": ["acme/both", "acme/sr"],
+        "endpoints": [
+            ["acme/a", "acme", False],
+            ["acme/a", "other", False],
+            ["acme/b:batch", "acme", False],
+            ["acme/both", "acme", False],
+            ["acme/both", "other", True],
+            ["acme/sr", "acme", True],
+        ],
     }
 
 
@@ -4603,7 +5500,7 @@ def test_fetch_openrouter_frontend_caches_per_payload(monkeypatch, tmp_path):
     second = mc.fetch_openrouter_frontend(args)
     assert len(calls) == 2  # base + zdr once each; second run fully cached
     assert first[5] == set()
-    assert second[5] == {"discounts", "aa", "zdr"}
+    assert second[5] == {"discounts", "aa", "zdr", "endpoint_policy"}
     assert first[:5] == second[:5]
 
 
@@ -4646,7 +5543,7 @@ def test_fetch_openrouter_frontend_does_not_cache_empty(monkeypatch, tmp_path):
     assert not (cache_dir / "openrouter-frontend-discounts.json").exists()
     assert not (cache_dir / "openrouter-frontend-aa-v2.json").exists()
     assert not (cache_dir / "openrouter-frontend-reasoning-v1.json").exists()
-    assert not (cache_dir / "openrouter-zdr-v5.json").exists()
+    assert not (cache_dir / "openrouter-zdr-v6.json").exists()
 
 
 def test_fetch_openrouter_frontend_treats_empty_cached_payloads_as_miss(
@@ -4664,8 +5561,13 @@ def test_fetch_openrouter_frontend_treats_empty_cached_payloads_as_miss(
     (cache_dir / "openrouter-frontend-aa-v2.json").write_text(
         json.dumps({"fetched_at": now, "payload": {}})
     )
-    (cache_dir / "openrouter-zdr-v5.json").write_text(
-        json.dumps({"fetched_at": now, "payload": {"zdr": [], "strict": [], "sr": []}})
+    (cache_dir / "openrouter-zdr-v6.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": now,
+                "payload": {"zdr": [], "strict": [], "sr": [], "endpoints": []},
+            }
+        )
     )
     (
         discounts,
@@ -5071,7 +5973,7 @@ def test_fetch_openrouter_frontend_normal_run_after_no_zdr_run(monkeypatch, tmp_
     )
     assert first[1] == set()
     assert first[2] == set()
-    assert not (tmp_path / "model-compare" / "openrouter-zdr-v5.json").exists()
+    assert not (tmp_path / "model-compare" / "openrouter-zdr-v6.json").exists()
     second = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
     assert second[1] == {"acme/a", "acme/b:batch", "acme/sr", "acme/both"}
     assert second[2] == {"acme/a", "acme/b:batch", "acme/both"}
@@ -5095,6 +5997,14 @@ def test_fetch_openrouter_frontend_aa_cache_hit_skips_base_fetch(monkeypatch, tm
             }
         )
     )
+    (cache_dir / "openrouter-frontend-endpoint-policy-v3.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": [["acme/a", "acme", None, None, None, None]],
+            }
+        )
+    )
     (
         discounts,
         zdr_ids,
@@ -5107,7 +6017,7 @@ def test_fetch_openrouter_frontend_aa_cache_hit_skips_base_fetch(monkeypatch, tm
     assert len(calls) == 1  # only the ZDR URL
     assert discounts == {"acme/a": 0.5}
     assert aa_by_id == {"acme/a": {"intelligence_index": 57.5}}
-    assert cache_hits == {"discounts", "aa"}
+    assert cache_hits == {"discounts", "aa", "endpoint_policy"}
     # A warm discounts+AA cache predating the reasoning cache does not
     # trigger a base refetch; the fallback self-heals when the TTL expires.
     assert frontend_models == []
@@ -9522,7 +10432,13 @@ def test_run_unkeyed_v5_catalog_cache_prevents_refetch(monkeypatch, capsys):
             [],
         ),
     )
-    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: [_endpoint()])
+    monkeypatch.setattr(
+        mc,
+        "fetch_model_endpoints",
+        lambda mid, a: [
+            _endpoint(context_length=2_000_000, max_prompt_tokens=2_000_000)
+        ],
+    )
     monkeypatch.delenv("AA_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     args = make_args(
@@ -9709,6 +10625,9 @@ def test_catalog_envelope():
     assert p["require_tools"] is False  # make_args default
     assert p["exclude_free"] is False
     assert p["include_batch"] is False
+    assert p["byok"] is False
+    assert p["no_moderation"] is False
+    assert p["include_deranked"] is False
     assert p["reasoning_effort"] == "default"
     assert set(p["weights"]) == {"balanced", "price", "quality"}
     assert p["weights"]["balanced"] == mc.PRIORITY_WEIGHTS["balanced"]
@@ -12117,7 +13036,13 @@ def _stub_quality_run(
             return catalog
 
     monkeypatch.setattr(mc, "fetch_quality_catalog", fake_catalog)
-    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: [_endpoint()])
+    monkeypatch.setattr(
+        mc,
+        "fetch_model_endpoints",
+        lambda mid, a: [
+            _endpoint(context_length=2_000_000, max_prompt_tokens=2_000_000)
+        ],
+    )
 
 
 def _non_reasoning_frontend(models):
@@ -12392,7 +13317,13 @@ def test_run_unkeyed_no_zdr_hydrates_filtered_reasoning_model_and_depths(
         "fetch_json",
         lambda url, *a, **k: published_doc if url == mc.QUALITY_CATALOG_URL else {},
     )
-    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: [_endpoint()])
+    monkeypatch.setattr(
+        mc,
+        "fetch_model_endpoints",
+        lambda mid, a: [
+            _endpoint(context_length=2_000_000, max_prompt_tokens=2_000_000)
+        ],
+    )
 
     assert (
         mc.run(make_args(no_zdr=True, min_context=1_000_000, json=True), models, False)
@@ -14383,20 +15314,48 @@ def test_fetch_openrouter_frontend_ignores_v3_zdr_cache(monkeypatch, tmp_path):
     "cached_payload",
     [
         {"zdr": ["acme/stale"], "strict": ["acme/stale"]},
+        {"zdr": ["acme/stale"], "strict": ["acme/stale"], "sr": ["acme/stale"]},
         ["acme/stale"],
+        {
+            "zdr": ["acme/stale"],
+            "strict": ["acme/stale"],
+            "sr": [],
+            "endpoints": [],
+        },
+        {
+            "zdr": [["acme/stale"]],
+            "strict": [],
+            "sr": [],
+            "endpoints": [["acme/stale", "acme", False]],
+        },
+        {
+            "zdr": ["acme/stale"],
+            "strict": [],
+            "sr": [],
+            "endpoints": [[["acme/stale"], "acme", False]],
+        },
     ],
-    ids=["two-list", "bare-list"],
+    ids=[
+        "two-list",
+        "v5-no-endpoints",
+        "bare-list",
+        "v6-no-endpoints",
+        "unhashable-ids",
+        "malformed-endpoint-row",
+    ],
 )
-def test_fetch_openrouter_frontend_ignores_non_v5_zdr_cache_shapes(
+def test_fetch_openrouter_frontend_ignores_non_v6_zdr_cache_shapes(
     monkeypatch, tmp_path, cached_payload
 ):
-    # The v5 key must not trust a payload that lacks the third list (a
-    # two-list v4 shape) or is not a dict at all (a bare id list): either
-    # would make "explicit Safety Retention" and "unknown" indistinguishable.
+    # The v6 key must not trust a payload that lacks the endpoint policy
+    # (a v5 three-list shape), lacks the third list (a two-list v4 shape),
+    # or is not a dict at all (a bare id list): the endpoint gate needs the
+    # per-(model, tag) retention map, and a missing map would silently
+    # disable endpoint-level ZDR filtering.
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     cache_dir = tmp_path / "model-compare"
     cache_dir.mkdir(parents=True)
-    (cache_dir / "openrouter-zdr-v5.json").write_text(
+    (cache_dir / "openrouter-zdr-v6.json").write_text(
         json.dumps({"fetched_at": time.time(), "payload": cached_payload})
     )
     calls = []
@@ -14521,6 +15480,112 @@ def test_run_refuses_when_every_endpoint_is_safety_retention(monkeypatch, capsys
     assert "safety retention" in err
 
 
+def test_run_applies_endpoint_zdr_policy_from_frontend_result(monkeypatch, capsys):
+    # The FrontendResult attribute is the only channel for the endpoint-level
+    # policy; a plain 7-tuple stub leaves it off. This pins the run() wiring:
+    # the model survives the model-level gate but its only endpoint is
+    # Safety Retention under the default mode, so the endpoint stage drops it.
+    model = make_model(id="acme/a", name="Acme: A")
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(provider_name="Acme", tag="acme/fp8", quantization="fp8")
+                ]
+            }
+        }
+    )
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    monkeypatch.setattr(
+        mc,
+        "fetch_openrouter_frontend",
+        lambda args: mc.FrontendResult(
+            ({}, {"acme/a"}, {"acme/a"}, set(), {}, set(), []),
+            zdr_endpoints={("acme/a", "acme/fp8"): {"safety_retention": True}},
+        ),
+    )
+    monkeypatch.setattr(mc, "fetch_aa_entries", lambda args: ([], None, False, None))
+    monkeypatch.setattr(mc, "fetch_quality_catalog", lambda args: None)
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    assert mc.run(make_args(catalog=True), [model], False) == 2
+    err = capsys.readouterr().err
+    assert "no_baseline_eligible_endpoint=1" in err
+
+
+def test_run_applies_byok_gate_even_under_no_zdr(monkeypatch, capsys):
+    # The BYOK/moderation/deranked/training gates are independent of the ZDR
+    # mode: --no-zdr only disables the ZDR checks, not the endpoint policy.
+    model = make_model(id="acme/a", name="Acme: A")
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(provider_name="Acme", tag="acme/fp8", quantization="fp8")
+                ]
+            }
+        }
+    )
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("AA_API_KEY", raising=False)
+    monkeypatch.setattr(
+        mc,
+        "fetch_openrouter_frontend",
+        lambda args: mc.FrontendResult(
+            ({}, set(), set(), set(), {}, set(), []),
+            endpoint_policy={
+                ("acme/a", "acme/fp8"): {
+                    "byok_only": True,
+                    "moderation_required": False,
+                    "deranked": False,
+                    "training": False,
+                }
+            },
+        ),
+    )
+    monkeypatch.setattr(mc, "fetch_aa_entries", lambda args: ([], None, False, None))
+    monkeypatch.setattr(mc, "fetch_quality_catalog", lambda args: None)
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    # Default: the BYOK-only endpoint is not callable, so the model drops.
+    assert mc.run(make_args(no_zdr=True, catalog=True), [model], False) == 2
+    capsys.readouterr()
+    # --byok admits it; the run ranks the model.
+    assert mc.run(make_args(no_zdr=True, byok=True, catalog=True), [model], False) == 0
+    assert "acme/a" in capsys.readouterr().out
+
+
+def test_fetch_openrouter_frontend_warns_when_policy_unavailable(
+    monkeypatch, tmp_path, capsys
+):
+    # Warm discounts + AA caches and a cold endpoint-policy cache: a base-URL
+    # failure must not silently disable the BYOK/moderation/deranked/training
+    # gates. The run keeps its previous degradation policy, but names it.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    cache_dir = tmp_path / "model-compare"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "openrouter-frontend-discounts.json").write_text(
+        json.dumps({"fetched_at": time.time(), "payload": {"acme/a": 0.5}})
+    )
+    (cache_dir / "openrouter-frontend-aa-v2.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": {"acme/a": {"intelligence_index": 57.5}},
+            }
+        )
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(mc, "fetch_json", boom)
+    result = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
+    assert result.endpoint_policy is None
+    err = capsys.readouterr().err
+    assert "could not fetch endpoint policy data" in err
+    assert "gates are off" in err
+
+
 def test_catalog_records_allow_safety_retention():
     args = make_args(safety_retention="google")
     models = [make_model(id="acme/model-a")]
@@ -14588,16 +15653,22 @@ def test_zdr_cache_round_trip_keeps_the_all_safety_retention_world(
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     cache_dir = tmp_path / "model-compare"
     cache_dir.mkdir(parents=True)
-    (cache_dir / "openrouter-zdr-v5.json").write_text(
+    (cache_dir / "openrouter-zdr-v6.json").write_text(
         json.dumps(
             {
                 "fetched_at": time.time(),
-                "payload": {"zdr": ["google/sr"], "strict": [], "sr": ["google/sr"]},
+                "payload": {
+                    "zdr": ["google/sr"],
+                    "strict": [],
+                    "sr": ["google/sr"],
+                    "endpoints": [["google/sr", "google", True]],
+                },
             }
         )
     )
     calls = []
     stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
+    frontend = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
     (
         discounts,
         zdr_ids,
@@ -14606,12 +15677,15 @@ def test_zdr_cache_round_trip_keeps_the_all_safety_retention_world(
         aa_by_id,
         cache_hits,
         frontend_models,
-    ) = mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600))
+    ) = frontend
     assert mc.OPENROUTER_ZDR_URL not in calls  # the ZDR payload came from cache
     assert "zdr" in cache_hits
     assert zdr_ids == {"google/sr"}
     assert zdr_strict_ids == set()
     assert zdr_sr_ids == {"google/sr"}
+    assert frontend.zdr_endpoints == {
+        ("google/sr", "google"): {"safety_retention": True}
+    }
 
 
 def test_help_documents_the_safety_retention_default(capsys):

@@ -89,12 +89,11 @@ OPENROUTER_ZDR_URL = "https://openrouter.ai/api/v1/endpoints/zdr"
 # see DESIGN.md ("Zero data retention") and zdr_eligible.
 SAFETY_RETENTION_MODES = ("none", "google", "all")
 GOOGLE_AUTHOR = "google"
-# Cache key for the parsed ZDR list. v5 carries the full retention split
-# ({"zdr": [...], "strict": [...], "sr": [...]}); v3 was a bare id list with no
-# retention status and v4 stored only two lists, so neither can be read -- the
-# difference between "explicitly Safety Retention" and "retention status
-# unknown" is exactly what the gate needs.
-ZDR_CACHE = "openrouter-zdr-v5"
+# Cache key for the parsed ZDR list. v6 carries the retention split and the
+# endpoint policy ({"zdr": [...], "strict": [...], "sr": [...],
+# "endpoints": [[model_id, tag, safety_retention], ...]}); v5 and older lack
+# the endpoint policy, so they may not be read.
+ZDR_CACHE = "openrouter-zdr-v6"
 # Supported V2 free-tier replacement for the retired /api/v2/data/llms/models
 # (legacy endpoints 410 after 2026-11-04; see
 # https://artificialanalysis.ai/data-api/migrate-v2-data).
@@ -216,31 +215,29 @@ QUANTIZATION_ENUM: frozenset[str] = frozenset(PRECISION_LADDER) | {"unknown"}
 
 # Official partner hosts that serve closed labs' models: an endpoint on one
 # of these providers counts as first-party for the eligibility carve-out
-# even though it is not the maker itself. Entries are compared after
-# normalize_provider (casefold + strip non-alphanumerics), so the slugs here
-# are display forms -- "aws-bedrock" and "AWS Bedrock" both hit. Extend only
-# with live-data evidence (e.g. an endpoint tag matching <lab>-official).
+# even though it is not the maker itself. Entries are the stable provider
+# SLUGS -- the first segment of an endpoint's `tag`, which is also the
+# routing identifier used by provider.order/only and the BYOK API -- not
+# display names. A display-name rename ("Amazon Bedrock" -> "AWS Bedrock")
+# cannot break a slug match. Live-verified 2026-11-22 against
+# /api/v1/providers: all four slugs exist. Extend only with live-data
+# evidence.
 FIRST_PARTY_HOSTS = frozenset(
-    {"bedrock", "azure", "vertex", "azure-ai", "google-vertex", "aws-bedrock"}
+    {"amazon-bedrock", "azure", "google-vertex", "claude-on-aws"}
 )
 
-# Explicit first-party alias pairs that normalization alone cannot bridge
-# (design §4.2): makers that self-name differently than their OpenRouter
-# author slug. Key = the exact live provider_name string, value = the
-# author slug the pair is first-party FOR; both sides are compared
-# normalized (case/punctuation variants match), and the alias only fires
-# when the model's author equals the value. Verified against live data
-# 2026-10-20 (task-13-fix-report.md section 8b; endpoints fetched fresh,
-# every endpoint quantization "unknown", status 0):
-#   ("Amazon Bedrock", "amazon")   -- amazon/nova-2-lite-v1, 2 endpoints
-#   ("Google AI Studio", "google") -- google/gemini-2.5-pro-preview, 3 endpoints
-#   ("Mistral", "mistralai")       -- mistralai/mistral-large-4-0, 3 endpoints
+# Explicit first-party alias pairs that a provider slug cannot bridge
+# (design §4.2): makers whose provider slug differs from their OpenRouter
+# author slug. Key = the provider slug (tag prefix), value = the author
+# slug the pair is first-party FOR. The alias only fires when the model's
+# author equals the value. Live-verified 2026-11-22:
+#   google-ai-studio -> google
+#   mistral          -> mistralai
 # Add entries only after the same live verification -- never pin an
-# unverified string.
+# unverified slug.
 FIRST_PARTY_ALIASES: dict[str, str] = {
-    "Amazon Bedrock": "amazon",
-    "Google AI Studio": "google",
-    "Mistral": "mistralai",
+    "google-ai-studio": "google",
+    "mistral": "mistralai",
 }
 
 
@@ -267,24 +264,45 @@ def normalize_provider(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (name or "").casefold())
 
 
-def is_first_party(provider_name: str, author: str) -> bool:
+def provider_slug_from_tag(tag: str) -> str:
+    """The stable provider slug from an endpoint tag's first segment.
+
+    The tag is the routing identifier (``amazon-bedrock/eu-west-1``,
+    ``google-vertex/global``, ``anthropic``); its first segment is the
+    provider slug. Returns "" for a missing/empty/non-string tag.
+    """
+    if not isinstance(tag, str):
+        return ""
+    return tag.partition("/")[0].strip()
+
+
+def is_first_party(provider_name: str, author: str, tag: str | None = None) -> bool:
     """True iff the provider is the model's own maker or a partner host.
 
     Criterion 1: the normalized provider name equals the normalized author
-    slug. Criterion 2: it matches a normalized FIRST_PARTY_HOSTS entry, or
-    a FIRST_PARTY_ALIASES key whose value equals the normalized author slug
-    (the §4.2 alias pairs: a maker self-naming differently than its author
-    slug is first-party only for that author). Everything else is
-    third-party.
+    slug. Criterion 2: the endpoint's tag prefix (the stable provider slug)
+    matches a normalized FIRST_PARTY_HOSTS entry, or a FIRST_PARTY_ALIASES
+    key whose value equals the normalized author slug (the §4.2 alias
+    pairs: a maker self-naming differently than its author slug is
+    first-party only for that author).
+
+    The tag prefix is preferred over the display name because it is the
+    routing identifier and survives display-name renames. When ``tag`` is
+    absent only criterion 1 applies: the old display-name host set went
+    stale when live names changed to "Amazon Bedrock" and "Google", so it
+    was removed rather than patched.
     """
     provider = normalize_provider(provider_name)
     if provider == normalize_provider(author):
         return True
-    if provider in {normalize_provider(host) for host in FIRST_PARTY_HOSTS}:
+    slug = normalize_provider(provider_slug_from_tag(tag or ""))
+    if not slug:
+        return False
+    if slug in {normalize_provider(host) for host in FIRST_PARTY_HOSTS}:
         return True
     author_slug = normalize_provider(author)
     return any(
-        provider == normalize_provider(alias_provider)
+        slug == normalize_provider(alias_provider)
         and author_slug == normalize_provider(alias_author)
         for alias_provider, alias_author in FIRST_PARTY_ALIASES.items()
     )
@@ -446,7 +464,10 @@ def parse_endpoints(payload) -> list[dict]:
     parse_price) and the raw `overrides` list -- the tiered-pricing
     machinery parses the entries itself. Fields beyond the verified
     per-entry shape are dropped, and the parse keeps `status` as-is (the
-    caller filters).
+    caller filters). It also keeps the endpoint's own capability metadata
+    (`supported_parameters`, `max_prompt_tokens`, `context_length`) so the
+    baseline gate can require the quoted endpoint to support tools and the
+    requested context window, not just the model as a whole.
     """
     # Task 13 lesson: the first unit fixtures fed the models/find shape
     # ({"data": [entry, ...]}) -- a list directly under "data" -- so the
@@ -465,6 +486,14 @@ def parse_endpoints(payload) -> list[dict]:
         max_completion = entry.get("max_completion_tokens")
         if type(max_completion) is not int or max_completion <= 0:
             max_completion = None
+        max_prompt = entry.get("max_prompt_tokens")
+        if type(max_prompt) is not int or max_prompt <= 0:
+            max_prompt = None
+        params = entry.get("supported_parameters")
+        if not isinstance(params, list) or not all(
+            isinstance(param, str) for param in params
+        ):
+            params = None
         endpoints.append(
             {
                 "provider_name": entry.get("provider_name"),
@@ -486,6 +515,8 @@ def parse_endpoints(payload) -> list[dict]:
                 },
                 "context_length": entry.get("context_length"),
                 "max_completion_tokens": max_completion,
+                "max_prompt_tokens": max_prompt,
+                "supported_parameters": params,
                 "status": entry.get("status"),
                 "service_tier": entry.get("service_tier"),
             }
@@ -495,7 +526,7 @@ def parse_endpoints(payload) -> list[dict]:
 
 def endpoint_cache_name(model_id: str) -> str:
     """The one cache key both the fetch and the stale-annotation read use."""
-    return f"endpoints-v2:{model_id.replace('/', '_')}"
+    return f"endpoints-v3:{model_id.replace('/', '_')}"
 
 
 def fetch_model_endpoints(model_id: str, args) -> list[dict]:
@@ -519,24 +550,57 @@ def fetch_model_endpoints(model_id: str, args) -> list[dict]:
     return endpoints
 
 
-def is_variant_endpoint(endpoint) -> bool:
+def is_variant_endpoint(endpoint, zero_price_is_variant: bool = True) -> bool:
     """True iff the endpoint is a :free/:batch variant or entirely free.
 
     Variant iff its slug or tag carries a `:free`/`:batch` marker OR both
     input and output prices are zero. `:batch` is cheaper-but-restricted,
     not zero-priced -- only the marker test catches it. Missing or
     unparseable prices are not zero.
+
+    ``zero_price_is_variant`` is False for a model whose endpoints are all
+    free: the zero-price rule identifies a *variant* of a paid model, and a
+    genuinely free model has no paid sibling to be a variant of. Pass False
+    from the model-aware stages (see model_has_paid_endpoint) so a free
+    model keeps a baseline instead of being dropped as
+    no_baseline_eligible_endpoint. The :free/:batch marker still applies.
     """
     for field in ("slug", "tag"):
         marker = endpoint.get(field)
         if isinstance(marker, str) and (":free" in marker or ":batch" in marker):
             return True
+    if not zero_price_is_variant:
+        return False
     pricing = endpoint.get("pricing")
     prices = pricing if isinstance(pricing, dict) else {}
     return (
         parse_price(prices.get("prompt")) == 0.0
         and parse_price(prices.get("completion")) == 0.0
     )
+
+
+def model_has_paid_endpoint(endpoints) -> bool:
+    """True iff any live endpoint has a positive prompt or completion price.
+
+    The inverse of "the model is genuinely free". A zero-priced endpoint is
+    a variant only when a paid live sibling exists (see is_variant_endpoint);
+    a model with no such endpoint is free and its zero-priced endpoints are
+    real baselines. A non-serving endpoint (status other than 0) cannot be
+    called, so its stale positive price does not make a free model "paid".
+    Missing/unparseable/negative prices are not paid.
+    """
+    for endpoint in endpoints if isinstance(endpoints, list) else []:
+        if not isinstance(endpoint, dict):
+            continue
+        if endpoint.get("status") != 0:
+            continue
+        pricing = endpoint.get("pricing")
+        prices = pricing if isinstance(pricing, dict) else {}
+        for key in ("prompt", "completion"):
+            value = parse_price(prices.get(key))
+            if isinstance(value, float) and value > 0:
+                return True
+    return False
 
 
 # Documented priority-tier labels an endpoint's badge/slug may carry while
@@ -621,7 +685,9 @@ def endpoint_schedule_ok(endpoint, args) -> bool:
 _SCHEDULE_GATE_ARGS = argparse.Namespace(min_context=0, input_share=0.75)
 
 
-def _baseline_universe(endpoints: list[dict], args=None) -> list[dict]:
+def _baseline_universe(
+    endpoints: list[dict], args=None, zero_price_is_variant: bool = True
+) -> list[dict]:
     """The shared derivation universe (design section 4.1).
 
     Live (status == 0), not a variant endpoint (:free/:batch marker or
@@ -631,6 +697,8 @@ def _baseline_universe(endpoints: list[dict], args=None) -> list[dict]:
     exclusion; tier endpoints must not either, because precision describes
     the model's standard offering. args defaults to the structural stand-in
     (see _SCHEDULE_GATE_ARGS); callers with real args pass them.
+    ``zero_price_is_variant`` follows is_variant_endpoint: False for a
+    genuinely free model, so its zero-priced endpoints stay in the universe.
     """
     if args is None:
         args = _SCHEDULE_GATE_ARGS
@@ -638,13 +706,15 @@ def _baseline_universe(endpoints: list[dict], args=None) -> list[dict]:
         endpoint
         for endpoint in endpoints
         if endpoint.get("status") == 0
-        and not is_variant_endpoint(endpoint)
+        and not is_variant_endpoint(endpoint, zero_price_is_variant)
         and endpoint_schedule_ok(endpoint, args)
         and baseline_tier_allowed(endpoint, args)
     ]
 
 
-def derive_default_precision(endpoints: list[dict], author: str) -> str | None:
+def derive_default_precision(
+    endpoints: list[dict], author: str, zero_price_is_variant: bool = True
+) -> str | None:
     """Derive a model's default precision from its endpoint list (section 4.1).
 
     Universe: live non-variant schedule-passing endpoints (_baseline_universe).
@@ -667,7 +737,7 @@ def derive_default_precision(endpoints: list[dict], author: str) -> str | None:
     (never first-party -- fail-closed), but still feeds the fallback
     universe.
     """
-    universe = _baseline_universe(endpoints, _SCHEDULE_GATE_ARGS)
+    universe = _baseline_universe(endpoints, _SCHEDULE_GATE_ARGS, zero_price_is_variant)
     maker = normalize_provider(author)
     maker_best = None
     fallback_best = None
@@ -694,18 +764,162 @@ def derive_default_precision(endpoints: list[dict], author: str) -> str | None:
     return (maker_best or fallback_best or (None, None))[1]
 
 
-def baseline_eligible(endpoint, default_precision, author, args) -> bool:
+def endpoint_zdr_allowed(endpoint, model_id, author, args, zdr_policy) -> bool:
+    """True iff the endpoint is ZDR-compliant under the run's safety mode.
+
+    ``zdr_policy`` maps ``(model_id, tag)`` to ``{"safety_retention": bool|None}``
+    for the live ZDR-list endpoints. An endpoint absent from the map is not
+    ZDR-compliant (fail closed). A present endpoint is admitted when its
+    ``safety_retention`` is exactly False, or when the mode is "all", or --
+    for "google" only -- when the flag is True and the model's author is
+    Google. A missing/None flag is admitted only under "all"; "none" and
+    "google" require an explicit False (or Google's explicit True).
+    """
+    if not isinstance(model_id, str) or not model_id:
+        return False
+    tag = endpoint.get("tag")
+    if not isinstance(tag, str) or not tag:
+        return False
+    info = zdr_policy.get((model_id, tag))
+    if info is None:
+        return False
+    mode = getattr(args, "safety_retention", "none")
+    if mode == "all":
+        return True
+    flag = info.get("safety_retention")
+    if flag is False:
+        return True
+    if mode == "google" and flag is True:
+        return normalize_provider(author) == GOOGLE_AUTHOR
+    return False
+
+
+def endpoint_policy_allowed(
+    endpoint, model_id, args, endpoint_policy, *, allow_deranked=False
+) -> bool:
+    """True iff the endpoint passes the frontend-reported policy gates.
+
+    ``endpoint_policy`` maps ``(model_id, tag)`` to a dict with
+    ``byok_only``, ``moderation_required``, ``deranked`` and ``training``
+    booleans, projected from the frontend ``models/find`` rows (the only
+    payload that carries these flags). Two lookups happen: the exact
+    endpoint tag, then the provider slug (the tag's first segment), because
+    the frontend reports moderation and training provider-wide while its
+    rows are per region/quantization.
+
+    An endpoint absent from both is allowed: the public endpoint payload
+    does not carry the flags, so an unknown policy must not drop a
+    candidate (fail-open; documented in DESIGN.md). A known endpoint is
+    rejected when:
+
+    * ``training`` is True (from either level) and ``--no-zdr`` is not set
+      -- a provider that trains on prompts is not zero-data-retention,
+      whatever the ZDR list says; ``--no-zdr`` is the explicit opt-out;
+    * ``byok_only`` is True and ``--byok`` is not set -- the endpoint needs
+      the caller's own provider key and is not callable on the shared key.
+      Endpoint-level only: the flag varies per endpoint/variant;
+    * ``moderation_required`` is True (from either level) and
+      ``--no-moderation`` is set -- the caller's privacy policy forbids
+      moderated providers;
+    * ``deranked`` is True and neither ``--include-deranked`` nor
+      ``allow_deranked`` is set -- OpenRouter deprioritises it in default
+      routing, so quoting it would misstate the default route. The
+      ``allow_deranked`` fallback keeps a model callable when every
+      remaining endpoint is deranked. Endpoint-level only.
+
+    None means "no policy available" and disables the gate.
+    """
+    if endpoint_policy is None:
+        return True
+    if not isinstance(model_id, str) or not model_id:
+        return True
+    tag = endpoint.get("tag")
+    if not isinstance(tag, str) or not tag:
+        return True
+    exact = endpoint_policy.get((model_id, tag))
+    provider_tag = provider_slug_from_tag(tag)
+    provider = endpoint_policy.get((base_model_id(model_id), provider_tag))
+    if provider is None:
+        provider = endpoint_policy.get((model_id, provider_tag))
+    if not isinstance(exact, dict) and not isinstance(provider, dict):
+        return True
+
+    def flag(name, *, endpoint_level=False):
+        values = []
+        if isinstance(exact, dict) and isinstance(exact.get(name), bool):
+            values.append(exact[name])
+        if not endpoint_level and isinstance(provider, dict):
+            value = provider.get(name)
+            if isinstance(value, bool):
+                values.append(value)
+        # Fail closed when the two levels disagree: a known True at either
+        # level wins, then a known False, else unknown.
+        if True in values:
+            return True
+        if False in values:
+            return False
+        return None
+
+    if flag("training") is True and not getattr(args, "no_zdr", False):
+        return False
+    if flag("byok_only", endpoint_level=True) is True and not getattr(
+        args, "byok", False
+    ):
+        return False
+    if flag("moderation_required") is True and getattr(args, "no_moderation", False):
+        return False
+    if (
+        flag("deranked", endpoint_level=True) is True
+        and not getattr(args, "include_deranked", False)
+        and not allow_deranked
+    ):
+        return False
+    return True
+
+
+def baseline_eligible(
+    endpoint,
+    default_precision,
+    author,
+    args,
+    *,
+    model_id=None,
+    zdr_policy=None,
+    endpoint_policy=None,
+    zero_price_is_variant: bool = True,
+    allow_deranked: bool = False,
+) -> bool:
     """Baseline-eligibility rule (design section 4.3, fail-closed).
 
     True iff the endpoint's tier passes the gate (standard always; flex
     only with --flex; priority/ultrafast/unknown never), it is live
-    (status == 0), not a variant, passes the schedule gate, and then either:
+    (status == 0), not a variant, passes the schedule gate, advertises the
+    capabilities the run requires (tool calling unless --no-require-tools;
+    enough prompt context when --min-context is above zero), is ZDR-compliant
+    when a ZDR policy is supplied (``model_id`` + ``zdr_policy``; see
+    endpoint_zdr_allowed), passes the frontend-reported endpoint policy when
+    supplied (``endpoint_policy``; see endpoint_policy_allowed), and then
+    either:
 
     * its quantization is a known ladder label with rank >=
       rank(default_precision) -- provider-blind (default_routing considers
       every endpoint OpenRouter may send traffic to), or
     * its quantization is "unknown" or null AND the endpoint is first-party
       (the D3 carve-out: the maker or a partner host).
+
+    The capability checks use the endpoint's own metadata when the API
+    supplies it. A missing ``supported_parameters`` list falls back to the
+    model-level gate (the model already passed build_candidates' tool
+    filter); a present list without "tools"/"tool_choice" rejects the
+    endpoint. The context check uses ``max_prompt_tokens`` when present,
+    else ``context_length``; an endpoint that advertises less than
+    ``--min-context`` cannot serve the requested prompt and is rejected.
+    Unknown context metadata is allowed: the model-level filter already
+    established the catalog window.
+
+    ``zero_price_is_variant`` is False for a genuinely free model, so its
+    zero-priced endpoints are not treated as variants (see
+    is_variant_endpoint).
 
     When default_precision is None (all-unknown model) the rank comparison is
     meaningless -- only the carve-out applies. A provider_name that is
@@ -715,12 +929,41 @@ def baseline_eligible(endpoint, default_precision, author, args) -> bool:
     schema anomaly: no rank comparison and no carve-out -- fail-closed
     (fleet-wide new-label drift is what the publish drop-rate gate exists
     to catch).
+
+    ``zdr_policy`` is None when the caller has no endpoint policy (for
+    example a --no-zdr run or a unit test that does not exercise the ZDR
+    join); the endpoint-level ZDR gate is then skipped. Production passes
+    the policy from fetch_openrouter_frontend's FrontendResult.
+    ``endpoint_policy`` is likewise optional; see endpoint_policy_allowed.
     """
     if (
         not baseline_tier_allowed(endpoint, args)
         or endpoint.get("status") != 0
-        or is_variant_endpoint(endpoint)
+        or is_variant_endpoint(endpoint, zero_price_is_variant)
         or not endpoint_schedule_ok(endpoint, args)
+    ):
+        return False
+    if not getattr(args, "no_require_tools", True):
+        params = endpoint.get("supported_parameters")
+        if isinstance(params, list) and (
+            "tools" not in params or "tool_choice" not in params
+        ):
+            return False
+    min_context = getattr(args, "min_context", 0)
+    if min_context > 0:
+        limit = endpoint.get("max_prompt_tokens")
+        if not isinstance(limit, int) or limit <= 0:
+            limit = endpoint.get("context_length")
+        if isinstance(limit, int) and 0 < limit < min_context:
+            return False
+    if (
+        not args.no_zdr
+        and zdr_policy is not None
+        and not endpoint_zdr_allowed(endpoint, model_id, author, args, zdr_policy)
+    ):
+        return False
+    if endpoint_policy is not None and not endpoint_policy_allowed(
+        endpoint, model_id, args, endpoint_policy, allow_deranked=allow_deranked
     ):
         return False
     quantization = endpoint.get("quantization")
@@ -740,7 +983,7 @@ def baseline_eligible(endpoint, default_precision, author, args) -> bool:
     return (
         (quantization is None or quantization == "unknown")
         and bool(provider_slug)
-        and is_first_party(provider_name, author)
+        and is_first_party(provider_name, author, tag=endpoint.get("tag"))
     )
 
 
@@ -876,7 +1119,11 @@ def _base_priceable(endpoint, args) -> bool:
     )
 
 
-def NON_ELIGIBLE_UNIVERSE(endpoints: list[dict], eligible_flags: list[bool]) -> list:
+def NON_ELIGIBLE_UNIVERSE(
+    endpoints: list[dict],
+    eligible_flags: list[bool],
+    zero_price_is_variant: bool = True,
+) -> list:
     """The shared annotations universe (design section 4.6).
 
     Live (status == 0), non-variant, standard-tier endpoints that are NOT
@@ -888,7 +1135,8 @@ def NON_ELIGIBLE_UNIVERSE(endpoints: list[dict], eligible_flags: list[bool]) -> 
     unlike the steering `ignore` list, which includes live variants (section
     4.7). Tier endpoints (flex, priority, ultrafast, unknown) are excluded in
     both modes: annotations describe the standard-tier quantization
-    landscape, not a different product.
+    landscape, not a different product. ``zero_price_is_variant`` follows
+    is_variant_endpoint: False for a genuinely free model.
 
     Raises ValueError when eligible_flags does not match endpoints in length.
     """
@@ -896,7 +1144,7 @@ def NON_ELIGIBLE_UNIVERSE(endpoints: list[dict], eligible_flags: list[bool]) -> 
         endpoint
         for endpoint, eligible in _flag_list(endpoints, eligible_flags)
         if endpoint.get("status") == 0
-        and not is_variant_endpoint(endpoint)
+        and not is_variant_endpoint(endpoint, zero_price_is_variant)
         and endpoint_service_tier(endpoint) == "standard"
         and not eligible
     ]
@@ -908,6 +1156,8 @@ def build_annotations(
     baseline,
     catalog_context,
     args,
+    *,
+    zero_price_is_variant: bool = True,
 ) -> dict:
     """Per-model endpoint annotations (design section 4.6).
 
@@ -946,7 +1196,7 @@ def build_annotations(
 
     Raises ValueError when eligible_flags does not match endpoints in length.
     """
-    universe = NON_ELIGIBLE_UNIVERSE(endpoints, eligible_flags)
+    universe = NON_ELIGIBLE_UNIVERSE(endpoints, eligible_flags, zero_price_is_variant)
 
     universe_prices = []
     for endpoint in universe:
@@ -1027,6 +1277,8 @@ def build_steering(
     eligible_flags: list[bool],
     default_precision: str | None,
     args,
+    *,
+    zero_price_is_variant: bool = True,
 ) -> dict:
     """OpenRouter provider steering object (design section 4.7).
 
@@ -1108,7 +1360,9 @@ def build_steering(
         default_rank = PRECISION_LADDER[default_precision]
         quants = set()
         for endpoint in endpoints:
-            if endpoint.get("status") != 0 or is_variant_endpoint(endpoint):
+            if endpoint.get("status") != 0 or is_variant_endpoint(
+                endpoint, zero_price_is_variant
+            ):
                 continue
             quantization = endpoint.get("quantization")
             if (
@@ -1123,15 +1377,19 @@ def build_steering(
     return {"model": model_id, "provider": provider}
 
 
-def _stale_filtered_annotations(model_id, catalog_context, args):
+def _stale_filtered_annotations(
+    model_id, catalog_context, args, *, zdr_policy=None, endpoint_policy=None
+):
     """Annotations for a dropped model's filtered entry, or None.
 
     Built from the model's last cached endpoint list (load_cache_expired --
     TTL ignored), never from a fresh fetch: the model is out of the ranking,
     so the block is marked "stale": True for display in the filtered section
     only (design section 4.9). Same builders as the live stage: eligibility
-    and baseline are re-derived from the cached list, so the shape matches a
-    ranked candidate's annotations. A model whose cache holds no endpoint
+    and baseline are re-derived from the cached list with the same endpoint
+    policies the live stage used, so the shape matches a ranked candidate's
+    annotations and a model dropped by a policy gate does not display a
+    baseline the run would reject. A model whose cache holds no endpoint
     list at all yields None (the entry carries the drop reason alone).
     """
     cached = load_cache_expired(endpoint_cache_name(model_id))
@@ -1139,14 +1397,32 @@ def _stale_filtered_annotations(model_id, catalog_context, args):
         return None
     author = model_id.partition("/")[0]
     try:
-        default_precision = derive_default_precision(cached, author)
+        zero_price_is_variant = model_has_paid_endpoint(cached)
+        default_precision = derive_default_precision(
+            cached, author, zero_price_is_variant
+        )
         eligible_flags = [
-            baseline_eligible(endpoint, default_precision, author, args)
+            baseline_eligible(
+                endpoint,
+                default_precision,
+                author,
+                args,
+                model_id=model_id,
+                zdr_policy=zdr_policy,
+                endpoint_policy=endpoint_policy,
+                zero_price_is_variant=zero_price_is_variant,
+                allow_deranked=True,
+            )
             for endpoint in cached
         ]
         baseline = pick_baseline(cached, eligible_flags, args)
         annotations = build_annotations(
-            cached, eligible_flags, baseline, catalog_context, args
+            cached,
+            eligible_flags,
+            baseline,
+            catalog_context,
+            args,
+            zero_price_is_variant=zero_price_is_variant,
         )
     except Exception:
         # Display-only block for an already-dropped model: never fail the run.
@@ -1155,21 +1431,39 @@ def _stale_filtered_annotations(model_id, catalog_context, args):
     return annotations
 
 
-def _endpoint_stage_drop(extra_dropped, filtered, cand, reason, args):
+def _endpoint_stage_drop(
+    extra_dropped,
+    filtered,
+    cand,
+    reason,
+    args,
+    *,
+    zdr_policy=None,
+    endpoint_policy=None,
+):
     """Count one endpoint-stage drop and append its filtered entry.
 
     Same validated entry shape as build_candidates' drop() plus the optional
-    stale annotations block (absent cache -> reasons only).
+    stale annotations block (absent cache -> reasons only). The annotations
+    are re-derived with the same endpoint policies the live stage used.
     """
     extra_dropped[reason] = extra_dropped.get(reason, 0) + 1
     entry = {"id": cand["id"], "name": cand["name"] or cand["id"], "reasons": [reason]}
-    annotations = _stale_filtered_annotations(cand["id"], cand.get("context"), args)
+    annotations = _stale_filtered_annotations(
+        cand["id"],
+        cand.get("context"),
+        args,
+        zdr_policy=zdr_policy,
+        endpoint_policy=endpoint_policy,
+    )
     if annotations is not None:
         entry["annotations"] = annotations
     filtered.append(entry)
 
 
-def apply_endpoint_pricing(candidates, args, filtered):
+def apply_endpoint_pricing(
+    candidates, args, filtered, *, zdr_policy=None, endpoint_policy=None
+):
     """Reprice every candidate at its baseline endpoint (design section 4.9).
 
     The CLI stage between build_candidates and resolve_quality. Endpoint
@@ -1177,6 +1471,15 @@ def apply_endpoint_pricing(candidates, args, filtered):
     fetch_model_endpoints' per-model cache, but the results are applied PER
     CANDIDATE ID in the original candidates order -- never in completion
     order -- so the stage is deterministic.
+
+    ``zdr_policy`` is the endpoint-level ZDR policy from
+    fetch_openrouter_frontend's FrontendResult (or None when unavailable).
+    When supplied, baseline_eligible rejects an endpoint that is not in the
+    ZDR list for its (model_id, tag) or whose safety_retention is not
+    allowed by the run's --safety-retention mode. This keeps the quoted
+    endpoint as compliant as the model-level gate that admitted the model.
+    ``endpoint_policy`` is the BYOK/moderation/deranked policy from the same
+    result; see endpoint_policy_allowed.
 
     Per candidate: endpoints = fetch. On fetch failure after fetch_json's
     internal retries the model is dropped "endpoint_fetch_failed" and removed
@@ -1225,17 +1528,57 @@ def apply_endpoint_pricing(candidates, args, filtered):
         cand_id = cand["id"]
         if cand_id in failed_ids:
             _endpoint_stage_drop(
-                extra_dropped, filtered, cand, "endpoint_fetch_failed", args
+                extra_dropped,
+                filtered,
+                cand,
+                "endpoint_fetch_failed",
+                args,
+                zdr_policy=zdr_policy,
+                endpoint_policy=endpoint_policy,
             )
             continue
         endpoints = endpoints_by_id[cand_id]
         author = cand_id.partition("/")[0]
-        default_precision = derive_default_precision(endpoints, author)
+        zero_price_is_variant = model_has_paid_endpoint(endpoints)
+        default_precision = derive_default_precision(
+            endpoints, author, zero_price_is_variant
+        )
         eligible_flags = [
-            baseline_eligible(endpoint, default_precision, author, args)
+            baseline_eligible(
+                endpoint,
+                default_precision,
+                author,
+                args,
+                model_id=cand_id,
+                zdr_policy=zdr_policy,
+                endpoint_policy=endpoint_policy,
+                zero_price_is_variant=zero_price_is_variant,
+            )
             for endpoint in endpoints
         ]
         baseline = pick_baseline(endpoints, eligible_flags, args)
+        if baseline is None and endpoint_policy is not None:
+            # Last resort: a deranked endpoint is still callable when no
+            # non-deranked one qualified. Re-run the gate with the deranked
+            # fallback so the model keeps a baseline instead of being dropped.
+            fallback_flags = [
+                baseline_eligible(
+                    endpoint,
+                    default_precision,
+                    author,
+                    args,
+                    model_id=cand_id,
+                    zdr_policy=zdr_policy,
+                    endpoint_policy=endpoint_policy,
+                    zero_price_is_variant=zero_price_is_variant,
+                    allow_deranked=True,
+                )
+                for endpoint in endpoints
+            ]
+            fallback = pick_baseline(endpoints, fallback_flags, args)
+            if fallback is not None:
+                eligible_flags = fallback_flags
+                baseline = fallback
         eff = (
             effective_pricing(
                 baseline.get("pricing"), args.min_context, args.input_share
@@ -1248,7 +1591,13 @@ def apply_endpoint_pricing(candidates, args, filtered):
             for key in ("price_in", "price_out", "base_price_in", "base_price_out")
         ):
             _endpoint_stage_drop(
-                extra_dropped, filtered, cand, "no_baseline_eligible_endpoint", args
+                extra_dropped,
+                filtered,
+                cand,
+                "no_baseline_eligible_endpoint",
+                args,
+                zdr_policy=zdr_policy,
+                endpoint_policy=endpoint_policy,
             )
             continue
         # The advertised models-API scalars, captured before the mutation.
@@ -1301,11 +1650,21 @@ def apply_endpoint_pricing(candidates, args, filtered):
         cand["endpoints"] = endpoints
         cand["default_precision"] = default_precision
         cand["annotations"] = build_annotations(
-            endpoints, eligible_flags, baseline, cand["context"], args
+            endpoints,
+            eligible_flags,
+            baseline,
+            cand["context"],
+            args,
+            zero_price_is_variant=zero_price_is_variant,
         )
         cand["advertised_pricing"] = advertised_pricing
         cand["steering"] = build_steering(
-            cand_id, endpoints, eligible_flags, default_precision, args
+            cand_id,
+            endpoints,
+            eligible_flags,
+            default_precision,
+            args,
+            zero_price_is_variant=zero_price_is_variant,
         )
         survivors.append(cand)
     return survivors, extra_dropped
@@ -1925,6 +2284,281 @@ FRONTEND_AA_CACHE = "openrouter-frontend-aa-v2"
 # supports_reasoning, reasoning_config). Cached separately so a fully cached
 # run keeps the reasoning fallback instead of degrading it to unknown.
 FRONTEND_REASONING_CACHE = "openrouter-frontend-reasoning-v1"
+# The frontend rows' per-endpoint policy flags (is_byok_only,
+# moderation_required, is_deranked, and the provider data policy's
+# training), keyed by (model_id, provider_slug) plus provider-wide rows keyed
+# by the provider slug. Cached separately so a fully cached run keeps the
+# BYOK/moderation/deranked/training gates instead of silently dropping them.
+# v3 keys variant ids (`:free`/`:batch`) and carries provider-wide rows; v2
+# keyed only the base slug and would silently miss variant candidates, so v2
+# rows are ignored.
+FRONTEND_ENDPOINT_POLICY_CACHE = "openrouter-frontend-endpoint-policy-v3"
+
+
+class FrontendResult(tuple):
+    """The 7-tuple fetch_openrouter_frontend returns, plus its policies.
+
+    A tuple subclass so the historical 7-element unpacking keeps working
+    while the endpoint-level policies ride along as attributes:
+
+    * ``zdr_endpoints`` maps ``(model_id, tag)`` to
+      ``{"safety_retention": bool|None}`` for live ZDR-list endpoints; None
+      means "no policy available" (a --no-zdr run or a failed ZDR fetch) and
+      disables the endpoint gate.
+    * ``endpoint_policy`` maps ``(model_id, tag)`` to
+      ``{"byok_only": bool, "moderation_required": bool, "deranked": bool,
+      "training": bool}`` from the frontend ``models/find`` rows, plus
+      provider-wide rows keyed by the provider slug (the tag's first
+      segment) that carry only moderation/training; None means "no policy
+      available" and disables those gates.
+    """
+
+    def __new__(cls, values, zdr_endpoints=None, endpoint_policy=None):
+        result = super().__new__(cls, values)
+        result.zdr_endpoints = zdr_endpoints
+        result.endpoint_policy = endpoint_policy
+        return result
+
+
+def build_zdr_endpoint_policy(entries) -> dict:
+    """Map live ZDR-list entries to ``(model_id, tag)`` -> retention info.
+
+    Only entries whose status is exactly the integer 0 are kept: the ZDR
+    list also carries non-serving endpoints (status -2/-5), and an endpoint
+    that is not serving cannot be a baseline. A missing/empty model_id or
+    tag is skipped: the join needs both. ``safety_retention`` is kept as a
+    bool or None; a non-boolean value is unknown (None), never guessed.
+    """
+    policy = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        status = entry.get("status")
+        if type(status) is not int or status != 0:
+            continue
+        model_id = entry.get("model_id")
+        tag = entry.get("tag")
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        if not isinstance(tag, str) or not tag:
+            continue
+        flag = entry.get("safety_retention")
+        if flag is not False and flag is not True:
+            flag = None
+        policy[(model_id, tag)] = {"safety_retention": flag}
+    return policy
+
+
+def _zdr_policy_cache_rows(policy: dict) -> list:
+    """Serialize the policy for the JSON cache (tuples cannot be keys)."""
+    rows = []
+    for (model_id, tag), info in sorted(policy.items()):
+        rows.append([model_id, tag, info.get("safety_retention")])
+    return rows
+
+
+def _zdr_policy_from_cache_rows(rows) -> dict:
+    """Rebuild the policy from the JSON cache's list-of-lists shape."""
+    policy = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, list) or len(row) != 3:
+            continue
+        model_id, tag, flag = row
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        if not isinstance(tag, str) or not tag:
+            continue
+        if flag is not False and flag is not True:
+            flag = None
+        policy[(model_id, tag)] = {"safety_retention": flag}
+    return policy
+
+
+def _merge_policy_flag(current, value):
+    """Fail-closed merge of one policy flag: any True wins, then any False."""
+    if value is True or current is True:
+        return True
+    if value is False or current is False:
+        return False
+    return None
+
+
+def _frontend_model_id(slug: str, endpoint: dict) -> str:
+    """The candidate id a frontend row describes, variant suffix included.
+
+    The frontend payload has one row per model *variant* under the same base
+    slug (`:free`, `:batch`), while candidates and ZDR ids carry the variant
+    suffix. Mirror the discounts keying so a `:free`/`:batch` candidate finds
+    its own row instead of missing the map (or colliding with the standard
+    row and letting API row order decide eligibility).
+    """
+    variant = endpoint.get("variant") or ""
+    if variant in ("", "standard"):
+        return slug
+    return f"{slug}:{variant}"
+
+
+def build_endpoint_policy(entries) -> dict:
+    """Map frontend ``models/find`` rows to ``(model_id, tag)`` policy info.
+
+    Each row is a model+endpoint pair: ``slug`` names the model,
+    ``endpoint.variant`` names the variant (a `:free`/`:batch` candidate id
+    keeps that suffix), and ``endpoint.provider_slug`` names the endpoint's
+    provider/region (the same value as the public endpoint ``tag``).
+
+    Two kinds of entry are produced:
+
+    * the exact endpoint entry, keyed by ``(model_id, provider_slug)``,
+      carrying ``is_byok_only``, ``moderation_required``, ``is_deranked``
+      and ``training``;
+    * a provider-level entry, keyed by the base model id and the provider
+      slug (the tag's first segment, e.g. ``amazon-bedrock`` for
+      ``amazon-bedrock/eu-west-1`` and ``google-vertex`` for
+      ``google-vertex/global``), carrying only ``moderation_required`` and
+      ``training``. The live payload reports both provider-wide, so a
+      baseline on an unlisted regional sibling of the same provider must
+      inherit them, and the entry is variant-agnostic so a batch/free-only
+      frontend row still informs the base candidate. ``is_byok_only`` and
+      ``is_deranked`` stay endpoint-level because they really do differ per
+      endpoint/variant.
+
+    ``training`` on the exact entry is True when either the endpoint's
+    ``data_policy`` or the provider's ``provider_info.dataPolicy`` says so
+    (the stricter value wins), and False only when both known values are
+    False. The provider-wide entry takes only
+    ``provider_info.dataPolicy.training``: an endpoint-level value is
+    variant-specific (a `:free` row can train while its paid sibling does
+    not) and must not reject the sibling. A non-boolean value is unknown
+    (None), never guessed. A row without a slug or
+    provider_slug is skipped: the join needs both. The map is only as
+    complete as the frontend payload (it lists the endpoints the site
+    shows), so an absent key means "no policy known" and the endpoint is
+    allowed (fail-open; see endpoint_policy_allowed).
+    """
+    policy = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("slug")
+        endpoint = entry.get("endpoint")
+        if not isinstance(endpoint, dict):
+            continue
+        tag = endpoint.get("provider_slug")
+        if not isinstance(slug, str) or not slug:
+            continue
+        if not isinstance(tag, str) or not tag:
+            continue
+        model_id = _frontend_model_id(slug, endpoint)
+        byok = endpoint.get("is_byok_only")
+        moderation = endpoint.get("moderation_required")
+        deranked = endpoint.get("is_deranked")
+
+        endpoint_training = None
+        endpoint_policy_row = endpoint.get("data_policy")
+        if isinstance(endpoint_policy_row, dict) and isinstance(
+            endpoint_policy_row.get("training"), bool
+        ):
+            endpoint_training = endpoint_policy_row["training"]
+        provider_info = endpoint.get("provider_info")
+        provider_data_policy = (
+            provider_info.get("dataPolicy") if isinstance(provider_info, dict) else None
+        )
+        provider_training = None
+        if isinstance(provider_data_policy, dict) and isinstance(
+            provider_data_policy.get("training"), bool
+        ):
+            provider_training = provider_data_policy["training"]
+        # For this endpoint, the stricter of the two levels wins. The
+        # endpoint-level value is variant-specific (a `:free` row may train
+        # while its paid sibling does not), so it never propagates to the
+        # provider-wide entry below.
+        training = _merge_policy_flag(endpoint_training, provider_training)
+
+        exact_key = (model_id, tag)
+        exact = policy.setdefault(
+            exact_key,
+            {
+                "byok_only": None,
+                "moderation_required": None,
+                "deranked": None,
+                "training": None,
+            },
+        )
+        exact["byok_only"] = _merge_policy_flag(
+            exact["byok_only"], byok if isinstance(byok, bool) else None
+        )
+        exact["moderation_required"] = _merge_policy_flag(
+            exact["moderation_required"],
+            moderation if isinstance(moderation, bool) else None,
+        )
+        exact["deranked"] = _merge_policy_flag(
+            exact["deranked"], deranked if isinstance(deranked, bool) else None
+        )
+        exact["training"] = _merge_policy_flag(exact["training"], training)
+
+        provider_tag = provider_slug_from_tag(tag)
+        if provider_tag:
+            # Provider-wide flags are a property of the provider, not of one
+            # variant: key them by the BASE model id so a batch-only frontend
+            # row still tells the base candidate that its provider moderates
+            # or trains. byok/deranked stay on the exact entry above.
+            provider_key = (slug, provider_tag)
+            provider = policy.setdefault(
+                provider_key,
+                {
+                    "byok_only": None,
+                    "moderation_required": None,
+                    "deranked": None,
+                    "training": None,
+                },
+            )
+            provider["moderation_required"] = _merge_policy_flag(
+                provider["moderation_required"],
+                moderation if isinstance(moderation, bool) else None,
+            )
+            provider["training"] = _merge_policy_flag(
+                provider["training"], provider_training
+            )
+    return policy
+
+
+def _endpoint_policy_cache_rows(policy: dict) -> list:
+    """Serialize the endpoint policy for the JSON cache."""
+    rows = []
+    for (model_id, tag), info in sorted(policy.items()):
+        rows.append(
+            [
+                model_id,
+                tag,
+                info.get("byok_only"),
+                info.get("moderation_required"),
+                info.get("deranked"),
+                info.get("training"),
+            ]
+        )
+    return rows
+
+
+def _endpoint_policy_from_cache_rows(rows) -> dict:
+    """Rebuild the endpoint policy from the JSON cache's list-of-lists shape."""
+    policy = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, list) or len(row) != 6:
+            continue
+        model_id, tag, byok, moderation, deranked, training = row
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        if not isinstance(tag, str) or not tag:
+            continue
+        policy[(model_id, tag)] = {
+            "byok_only": byok if isinstance(byok, bool) else None,
+            "moderation_required": (
+                moderation if isinstance(moderation, bool) else None
+            ),
+            "deranked": deranked if isinstance(deranked, bool) else None,
+            "training": training if isinstance(training, bool) else None,
+        }
+    return policy
 
 
 def fetch_openrouter_frontend(args):
@@ -1935,18 +2569,27 @@ def fetch_openrouter_frontend(args):
     serves ZDR and is skipped entirely under --no-zdr. Each payload caches
     independently under its own key and is cached only when non-empty, so a
     degraded payload self-heals on the next run. A base-URL outage never
-    blocks the ZDR fetch, and vice versa. Returns
-    (discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id, cache_hits,
-    frontend_models) where zdr_ids is every model with a ZDR-list endpoint,
-    zdr_strict_ids the subset with at least one endpoint whose
-    safety_retention is exactly False, zdr_sr_ids the subset with at least
-    one endpoint whose safety_retention is exactly True, cache_hits names the
-    payloads served from cache ("discounts", "zdr", "aa"), and
-    frontend_models is the frontend listing projected to the fields
-    build_reasoning_metadata needs (slug, permaslug, supports_reasoning,
-    reasoning_config). The v5 ZDR cache payload is
-    {"zdr": [...], "strict": [...], "sr": [...]}; older keys and shapes are
-    ignored.
+    blocks the ZDR fetch, and vice versa. Returns a FrontendResult: the
+    7-tuple (discounts, zdr_ids, zdr_strict_ids, zdr_sr_ids, aa_by_id,
+    cache_hits, frontend_models) plus a ``zdr_endpoints`` attribute. zdr_ids
+    is every model with a ZDR-list endpoint, zdr_strict_ids the subset with
+    at least one endpoint whose safety_retention is exactly False,
+    zdr_sr_ids the subset with at least one endpoint whose safety_retention
+    is exactly True, cache_hits names the payloads served from cache
+    ("discounts", "zdr", "aa"), and frontend_models is the frontend listing
+    projected to the fields build_reasoning_metadata needs (slug, permaslug,
+    supports_reasoning, reasoning_config). ``zdr_endpoints`` maps each live
+    (model_id, tag) to {"safety_retention": bool|None}; it is None when no
+    policy is available (--no-zdr or a failed ZDR fetch) so the endpoint
+    gate stays off. ``endpoint_policy`` maps each frontend
+    (model_id, provider_slug) to {"byok_only", "moderation_required",
+    "deranked", "training"} bools, plus provider-wide rows keyed by the
+    provider slug; it is None when the base payload is unavailable so those
+    gates stay off. The v6 ZDR cache payload is
+    {"zdr": [...], "strict": [...], "sr": [...], "endpoints": [[...], ...]};
+    older keys and shapes are ignored. The endpoint policy caches under its
+    own v3 key as a list of [model_id, provider_slug, byok, moderation,
+    deranked, training] rows.
     """
     discounts = {}
     aa_by_id = {}
@@ -1954,6 +2597,7 @@ def fetch_openrouter_frontend(args):
     zdr_strict_ids = set()
     zdr_sr_ids = set()
     frontend_models = []
+    endpoint_policy = None
     cache_hits = set()
 
     aa_from_cache = False
@@ -1970,8 +2614,12 @@ def fetch_openrouter_frontend(args):
         cached = load_cache(FRONTEND_REASONING_CACHE, args.cache_ttl)
         if cached:
             frontend_models = cached
+        cached = load_cache(FRONTEND_ENDPOINT_POLICY_CACHE, args.cache_ttl)
+        if cached:
+            endpoint_policy = _endpoint_policy_from_cache_rows(cached)
+            cache_hits.add("endpoint_policy")
 
-    if not discounts or not aa_from_cache:
+    if not discounts or not aa_from_cache or endpoint_policy is None:
         try:
             payload = fetch_json(OPENROUTER_DISCOUNTS_URL, timeout=30)
         except Exception as exc:
@@ -1979,6 +2627,14 @@ def fetch_openrouter_frontend(args):
                 warn(f"could not fetch discount data: {exc}")
             if not aa_from_cache:
                 warn(f"could not fetch AA benchmark data: {exc}")
+            if endpoint_policy is None:
+                # The policy gates would silently disappear: the catalog still
+                # records the flags and a ranked price would be presented as
+                # BYOK/moderation/training-checked when it is not.
+                warn(
+                    f"could not fetch endpoint policy data: {exc} "
+                    "(BYOK, moderation, deranked and training gates are off)"
+                )
         else:
             data = payload.get("data") if isinstance(payload, dict) else None
             entries = data.get("models") if isinstance(data, dict) else None
@@ -2023,50 +2679,91 @@ def fetch_openrouter_frontend(args):
             if fresh_reasoning:
                 frontend_models = fresh_reasoning
                 save_cache(FRONTEND_REASONING_CACHE, frontend_models)
+            fresh_policy = build_endpoint_policy(entries)
+            if fresh_policy:
+                endpoint_policy = fresh_policy
+                save_cache(
+                    FRONTEND_ENDPOINT_POLICY_CACHE,
+                    _endpoint_policy_cache_rows(endpoint_policy),
+                )
+                cache_hits.discard("endpoint_policy")
+            elif endpoint_policy is None:
+                # Same silent-drop risk as a transport failure: an empty map
+                # means the response shape changed, so name it instead of
+                # running with every policy gate disabled.
+                warn(
+                    "no endpoint policy entries found; treating the "
+                    "BYOK/moderation/deranked/training gates as unavailable"
+                )
 
     if args.no_zdr:
-        return (
-            discounts,
-            zdr_ids,
-            zdr_strict_ids,
-            zdr_sr_ids,
-            aa_by_id,
-            cache_hits,
-            frontend_models,
+        return FrontendResult(
+            (
+                discounts,
+                zdr_ids,
+                zdr_strict_ids,
+                zdr_sr_ids,
+                aa_by_id,
+                cache_hits,
+                frontend_models,
+            ),
+            None,
+            endpoint_policy,
         )
     if not args.no_cache:
-        # v5: the split comes from the per-endpoint ZDR list; v1/v2 sets were
-        # derived from the models/find response, v3 was a bare id list and v4
-        # had only two lists, so none of them may be read.
+        # v6: the split and the endpoint policy come from the per-endpoint
+        # ZDR list; v1/v2 sets were derived from the models/find response,
+        # v3 was a bare id list and v4/v5 had only the id lists (no endpoint
+        # policy), so none of them may be read. Every element is type-checked
+        # before the sets are built: a malformed cache must fall through to
+        # the fetch, never crash the run or admit a policy-less pool.
         cached = load_cache(ZDR_CACHE, args.cache_ttl)
+
+        def _str_list(value):
+            return isinstance(value, list) and all(
+                isinstance(item, str) and item for item in value
+            )
+
         if (
             isinstance(cached, dict)
-            and isinstance(cached.get("zdr"), list)
-            and isinstance(cached.get("strict"), list)
-            and isinstance(cached.get("sr"), list)
+            and _str_list(cached.get("zdr"))
+            and _str_list(cached.get("strict"))
+            and _str_list(cached.get("sr"))
+            and isinstance(cached.get("endpoints"), list)
             and cached["zdr"]
+            and cached["endpoints"]
         ):
-            return (
-                discounts,
-                set(cached["zdr"]),
-                set(cached["strict"]),
-                set(cached["sr"]),
-                aa_by_id,
-                cache_hits | {"zdr"},
-                frontend_models,
-            )
+            cached_policy = _zdr_policy_from_cache_rows(cached["endpoints"])
+            if cached_policy:
+                return FrontendResult(
+                    (
+                        discounts,
+                        set(cached["zdr"]),
+                        set(cached["strict"]),
+                        set(cached["sr"]),
+                        aa_by_id,
+                        cache_hits | {"zdr"},
+                        frontend_models,
+                    ),
+                    cached_policy,
+                    endpoint_policy,
+                )
     try:
         payload = fetch_json(OPENROUTER_ZDR_URL, timeout=30)
     except Exception as exc:
         warn(f"could not fetch ZDR data: {exc}")
-        return (
-            discounts,
-            zdr_ids,
-            zdr_strict_ids,
-            zdr_sr_ids,
-            aa_by_id,
-            cache_hits,
-            frontend_models,
+        return FrontendResult(
+            (
+                discounts,
+                zdr_ids,
+                zdr_strict_ids,
+                zdr_sr_ids,
+                aa_by_id,
+                cache_hits,
+                frontend_models,
+            ),
+            None,
+            endpoint_policy,
         )
     # One entry per ZDR endpoint, keyed by the exact model id (variants
     # such as :free are listed individually). An id is ZDR iff it has at
@@ -2110,14 +2807,41 @@ def fetch_openrouter_frontend(args):
                 sr_ids.add(model_id)
     if not ids:
         warn("no ZDR entries found; treating ZDR data as unavailable")
-        return (
-            discounts,
-            zdr_ids,
-            zdr_strict_ids,
-            zdr_sr_ids,
-            aa_by_id,
-            cache_hits,
-            frontend_models,
+        return FrontendResult(
+            (
+                discounts,
+                zdr_ids,
+                zdr_strict_ids,
+                zdr_sr_ids,
+                aa_by_id,
+                cache_hits,
+                frontend_models,
+            ),
+            None,
+            endpoint_policy,
+        )
+    zdr_policy = build_zdr_endpoint_policy(entries)
+    if not zdr_policy:
+        # A payload with ids but no usable (model_id, tag) pairs would leave
+        # every endpoint non-compliant and silently wipe the pool. Refuse the
+        # data the way an empty list is refused, so the run fails closed with
+        # a clear message instead.
+        warn(
+            "no usable ZDR endpoint policy entries; treating ZDR data as "
+            "unavailable (--no-zdr to override)"
+        )
+        return FrontendResult(
+            (
+                discounts,
+                zdr_ids,
+                zdr_strict_ids,
+                zdr_sr_ids,
+                aa_by_id,
+                cache_hits,
+                frontend_models,
+            ),
+            None,
+            endpoint_policy,
         )
     save_cache(
         ZDR_CACHE,
@@ -2125,9 +2849,22 @@ def fetch_openrouter_frontend(args):
             "zdr": sorted(ids),
             "strict": sorted(strict_ids),
             "sr": sorted(sr_ids),
+            "endpoints": _zdr_policy_cache_rows(zdr_policy),
         },
     )
-    return discounts, ids, strict_ids, sr_ids, aa_by_id, cache_hits, frontend_models
+    return FrontendResult(
+        (
+            discounts,
+            ids,
+            strict_ids,
+            sr_ids,
+            aa_by_id,
+            cache_hits,
+            frontend_models,
+        ),
+        zdr_policy,
+        endpoint_policy,
+    )
 
 
 def parse_price(value) -> float | None:
@@ -6088,6 +6825,9 @@ def build_catalog(
             "require_tools": not args.no_require_tools,
             "exclude_free": args.exclude_free,
             "include_batch": args.include_batch,
+            "byok": getattr(args, "byok", False),
+            "no_moderation": getattr(args, "no_moderation", False),
+            "include_deranked": getattr(args, "include_deranked", False),
             # The requested effort documents the semantic of every model's
             # quality value (default = best measured selectable effort).
             "reasoning_effort": getattr(args, "reasoning_effort", "default"),
@@ -6566,6 +7306,7 @@ class HelpParser(argparse.ArgumentParser):
             return
         self._print_message(text, stream)
 
+
 _FLEX_HELP = (
     "quote and steer the Flex service tier when available (typically "
     "lower price, lower processing priority; can exceed another "
@@ -6739,6 +7480,24 @@ def parse_args(argv=None):
         "zero-data-retention: none never (default), google only for Google's "
         "models, all always",
     )
+    filters.add_argument(
+        "--byok",
+        action="store_true",
+        help="include endpoints that require your own provider key (BYOK-only); "
+        "they are excluded by default because a plain OpenRouter key cannot call them",
+    )
+    filters.add_argument(
+        "--no-moderation",
+        action="store_true",
+        help="exclude endpoints whose provider requires moderation (for privacy "
+        "policies that forbid it)",
+    )
+    filters.add_argument(
+        "--include-deranked",
+        action="store_true",
+        help="include endpoints OpenRouter deprioritises in default routing; "
+        "they are excluded by default so the quote matches the default route",
+    )
     sources.add_argument(
         "--no-cache",
         action="store_true",
@@ -6780,6 +7539,7 @@ def main(argv=None) -> int:
 
 
 def run(args, models, or_cached) -> int:
+    frontend = fetch_openrouter_frontend(args)
     (
         discounts,
         zdr_ids,
@@ -6788,7 +7548,11 @@ def run(args, models, or_cached) -> int:
         aa_by_id,
         frontend_cache_hits,
         frontend_models,
-    ) = fetch_openrouter_frontend(args)
+    ) = frontend
+    # The endpoint-level ZDR policy rides on the tuple subclass. A plain
+    # 7-tuple (an older test stub) has no attribute, so the gate stays off.
+    zdr_policy = getattr(frontend, "zdr_endpoints", None)
+    endpoint_policy = getattr(frontend, "endpoint_policy", None)
     if not args.no_zdr and not zdr_ids:
         warn(
             "ZDR data unavailable; refusing to rank possibly non-ZDR models "
@@ -6846,7 +7610,13 @@ def run(args, models, or_cached) -> int:
     )
     # The provider-aware stage: every surviving candidate is repriced at its
     # baseline endpoint (or dropped fail-closed) before any scoring runs.
-    candidates, extra_dropped = apply_endpoint_pricing(candidates, args, filtered)
+    candidates, extra_dropped = apply_endpoint_pricing(
+        candidates,
+        args,
+        filtered,
+        zdr_policy=zdr_policy,
+        endpoint_policy=endpoint_policy,
+    )
     dropped.update(extra_dropped)
     if not candidates:
         # When the endpoint stage wiped the pool, naming the filter knobs is
