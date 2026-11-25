@@ -11,14 +11,26 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is the oldest supported release; 3.15 matches the publish
+        # workflow. Keep both so the floor cannot rot silently.
+        python-version: ["3.12", "3.15"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
-          python-version: "3.15"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Verify Node is installed
+        # web/test_site_js.py skips silently when node is absent; a skip
+        # must not masquerade as a green frontend test run.
+        run: node --version
 
       - name: Test
         run: |
-          python -m pip install pytest
+          python -m pip install "pytest>=8,<10"
           pytest

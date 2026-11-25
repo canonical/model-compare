@@ -64,6 +64,7 @@ def make_args(**overrides):
         exclude_free=False,
         include_batch=False,
         discount=False,
+        require_quality=False,
         no_zdr=False,
         safety_retention="none",
         no_cache=True,
@@ -1371,6 +1372,21 @@ def test_parse_endpoints_new_fields_default_to_null():
     assert ep["max_prompt_tokens"] is None
 
 
+def test_parse_endpoints_rejects_bool_and_nonpositive_context():
+    ep = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(context_length=True),
+                    _endpoint(context_length=0),
+                    _endpoint(context_length=-1),
+                ]
+            }
+        }
+    )
+    assert [row["context_length"] for row in ep] == [None, None, None]
+
+
 def test_parse_endpoints_keeps_endpoint_capabilities():
     ep = mc.parse_endpoints(
         {
@@ -1415,7 +1431,254 @@ def test_baseline_eligible_requires_endpoint_context_floor():
     assert mc.baseline_eligible(unknown, "fp8", "z-ai", args)
 
 
-def test_fetch_model_endpoints_uses_v3_cache(monkeypatch):
+# ---------------------------------------------------------------------------
+# Review follow-ups: endpoint price/discount hardening and annotation scoping
+# ---------------------------------------------------------------------------
+
+
+def test_parse_endpoints_rejects_negative_and_nonfinite_prices():
+    ep = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(pricing={"prompt": "-1", "completion": "-1"}),
+                    _endpoint(
+                        pricing={
+                            "prompt": "nan",
+                            "completion": "inf",
+                            "discount": "0.5",
+                        }
+                    ),
+                ]
+            }
+        }
+    )
+    assert ep[0]["pricing"]["prompt"] is None
+    assert ep[0]["pricing"]["completion"] is None
+    assert ep[1]["pricing"]["prompt"] is None
+    assert ep[1]["pricing"]["completion"] is None
+    assert ep[1]["pricing"]["discount"] == 0.5
+
+
+@pytest.mark.parametrize("bad", [True, False, "nan", "inf", -0.1])
+def test_parse_endpoints_rejects_malformed_discount(bad):
+    ep = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        pricing={
+                            "prompt": "0.000001",
+                            "completion": "0.000002",
+                            "discount": bad,
+                        }
+                    )
+                ]
+            }
+        }
+    )[0]
+    assert ep["pricing"]["discount"] is None
+
+
+def test_pick_baseline_rejects_negative_endpoint_prices():
+    args = make_args()
+    negative = _endpoint(
+        tag="bad/negative",
+        pricing={"prompt": "-1", "completion": "-1"},
+    )
+    positive = _endpoint(
+        tag="good/fp8",
+        pricing={"prompt": "0.000001", "completion": "0.000002"},
+    )
+    assert mc.pick_baseline([negative, positive], [True, True], args) is positive
+
+
+def test_first_party_matches_author_tag_slug():
+    assert mc.is_first_party("Sakana AI", "sakana", tag="sakana")
+    assert mc.is_first_party("Alibaba", "qwen", tag="alibaba")
+    # The alias still binds to one author: another maker cannot borrow it.
+    assert not mc.is_first_party("Alibaba", "deepseek", tag="alibaba")
+
+
+def test_derive_default_precision_ignores_sub_floor_context():
+    args = make_args(min_context=1_000_000)
+    eps = [
+        _endpoint(
+            provider_name="Cerebras",
+            tag="cerebras/fp16",
+            quantization="fp16",
+            context_length=65_536,
+            max_prompt_tokens=65_536,
+        ),
+        _endpoint(
+            provider_name="Alibaba",
+            tag="alibaba",
+            quantization="fp8",
+            context_length=1_000_000,
+            max_prompt_tokens=1_000_000,
+        ),
+    ]
+    assert mc.derive_default_precision(eps, "qwen", args=args) == "fp8"
+
+
+def test_baseline_eligible_rejects_empty_tag():
+    assert not mc.baseline_eligible(_endpoint(tag=""), "fp8", "z-ai", make_args())
+    assert not mc.baseline_eligible(_endpoint(tag=None), "fp8", "z-ai", make_args())
+
+
+def test_annotations_ignore_policy_rejections():
+    args = make_args()
+    baseline = _endpoint(
+        tag="z-ai/fp8",
+        pricing={"prompt": "0.0000002", "completion": "0.0000002"},
+    )
+    cheaper_not_zdr = _endpoint(
+        tag="other/fp8",
+        provider_name="Other",
+        pricing={"prompt": "0.00000001", "completion": "0.00000001"},
+    )
+    zdr_policy = {("acme/model-a", "z-ai/fp8"): {"safety_retention": False}}
+    flags = [
+        mc.baseline_eligible(
+            baseline,
+            "fp8",
+            "acme",
+            args,
+            model_id="acme/model-a",
+            zdr_policy=zdr_policy,
+        ),
+        mc.baseline_eligible(
+            cheaper_not_zdr,
+            "fp8",
+            "acme",
+            args,
+            model_id="acme/model-a",
+            zdr_policy=zdr_policy,
+        ),
+    ]
+    assert flags == [True, False]
+    ann = mc.build_annotations(
+        [baseline, cheaper_not_zdr],
+        flags,
+        baseline,
+        262144,
+        args,
+        default_precision="fp8",
+        author="acme",
+        model_id="acme/model-a",
+        zdr_policy=zdr_policy,
+    )
+    assert ann["risk_flag"] is False
+    assert ann["price_spread"] is None
+    assert ann["cheapest_quantized"] is None
+
+
+def test_annotations_still_flag_quantization_rejections():
+    args = make_args()
+    baseline = _endpoint(
+        tag="z-ai/fp8",
+        pricing={"prompt": "0.0000002", "completion": "0.0000002"},
+    )
+    cheaper_fp4 = _endpoint(
+        tag="z-ai/fp4",
+        pricing={"prompt": "0.00000001", "completion": "0.00000001"},
+        quantization="fp4",
+    )
+    zdr_policy = {
+        ("acme/model-a", "z-ai/fp8"): {"safety_retention": False},
+        ("acme/model-a", "z-ai/fp4"): {"safety_retention": False},
+    }
+    flags = [
+        mc.baseline_eligible(
+            endpoint,
+            "fp8",
+            "acme",
+            args,
+            model_id="acme/model-a",
+            zdr_policy=zdr_policy,
+        )
+        for endpoint in (baseline, cheaper_fp4)
+    ]
+    assert flags == [True, False]
+    ann = mc.build_annotations(
+        [baseline, cheaper_fp4],
+        flags,
+        baseline,
+        262144,
+        args,
+        default_precision="fp8",
+        author="acme",
+        model_id="acme/model-a",
+        zdr_policy=zdr_policy,
+    )
+    assert ann["risk_flag"] is True
+    assert ann["cheapest_quantized"]["quantization"] == "fp4"
+    assert ann["cheapest_quantized"]["provider"] == "Z.AI"
+
+
+def test_annotations_baseline_context_below_catalog():
+    args = make_args()
+    baseline = _endpoint(context_length=1_024_000)
+    ann = mc.build_annotations([baseline], [True], baseline, 1_048_576, args)
+    assert ann["baseline_context_below_catalog"] is True
+
+
+def test_select_default_depth_restricts_single_state_models():
+    # Empty supported_efforts means one reasoning state, not "all efforts".
+    cand = {
+        "supported_efforts": [],
+        "reasoning": {
+            "supported_efforts": [],
+            "mandatory": False,
+            "default_enabled": True,
+            "is_reasoning": True,
+        },
+    }
+    depths = {
+        "none": {"effort": "none", "index": 40},
+        "reasoning": {"effort": "reasoning", "index": 50},
+        "max": {"effort": "max", "index": 60},
+    }
+    assert mc.select_default_depth(cand, depths) == "reasoning"
+    cand["reasoning"]["mandatory"] = True
+    assert mc.select_default_depth(cand, depths) == "reasoning"
+
+
+def test_build_steering_omits_quantizations_when_order_has_unknown():
+    args = make_args()
+    known = _endpoint(tag="z-ai/fp8", provider_name="Z.AI", quantization="fp8")
+    unknown = _endpoint(tag="z-ai", provider_name="Z.AI", quantization="unknown")
+    steering = mc.build_steering(
+        "z-ai/model-a", [known, unknown], [True, True], "fp8", args
+    )
+    assert set(steering["provider"]["order"]) == {"z-ai/fp8", "z-ai"}
+    assert "quantizations" not in steering["provider"]
+
+
+def test_build_steering_skips_empty_tags():
+    args = make_args()
+    empty = _endpoint(tag="", provider_name="Z.AI", quantization="fp8")
+    steering = mc.build_steering("z-ai/model-a", [empty], [True], "fp8", args)
+    assert steering["provider"]["order"] == []
+    assert steering["provider"]["ignore"] == []
+
+
+def test_fetch_model_endpoints_uses_cached_empty_list(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mc, "load_cache", lambda *a, **k: [])
+    monkeypatch.setattr(
+        mc, "fetch_json", lambda *a, **k: calls.append("fetch") or {"data": {}}
+    )
+    assert (
+        mc.fetch_model_endpoints(
+            "z-ai/glm-5.3", make_args(no_cache=False, cache_ttl=60)
+        )
+        == []
+    )
+    assert calls == []
+
+
+def test_fetch_model_endpoints_uses_v4_cache(monkeypatch):
     seen = []
 
     def fake_load(name, ttl):
@@ -1426,7 +1689,7 @@ def test_fetch_model_endpoints_uses_v3_cache(monkeypatch):
     monkeypatch.setattr(mc, "save_cache", lambda *a, **k: None)
     monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: {"data": {"endpoints": []}})
     mc.fetch_model_endpoints("z-ai/glm-5.3", make_args(no_cache=False, cache_ttl=60))
-    assert seen == ["endpoints-v3:z-ai_glm-5.3"]
+    assert seen == ["endpoints-v4:z-ai_glm-5.3"]
 
 
 def test_variant_detection_marker_and_zero_price():
@@ -1525,6 +1788,22 @@ def test_load_cache_expired_returns_stale_payload(tmp_path, monkeypatch):
     assert mc.load_cache_expired("k") == {"v": 1}  # ...but the stale load keeps it
 
 
+def test_save_cache_uses_unique_temp_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    replaced = []
+    real_replace = os.replace
+
+    def recording_replace(src, dst):
+        replaced.append(src)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(mc.os, "replace", recording_replace)
+    mc.save_cache("k", {"v": 1})
+    path = mc.cache_path("k")
+    assert replaced and replaced[0].startswith(path + ".")
+    assert replaced[0] != path + ".tmp"
+
+
 def test_fetch_model_endpoints_round_trip(monkeypatch):
     """Task 3 deferred coverage: the per-model cache round trip.
 
@@ -1545,7 +1824,7 @@ def test_fetch_model_endpoints_round_trip(monkeypatch):
     assert calls == [mc.OPENROUTER_ENDPOINTS_URL.format(id="z-ai/glm")]
     assert eps == mc.parse_endpoints(payload)
     # Saved under the flattened v3 cache name ("/" -> "_", hyphen kept).
-    assert Path(mc.cache_path("endpoints-v3:z-ai_glm")).exists()
+    assert Path(mc.cache_path("endpoints-v4:z-ai_glm")).exists()
     # Second call: served from cache, no refetch.
     assert mc.fetch_model_endpoints("z-ai/glm", args) == eps
     assert len(calls) == 1
@@ -1661,8 +1940,8 @@ def test_maker_own_endpoint_wins_over_better_partner():
     # The other half of "partner never pins": the maker's OWN endpoint wins
     # the primary rule even when a partner offers a better-ranked one.
     eps = [
-        _endpoint(provider_name="Z.AI", quantization="int8"),
-        _endpoint(provider_name="DeepInfra", quantization="fp8"),
+        _endpoint(provider_name="Z.AI", tag="z-ai/int8", quantization="int8"),
+        _endpoint(provider_name="DeepInfra", tag="deepinfra/fp8", quantization="fp8"),
     ]
     assert mc.derive_default_precision(eps, "z-ai") == "int8"
 
@@ -1837,8 +2116,7 @@ def test_endpoint_zdr_status_reports_the_quote_retention():
         ("acme/a", "acme/unknown"): {"safety_retention": None},
     }
     assert (
-        mc.endpoint_zdr_status("acme/a", _endpoint(tag="acme/fp8"), policy)
-        == "strict"
+        mc.endpoint_zdr_status("acme/a", _endpoint(tag="acme/fp8"), policy) == "strict"
     )
     assert (
         mc.endpoint_zdr_status("acme/a", _endpoint(tag="acme/fp4"), policy)
@@ -3193,9 +3471,7 @@ def _stub_endpoint_pipeline(
     return calls
 
 
-def test_no_zdr_catalog_with_facts_passes_the_site_validator(
-    monkeypatch, capsys
-):
+def test_no_zdr_catalog_with_facts_passes_the_site_validator(monkeypatch, capsys):
     models = [make_model(id="z-ai/glm", name="Z.AI: GLM")]
     endpoints = {"z-ai/glm": _endpoint_stage_eps()}
     _stub_endpoint_pipeline(monkeypatch, models, endpoints)
@@ -3290,7 +3566,7 @@ def test_empty_pool_after_endpoint_drops_warns_with_drop_counts(monkeypatch, cap
     assert captured.out == ""  # no document
     assert (
         "no models after the endpoint stage: "
-        "no_baseline_eligible_endpoint=2, endpoint_fetch_failed=0" in captured.err
+        "no_baseline_eligible_endpoint=2" in captured.err
     )
 
 
@@ -3432,6 +3708,70 @@ def test_apply_endpoint_pricing_skips_non_zdr_cheapest_endpoint(monkeypatch):
     assert cand["price_in"] == pytest.approx(0.2)
     assert cand["price_out"] == pytest.approx(0.4)
     assert cand["steering"]["provider"]["order"] == ["acme/fp8"]
+
+
+def test_apply_endpoint_pricing_uses_baseline_discount(monkeypatch):
+    # The frontend discount belongs to its featured endpoint; DISC must use
+    # the endpoint that was actually quoted.
+    args = make_args()
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        provider_name="Acme",
+                        tag="acme/fp8",
+                        quantization="fp8",
+                        pricing={
+                            "prompt": "0.0000002",
+                            "completion": "0.0000004",
+                            "discount": "0.15",
+                        },
+                    )
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    models = [make_model(id="acme/a", name="Acme: A")]
+    candidates, _ = mc.build_candidates(
+        models, args, {"acme/a": 0.75}, {"acme/a"}, [], zdr_strict_ids={"acme/a"}
+    )
+    candidates, extra = mc.apply_endpoint_pricing(candidates, args, [])
+    assert extra == {}
+    assert candidates[0]["discount"] == pytest.approx(0.15)
+
+
+def test_discount_filter_runs_after_endpoint_pricing(monkeypatch):
+    # A model is only "discounted" when the quoted endpoint is discounted.
+    args = make_args(discount=True)
+    eps = mc.parse_endpoints(
+        {
+            "data": {
+                "endpoints": [
+                    _endpoint(
+                        provider_name="Acme",
+                        tag="acme/fp8",
+                        quantization="fp8",
+                        pricing={
+                            "prompt": "0.0000002",
+                            "completion": "0.0000004",
+                            "discount": "0",
+                        },
+                    )
+                ]
+            }
+        }
+    )
+    monkeypatch.setattr(mc, "fetch_model_endpoints", lambda mid, a: eps)
+    models = [make_model(id="acme/a", name="Acme: A")]
+    candidates, _ = mc.build_candidates(
+        models, args, {"acme/a": 0.75}, {"acme/a"}, [], zdr_strict_ids={"acme/a"}
+    )
+    assert len(candidates) == 1
+    candidates, extra = mc.apply_endpoint_pricing(candidates, args, [])
+    assert candidates == []
+    assert extra == {"no discount": 1}
 
 
 def test_apply_endpoint_pricing_skips_endpoint_without_tools(monkeypatch):
@@ -3719,9 +4059,7 @@ def test_json_rows_carry_new_additive_keys(monkeypatch, capsys):
     assert row["session_cost_usd"] is None  # Task 7 fills it
 
 
-def test_no_zdr_quote_facts_are_emitted_without_gating(
-    monkeypatch, capsys
-):
+def test_no_zdr_quote_facts_are_emitted_without_gating(monkeypatch, capsys):
     args = make_args(no_zdr=True, zdr_facts=True, min_context=0)
     monkeypatch.setattr(
         mc, "fetch_model_endpoints", lambda mid, a: _endpoint_stage_eps()
@@ -3760,8 +4098,12 @@ def test_zdr_facts_do_not_change_no_zdr_rankings(monkeypatch):
             dropped,
             endpoint_dropped,
             [
-                (c["id"], round(c["price_in"], 6), round(c["price_out"], 6),
-                 round(c["score"], 6))
+                (
+                    c["id"],
+                    round(c["price_in"], 6),
+                    round(c["price_out"], 6),
+                    round(c["score"], 6),
+                )
                 for c in candidates
             ],
         )
@@ -5040,6 +5382,17 @@ def test_build_candidates_survives_string_context_length():
 # ---------------------------------------------------------------------------
 
 
+def test_build_candidates_drops_router_alias():
+    # ~aliases are OpenRouter virtual routers, not callable model endpoints;
+    # fetching /endpoints for them always returns [].
+    models = [make_model(id="~acme/latest")]
+    candidates, dropped = mc.build_candidates(
+        models, make_args(), {}, {"~acme/latest"}, zdr_strict_ids={"~acme/latest"}
+    )
+    assert candidates == []
+    assert dropped == {"malformed id": 1}
+
+
 def test_build_candidates_drops_malformed_id():
     models = [make_model(id="no-slash")]
     candidates, dropped = mc.build_candidates(
@@ -5166,44 +5519,20 @@ def test_build_candidates_keeps_batch_with_include_batch():
     assert not dropped
 
 
-def test_build_candidates_discount_filter_keeps_discounted_only():
+def test_build_candidates_defers_discount_filter_to_endpoint_stage():
+    # The frontend's featured-endpoint discount is not the quoted endpoint's
+    # discount, so it must not decide the candidate set.
     models = [make_model(id="acme/discounted"), make_model(id="acme/normal")]
     candidates, dropped = mc.build_candidates(
         models,
         make_args(discount=True),
         {"acme/discounted": 0.5},
-        {"acme/discounted"},
-        zdr_strict_ids={"acme/discounted"},
+        {"acme/discounted", "acme/normal"},
+        zdr_strict_ids={"acme/discounted", "acme/normal"},
     )
-    assert [c["id"] for c in candidates] == ["acme/discounted"]
-    assert dropped["no discount"] == 1
+    assert [c["id"] for c in candidates] == ["acme/discounted", "acme/normal"]
+    assert dropped == {}
     assert candidates[0]["discount"] == 0.5
-
-
-def test_build_candidates_discount_filter_without_data_drops_all():
-    models = [make_model()]
-    candidates, dropped = mc.build_candidates(
-        models,
-        make_args(discount=True),
-        {},
-        {"acme/model-a"},
-        zdr_strict_ids={"acme/model-a"},
-    )
-    assert candidates == []
-    assert dropped["no discount"] == 1
-
-
-def test_build_candidates_discount_filter_ignores_negligible_discount():
-    models = [make_model(id="acme/sliver")]
-    candidates, dropped = mc.build_candidates(
-        models,
-        make_args(discount=True),
-        {"acme/sliver": 0.004},
-        {"acme/sliver"},
-        zdr_strict_ids={"acme/sliver"},
-    )
-    assert candidates == []
-    assert dropped["no discount"] == 1
 
 
 def test_build_candidates_stores_discount():
@@ -5360,6 +5689,34 @@ def stub_frontend(monkeypatch, calls, base_payload, zdr_payload=None):
         return base_payload
 
     monkeypatch.setattr(mc, "fetch_json", fake_fetch)
+
+
+def test_fetch_openrouter_frontend_refetches_cold_reasoning_cache(
+    monkeypatch, tmp_path
+):
+    # Discounts, AA and endpoint policy warm but the reasoning projection
+    # missing: the base URL must still be fetched, or every model loses its
+    # reasoning metadata for the run.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    mc.save_cache(mc.FRONTEND_DISCOUNTS_CACHE, {"acme/a": 0.5})
+    mc.save_cache(mc.FRONTEND_AA_CACHE, {"acme/a": {"intelligence_index": 50.0}})
+    mc.save_cache(
+        mc.FRONTEND_ENDPOINT_POLICY_CACHE,
+        mc._endpoint_policy_cache_rows(
+            {
+                ("acme/a", "acme"): {
+                    "byok_only": False,
+                    "moderation_required": False,
+                    "deranked": False,
+                    "training": False,
+                }
+            }
+        ),
+    )
+    calls = []
+    stub_frontend(monkeypatch, calls, frontend_payload())
+    mc.fetch_openrouter_frontend(make_args(no_cache=False, cache_ttl=3600, no_zdr=True))
+    assert mc.OPENROUTER_DISCOUNTS_URL in calls
 
 
 def test_fetch_openrouter_frontend_derives_all_payloads(monkeypatch, tmp_path):
@@ -5895,7 +6252,8 @@ def test_apply_endpoint_pricing_uses_baseline_new_fields(monkeypatch):
                 "input_cache_write": "0.00000125",
                 "overrides": [],
             },
-            "context_length": 1_000_000,
+            "context_length": 2_000_000,
+            "max_prompt_tokens": 1_500_000,
             "max_completion_tokens": 943718,
             "status": 0,
             "service_tier": None,
@@ -5914,6 +6272,7 @@ def test_apply_endpoint_pricing_uses_baseline_new_fields(monkeypatch):
     candidates, _ = mc.apply_endpoint_pricing(candidates, args, [])
     cand = candidates[0]
     assert cand["max_output_tokens"] == 943718
+    assert cand["baseline_context"] == 1_500_000
     assert cand["cache_read_per_1m"] == pytest.approx(0.005)
     assert cand["cache_write_per_1m"] == pytest.approx(1.25)
     assert cand["base_cache_read_per_1m"] == pytest.approx(0.005)
@@ -6133,6 +6492,21 @@ def test_fetch_openrouter_frontend_aa_cache_hit_skips_base_fetch(monkeypatch, tm
             }
         )
     )
+    (cache_dir / "openrouter-frontend-reasoning-v1.json").write_text(
+        json.dumps(
+            {
+                "fetched_at": time.time(),
+                "payload": [
+                    {
+                        "slug": "acme/a",
+                        "permaslug": "acme/a-20260901",
+                        "supports_reasoning": False,
+                        "reasoning_config": {},
+                    }
+                ],
+            }
+        )
+    )
     (
         discounts,
         zdr_ids,
@@ -6146,9 +6520,9 @@ def test_fetch_openrouter_frontend_aa_cache_hit_skips_base_fetch(monkeypatch, tm
     assert discounts == {"acme/a": 0.5}
     assert aa_by_id == {"acme/a": {"intelligence_index": 57.5}}
     assert cache_hits == {"discounts", "aa", "endpoint_policy"}
-    # A warm discounts+AA cache predating the reasoning cache does not
-    # trigger a base refetch; the fallback self-heals when the TTL expires.
-    assert frontend_models == []
+    # Every base-payload slice must be warm before the base fetch is
+    # skipped; a cold reasoning cache forces a refetch (see the test above).
+    assert frontend_models[0]["slug"] == "acme/a"
 
 
 @pytest.mark.parametrize(
@@ -6380,6 +6754,19 @@ def test_compute_scores_quality_ref_clamps():
     candidates = [_cand("a/x", 1.0)]
     mc.compute_scores(candidates, make_args(quality_ref=70.0), {"a/x": 140.0})
     assert candidates[0]["quality_score"] == 1.0
+
+
+def test_compute_scores_uses_baseline_context_below_catalog():
+    args = make_args(min_context=1_000_000)
+    cand = {
+        "id": "acme/a",
+        "context": 2_000_000,
+        "baseline_context": 1_000_000,
+        "blended": 1.0,
+        "age_days": 1.0,
+    }
+    mc.compute_scores([cand], args, {})
+    assert cand["context_score"] == 0.0
 
 
 def test_compute_scores_context_score_bounds():
@@ -6876,6 +7263,8 @@ def test_build_aa_benchmarks_invalid_trio_skipped():
         "acme/null": {"aa": {"intelligence_index": None}},
         "acme/nan": {"aa": {"intelligence_index": float("nan")}},
         "acme/inf": {"aa": {"intelligence_index": float("inf")}},
+        "acme/negative": {"aa": {"intelligence_index": -1}},
+        "acme/over": {"aa": {"intelligence_index": 101}},
         "acme/valid": {"aa": {"intelligence_index": 42}},
     }
     assert mc.build_aa_benchmarks(benchmarks, []) == {
@@ -7648,6 +8037,16 @@ def test_aa_api_parses_documented_shape(monkeypatch):
     monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
     entries, _ = mc.aa_api_entries("dummy-key")
     assert _without_as_of(entries) == [aa_entry("acme/a", "A", 42.5)]
+
+
+@pytest.mark.parametrize("bad", [-1, 101, 1e9])
+def test_aa_api_rejects_out_of_range_index(monkeypatch, bad):
+    payload = aa_page(
+        [aa_item("acme/bad", "Bad", bad), aa_item("acme/good", "Good", 42)]
+    )
+    monkeypatch.setattr(mc, "fetch_json", lambda *a, **k: payload)
+    entries, _ = mc.aa_api_entries("dummy-key")
+    assert [entry["key"] for entry in entries] == ["acme/good"]
 
 
 def test_aa_api_entries_carry_effort_creator_and_cost(monkeypatch):
@@ -12137,6 +12536,85 @@ def test_parse_args_accepts_catalog_alone():
     assert args.catalog is True
 
 
+def test_parse_args_rejects_best_with_json(capsys):
+    with pytest.raises(SystemExit) as exc:
+        mc.parse_args(["--best", "--json"])
+    assert exc.value.code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--quality-ref", "nan"],
+        ["--recency-half-life", "nan"],
+        ["--max-age-days", "-1"],
+    ],
+)
+def test_parse_args_rejects_nonfinite_or_negative_numeric_flags(argv, capsys):
+    with pytest.raises(SystemExit) as exc:
+        mc.parse_args(argv)
+    assert exc.value.code == 2
+    assert "must" in capsys.readouterr().err
+
+
+def test_main_returns_0_on_broken_pipe(monkeypatch):
+    monkeypatch.setattr(mc, "fetch_openrouter_models", lambda args: ([], False))
+    monkeypatch.setattr(mc, "_silence_stdout_after_broken_pipe", lambda: None)
+    monkeypatch.setattr(
+        mc,
+        "run",
+        lambda *args: (_ for _ in ()).throw(BrokenPipeError()),
+    )
+    assert mc.main([]) == 0
+
+
+def test_run_table_broken_pipe_silences_stdout(monkeypatch):
+    models = [make_model(id="acme/model-a")]
+    _stub_quality_run(monkeypatch, models)
+    silenced = []
+    monkeypatch.setattr(
+        mc, "_silence_stdout_after_broken_pipe", lambda: silenced.append(True)
+    )
+    monkeypatch.setattr(
+        mc,
+        "print_table",
+        lambda *args, **kwargs: (_ for _ in ()).throw(BrokenPipeError()),
+    )
+    assert mc.run(make_args(no_pager=True), models, False) == 0
+    assert silenced == [True]
+
+
+def test_main_flushes_stdout_and_silences_late_broken_pipe(monkeypatch):
+    monkeypatch.setattr(mc, "fetch_openrouter_models", lambda args: ([], False))
+    monkeypatch.setattr(mc, "run", lambda *args: 0)
+    silenced = []
+    monkeypatch.setattr(
+        mc, "_silence_stdout_after_broken_pipe", lambda: silenced.append(True)
+    )
+
+    class BrokenStdout:
+        def flush(self):
+            raise BrokenPipeError()
+
+        def write(self, value):
+            return len(value)
+
+    monkeypatch.setattr(mc.sys, "stdout", BrokenStdout())
+    assert mc.main([]) == 0
+    assert silenced == [True]
+
+
+def test_main_returns_130_on_keyboard_interrupt(monkeypatch):
+    monkeypatch.setattr(mc, "fetch_openrouter_models", lambda args: ([], False))
+    monkeypatch.setattr(
+        mc,
+        "run",
+        lambda *args: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    assert mc.main([]) == 130
+
+
 def test_parse_args_no_pager_flag():
     assert mc.parse_args(["--no-pager"]).no_pager is True
     assert mc.parse_args([]).no_pager is False
@@ -12212,6 +12690,13 @@ def test_fetch_json_retries_urlerror_once(monkeypatch):
 
     attempts = _counting_http_get(monkeypatch, urllib.error.URLError("down"))
     with pytest.raises(urllib.error.URLError):
+        mc.fetch_json("https://example.test/")
+    assert len(attempts) == 2
+
+
+def test_fetch_json_retries_truncated_body_once(monkeypatch):
+    attempts = _counting_http_get(monkeypatch, EOFError("truncated"))
+    with pytest.raises(EOFError):
         mc.fetch_json("https://example.test/")
     assert len(attempts) == 2
 
@@ -14855,6 +15340,24 @@ def test_off_peak_deals_sorts_caps_and_drops_zero_rounding():
     assert ids == ["acme/b", "acme/d", "acme/a"]
 
 
+def test_off_peak_deals_drop_candidate_deals_pricier_than_quote():
+    schedules = [
+        {
+            "id": "acme/ranked",
+            "max_discount": 0.5,
+            "offpeak": {"blended_per_1m": 0.30},
+        },
+        {
+            "id": "acme/schedule-only",
+            "max_discount": 0.5,
+            "offpeak": {"blended_per_1m": 0.30},
+        },
+    ]
+    candidates = [{"id": "acme/ranked", "blended": 0.10}]
+    rows = mc.deals_beat_quoted_baseline(schedules, candidates)
+    assert [row["id"] for row in rows] == ["acme/schedule-only"]
+
+
 def test_off_peak_deals_caps_at_ten():
     schedules = [{"id": f"acme/m{i}", "max_discount": 0.1 + i / 100} for i in range(15)]
     assert len(mc.off_peak_deals(schedules)) == 10
@@ -14975,6 +15478,134 @@ def test_run_off_peak_appends_deals(monkeypatch, capsys):
     assert out.count("acme/deal") == 1  # deals row, not a main-table row
 
 
+def test_require_quality_filters_unscored_models(monkeypatch, capsys):
+    stamp = "2026-10-23T13:15:00Z"
+    models = [
+        make_model(id="acme/scored", name="Acme: Scored"),
+        make_model(id="acme/unscored", name="Acme: Unscored"),
+    ]
+    catalog = {
+        "by_id": {
+            "acme/scored": {
+                "index": 50.0,
+                "source": "aa",
+                "as_of": stamp,
+                "effort": "none",
+            }
+        },
+        "depths_by_id": {
+            "acme/scored": {
+                "default_effort": "none",
+                "depths": {"none": {"effort": "none", "index": 50.0, "as_of": stamp}},
+            }
+        },
+        "schedules_by_id": {},
+    }
+    _stub_quality_run(monkeypatch, models, catalog=catalog)
+    assert mc.run(make_args(require_quality=True), models, False) == 0
+    out = capsys.readouterr().out
+    assert "acme/scored" in out
+    assert "acme/unscored" not in out
+
+
+def test_require_quality_empty_pool_exits_2(monkeypatch, capsys):
+    models = [make_model(id="acme/unscored")]
+    _stub_quality_run(monkeypatch, models, catalog={"by_id": {}})
+    assert mc.run(make_args(require_quality=True), models, False) == 2
+    assert "require-quality" in capsys.readouterr().err
+
+
+def test_run_off_peak_uses_published_schedule_quality(monkeypatch, capsys):
+    # A schedule-only reasoning model must use the published schedule row,
+    # not OpenRouter's unscoped benchmark trio (which has no effort label).
+    stamp = "2026-10-23T13:15:00Z"
+    models = [
+        make_model(id="acme/plain"),
+        make_model(
+            id="acme/reasoner",
+            pricing=deepseek_pricing(),
+            context_length=262144,
+            reasoning={"supported_efforts": ["high"], "default_effort": "high"},
+        ),
+    ]
+    catalog = {
+        "by_id": {},
+        "depths_by_id": {},
+        "schedules_by_id": {
+            "acme/reasoner": {
+                "quality": 42.0,
+                "quality_effort": "high",
+                "quality_source": "aa",
+                "quality_as_of": stamp,
+            }
+        },
+    }
+    _stub_quality_run(
+        monkeypatch,
+        models,
+        catalog=catalog,
+        or_bench={"acme/reasoner": {"intelligence_index": 99.0, "as_of": stamp}},
+    )
+    assert mc.run(make_args(off_peak=True, min_context=1_000_000), models, False) == 0
+    out = capsys.readouterr().out
+    deal = next(line for line in out.splitlines() if line.startswith("acme/reasoner"))
+    assert "42.0" in deal
+    assert "99.0" not in deal
+
+
+def test_run_off_peak_honors_requested_effort(monkeypatch, capsys):
+    # The depth-aware path selects the requested effort from the catalog
+    # depths; the legacy fallback would leak the OR trio instead.
+    stamp = "2026-10-23T13:15:00Z"
+    models = [
+        make_model(
+            id="acme/ranked",
+            reasoning={"supported_efforts": ["high", "low"], "default_effort": "low"},
+        ),
+        make_model(
+            id="acme/reasoner",
+            pricing=deepseek_pricing(),
+            context_length=262144,
+            reasoning={"supported_efforts": ["high", "low"], "default_effort": "high"},
+        ),
+    ]
+    catalog = {
+        "by_id": {},
+        "depths_by_id": {
+            "acme/reasoner": {
+                "default_effort": "high",
+                "depths": {
+                    "high": {"effort": "high", "index": 42.0, "as_of": stamp},
+                    "low": {"effort": "low", "index": 11.0, "as_of": stamp},
+                },
+            }
+        },
+        "schedules_by_id": {},
+    }
+    _stub_quality_run(
+        monkeypatch,
+        models,
+        catalog=catalog,
+        or_bench={"acme/reasoner": {"intelligence_index": 99.0, "as_of": stamp}},
+    )
+    assert (
+        mc.run(
+            make_args(
+                off_peak=True,
+                min_context=1_000_000,
+                reasoning_effort="low",
+            ),
+            models,
+            False,
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    deal = next(line for line in out.splitlines() if line.startswith("acme/reasoner"))
+    assert "11.0" in deal
+    assert "99.0" not in deal
+
+
 def test_run_off_peak_empty_state(monkeypatch, capsys):
     models = [make_model(id="acme/plain")]
     _stub_quality_run(monkeypatch, models, aa_raises=True)
@@ -15077,9 +15708,10 @@ def test_run_off_peak_non_candidate_deal_keeps_resolved_quality(monkeypatch, cap
     args = make_args(off_peak=True, bare=True, min_context=1_000_000)
     assert mc.run(args, models, False) == 0
     lines = capsys.readouterr().out.splitlines()
-    ranked = next(line for line in lines if line.startswith("acme/ranked"))
+    # The ranked model's deal is pricier than its quote, so it is filtered
+    # from the deals table; its main-table row keeps the resolved quality.
+    assert any("acme/ranked" in line and "41.0" in line for line in lines)
     sched_only = next(line for line in lines if line.startswith("acme/sched-only"))
-    assert "41.0" in ranked
     assert "30.0" in sched_only
 
 
@@ -15130,6 +15762,19 @@ def test_run_balanced_score_matches_between_main_and_deals(monkeypatch, capsys):
         catalog=catalog,
         aa_raises=True,
         frontend_models=_non_reasoning_frontend(models),
+    )
+    # Keep the deal cheaper than the quote so the score-parity test still
+    # exercises both tables after the pricier-than-quote filter.
+    monkeypatch.setattr(
+        mc,
+        "fetch_model_endpoints",
+        lambda mid, a: [
+            _endpoint(
+                context_length=2_000_000,
+                max_prompt_tokens=2_000_000,
+                pricing={"prompt": "0.000001", "completion": "0.000002"},
+            )
+        ],
     )
     assert mc.run(make_args(off_peak=True, min_context=1_000_000), models, False) == 0
     rows = [
@@ -16053,13 +16698,25 @@ def test_help_is_offered_to_the_pager(monkeypatch, capsys):
 
 
 def test_no_pager_also_suppresses_the_help_pager(monkeypatch, capsys):
-    # --help fires mid-parse, so the parser carries the request itself; the
-    # option therefore has to come before --help, like any option that exits.
+    # --help fires mid-parse, so the parser carries the request itself.
     offered = []
     monkeypatch.setattr(
         mc, "page_help", lambda text, stream: offered.append(text) or True
     )
     with pytest.raises(SystemExit):
         mc.parse_args(["--no-pager", "--help"])
+    assert offered == []
+    assert "usage: model_compare.py" in capsys.readouterr().out
+
+
+def test_no_pager_after_help_also_suppresses_the_help_pager(monkeypatch, capsys):
+    # Argument order must not matter: the flag is pre-scanned before argparse
+    # can exit on --help.
+    offered = []
+    monkeypatch.setattr(
+        mc, "page_help", lambda text, stream: offered.append(text) or True
+    )
+    with pytest.raises(SystemExit):
+        mc.parse_args(["--help", "--no-pager"])
     assert offered == []
     assert "usage: model_compare.py" in capsys.readouterr().out

@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,9 @@ class _FakeResp:
     def read(self) -> bytes:
         return self._payload
 
+    def geturl(self):
+        return "https://x/history.json"
+
     def __enter__(self):
         return self
 
@@ -30,6 +34,9 @@ class _FakeResp:
 class _TruncatedResp:
     def read(self):
         raise http.client.IncompleteRead(b"part", 10)
+
+    def geturl(self):
+        return "https://x/history.json"
 
     def __enter__(self):
         return self
@@ -77,6 +84,9 @@ def _write_litellm_artifacts(out_dir, stamp=STAMP, merged_state="skipped"):
     rate_bytes = b"{}\n"
     (out_dir / "litellm_rate_card.json").write_bytes(rate_bytes)
     rate_hash = hashlib.sha256(rate_bytes).hexdigest()
+    merged_bytes = b"{}\n" if merged_state in ("ok", "frozen") else None
+    if merged_bytes is not None:
+        (out_dir / "litellm.json").write_bytes(merged_bytes)
     steering = {
         "_meta": {
             "schema_version": 1,
@@ -92,8 +102,12 @@ def _write_litellm_artifacts(out_dir, stamp=STAMP, merged_state="skipped"):
     merged = {
         "status": merged_state,
         "reason": "no_previous_map" if merged_state == "skipped" else None,
-        "sha256": None,
-        "entries": None,
+        "sha256": (
+            hashlib.sha256(merged_bytes).hexdigest()
+            if merged_bytes is not None
+            else None
+        ),
+        "entries": len(json.loads(merged_bytes)) if merged_bytes is not None else None,
         "rate_card_sha256": rate_hash,
     }
     status = {
@@ -199,6 +213,7 @@ def _fake_run(
     best=BEST,
     aa=HEALTHY_AA,
     pool=HEALTHY_POOL,
+    merged_state="skipped",
 ):
     def fake_run(
         cmd,
@@ -235,7 +250,10 @@ def _fake_run(
         if "--best" in cmd:
             return emit(best + "\n")
         if Path(cmd[1]).name == "build_litellm_artifacts.py":
-            _write_litellm_artifacts(Path(cmd[cmd.index("--output-dir") + 1]))
+            _write_litellm_artifacts(
+                Path(cmd[cmd.index("--output-dir") + 1]),
+                merged_state=merged_state,
+            )
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     return fake_run
@@ -258,11 +276,11 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
         "model_compare.py",  # quality --json --top 20
         "generate_highlights.py",
         "build_litellm_artifacts.py",
+        "model_compare.py",  # --catalog --no-zdr (All providers detail)
+        "build_site_data.py",  # --validate-catalog catalog-nonzdr.json
         "model_compare.py",  # balanced --no-zdr (All providers rows)
         "model_compare.py",  # price --no-zdr
         "model_compare.py",  # quality --no-zdr
-        "model_compare.py",  # --catalog --no-zdr (All providers detail)
-        "build_site_data.py",  # --validate-catalog catalog-nonzdr.json
         "build_site_data.py",  # the data.json build
     ]
     assert "--catalog" in calls[0]
@@ -319,25 +337,25 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
     bsd_cmd = next(
         cmd
         for cmd in calls
-        if Path(cmd[1]).name == "build_site_data.py"
-        and "--validate-catalog" not in cmd
+        if Path(cmd[1]).name == "build_site_data.py" and "--validate-catalog" not in cmd
     )
-    assert bsd_cmd[2:12:2] == [
+    assert bsd_cmd[2:14:2] == [
         "--best-file",
         "--output",
         "--catalog-file",
+        "--nonzdr-catalog-file",
         "--history-prev-file",
         "--highlights-file",
     ]
-    bsd_paths = [Path(p) for p in bsd_cmd[3:13:2]]
-    assert bsd_paths[0] == out / "best.txt"
-    assert bsd_paths[1] == out / "data.json"
-    assert bsd_paths[2].parent == gh_paths[0].parent  # shared scratch dir
-    assert bsd_cmd[12:14] == ["--revision", STUB_REV]
-    tail = bsd_cmd[14:]
-    priority_values = [
-        tail[i + 1] for i, arg in enumerate(tail) if arg == "--priority"
-    ]
+    bsd_paths = [Path(p) for p in bsd_cmd[3:15:2]]
+    scratch_dir = gh_paths[0].parent
+    assert bsd_paths[0] == scratch_dir / "best.txt"
+    assert bsd_paths[1] == scratch_dir / "data.json"
+    assert bsd_paths[2] == scratch_dir / "catalog.json"
+    assert bsd_paths[3] == scratch_dir / "catalog-nonzdr.json"
+    assert bsd_cmd[14:16] == ["--revision", STUB_REV]
+    tail = bsd_cmd[16:]
+    priority_values = [tail[i + 1] for i, arg in enumerate(tail) if arg == "--priority"]
     nonzdr_values = [
         tail[i + 1] for i, arg in enumerate(tail) if arg == "--nonzdr-priority"
     ]
@@ -355,6 +373,45 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
         Path(p.split("=", 1)[1]).parent == gh_paths[0].parent
         for p in priority_values + nonzdr_values
     )
+
+
+def test_build_site_deploys_ok_merged_litellm_map(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run(calls, merged_state="ok"))
+    monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
+    out = tmp_path / "site"
+    publish.build_site(out)
+    assert (out / "litellm.json").is_file()
+    assert json.loads((out / "litellm.json").read_text()) == {}
+
+
+def test_build_site_degrades_when_litellm_upstream_fails(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run(calls))
+
+    def fetch(url):
+        if url == publish.LITELLM_UPSTREAM_URL:
+            raise RuntimeError("upstream down")
+        return None
+
+    monkeypatch.setattr(publish, "fetch_prev", fetch)
+    out = tmp_path / "site"
+    publish.build_site(out)
+    assert (out / "data.json").is_file()
+
+
+def test_build_site_aborts_when_previous_history_fails(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(publish.subprocess, "run", _fake_run(calls))
+
+    def fetch(url):
+        if url == publish.PREV_HISTORY_URL:
+            raise RuntimeError("previous artifact unavailable")
+        return None
+
+    monkeypatch.setattr(publish, "fetch_prev", fetch)
+    with pytest.raises(RuntimeError, match="previous artifact"):
+        publish.build_site(tmp_path / "site")
 
 
 def test_run_validate_catalog_rejects_a_malformed_document(tmp_path):
@@ -397,7 +454,7 @@ def test_fetch_prev_retries_transient_failures(monkeypatch):
             raise urllib.error.URLError("transient")
         return _FakeResp(b"cached")
 
-    monkeypatch.setattr(publish.urllib.request, "urlopen", flaky)
+    monkeypatch.setattr(publish, "_open_prev", flaky)
     monkeypatch.setattr(publish.time, "sleep", sleeps.append)
     assert publish.fetch_prev("https://x/history.json") == b"cached"
     assert len(attempts) == 3
@@ -411,27 +468,62 @@ def test_fetch_prev_gives_up_after_attempts(monkeypatch):
         attempts.append(1)
         raise urllib.error.URLError("down")
 
-    monkeypatch.setattr(publish.urllib.request, "urlopen", down)
+    monkeypatch.setattr(publish, "_open_prev", down)
     monkeypatch.setattr(publish.time, "sleep", lambda s: None)
-    assert publish.fetch_prev("https://x/history.json") is None
+    with pytest.raises(RuntimeError, match="previous artifact"):
+        publish.fetch_prev("https://x/history.json")
     assert len(attempts) == 3
 
 
 def test_fetch_prev_handles_truncated_body(monkeypatch):
-    monkeypatch.setattr(
-        publish.urllib.request, "urlopen", lambda req, timeout=None: _TruncatedResp()
-    )
+    attempts = []
+
+    def truncated(req, timeout=None):
+        attempts.append(1)
+        return _TruncatedResp()
+
+    monkeypatch.setattr(publish, "_open_prev", truncated)
+    monkeypatch.setattr(publish.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="previous artifact"):
+        publish.fetch_prev("https://x/history.json")
+    assert len(attempts) == 3
+
+
+def test_fetch_prev_returns_none_on_404(monkeypatch):
+    def missing(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "https://x/history.json", 404, "not found", {}, None
+        )
+
+    monkeypatch.setattr(publish, "_open_prev", missing)
     monkeypatch.setattr(publish.time, "sleep", lambda s: None)
     assert publish.fetch_prev("https://x/history.json") is None
 
 
-def test_fetch_prev_returns_none_on_error(monkeypatch):
+def test_fetch_prev_raises_on_transient_error(monkeypatch):
     def boom(req, timeout=None):
         raise urllib.error.URLError("unreachable")
 
-    monkeypatch.setattr(publish.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(publish, "_open_prev", boom)
     monkeypatch.setattr(publish.time, "sleep", lambda s: None)
-    assert publish.fetch_prev("http://127.0.0.1:9/history.json") is None
+    with pytest.raises(RuntimeError, match="previous artifact"):
+        publish.fetch_prev("https://x/history.json")
+
+
+def test_fetch_prev_rejects_plaintext_redirect(monkeypatch):
+    handler = publish._HTTPSOnlyRedirectHandler()
+    req = urllib.request.Request(
+        "https://canonical.github.io/model-compare/history.json"
+    )
+    with pytest.raises(urllib.error.URLError, match="non-HTTPS"):
+        handler.redirect_request(
+            req,
+            None,
+            301,
+            "Moved",
+            {},
+            "http://model-compare.dev/history.json",
+        )
 
 
 def test_fetch_success_feeds_prev_files_to_generators(tmp_path, monkeypatch):
@@ -671,26 +763,20 @@ def test_endpoint_drop_rate_gate_accepts_the_live_capability_drops(tmp_path):
     # The live ZDR pool: 31 of 87 entered models have no endpoint that meets
     # the 1M prompt/tool/policy gates. That is expected filtering, not a wipe.
     path = tmp_path / "catalog.json"
-    path.write_text(
-        json.dumps(_pool_catalog(candidates=56, no_baseline=31))
-    )
+    path.write_text(json.dumps(_pool_catalog(candidates=56, no_baseline=31)))
     publish.check_endpoint_drops(path)
 
 
 def test_endpoint_drop_rate_gate_fails_on_fetch_churn(tmp_path):
     path = tmp_path / "catalog.json"
-    path.write_text(
-        json.dumps(_pool_catalog(candidates=90, fetch_failed=6))
-    )
+    path.write_text(json.dumps(_pool_catalog(candidates=90, fetch_failed=6)))
     with pytest.raises(RuntimeError, match="endpoint fetches dropped"):
         publish.check_endpoint_drops(path)
 
 
 def test_endpoint_drop_rate_gate_fails_on_semantic_mass_drop(tmp_path):
     path = tmp_path / "catalog.json"
-    path.write_text(
-        json.dumps(_pool_catalog(candidates=20, no_baseline=80))
-    )
+    path.write_text(json.dumps(_pool_catalog(candidates=20, no_baseline=80)))
     with pytest.raises(RuntimeError, match="endpoint stage dropped"):
         publish.check_endpoint_drops(path)
 
@@ -1449,18 +1535,14 @@ def test_nonzdr_catalog_rejects_a_zdr_sourced_artifact(tmp_path):
 
 def test_nonzdr_catalog_rejects_a_wipe(tmp_path):
     path = tmp_path / "catalog-nonzdr.json"
-    path.write_text(
-        json.dumps(_nonzdr_catalog(1, no_baseline_eligible_endpoint=3))
-    )
+    path.write_text(json.dumps(_nonzdr_catalog(1, no_baseline_eligible_endpoint=3)))
     with pytest.raises(RuntimeError, match="50%"):
         publish.check_nonzdr_catalog(path)
 
 
 def test_nonzdr_catalog_accepts_the_live_rate(tmp_path):
     path = tmp_path / "catalog-nonzdr.json"
-    path.write_text(
-        json.dumps(_nonzdr_catalog(11, no_baseline_eligible_endpoint=4))
-    )
+    path.write_text(json.dumps(_nonzdr_catalog(11, no_baseline_eligible_endpoint=4)))
     publish.check_nonzdr_catalog(path)
 
 

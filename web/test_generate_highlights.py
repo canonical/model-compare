@@ -367,6 +367,37 @@ def test_reuses_recent_llm_output(monkeypatch, tmp_path):
     assert written["generated_at"] == prev["generated_at"]
 
 
+def test_reuses_recent_llm_output_with_z_timestamp(monkeypatch, tmp_path):
+    # The published artifact may stamp generated_at with a trailing Z;
+    # fromisoformat before Python 3.11 rejects it.
+    prev = make_prev_highlights(
+        "openrouter",
+        datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    prev_file = tmp_path / "prev.json"
+    prev_file.write_text(json.dumps(prev))
+    monkeypatch.setattr(
+        gh, "generate_with_llm", lambda *a, **k: pytest.fail("must not call LLM")
+    )
+    out = tmp_path / "out.json"
+    assert (
+        gh.main(
+            [
+                "--catalog",
+                str(_write_catalog(tmp_path)),
+                "--history",
+                str(_write_empty_history(tmp_path)),
+                "--prev-highlights",
+                str(prev_file),
+                "--output",
+                str(out),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(out.read_text())["sections"] == prev["sections"]
+
+
 def test_regenerates_fallback_output_regardless_of_age(monkeypatch, tmp_path):
     prev = make_prev_highlights("fallback", "2026-08-01T00:00:00+00:00")
     prev_file = tmp_path / "prev.json"

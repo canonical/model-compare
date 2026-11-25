@@ -25,7 +25,7 @@ Practical setup examples (including OpenAI SDK `extra_body` steering and LiteLLM
 
 ## Run the CLI
 
-`model_compare.py` needs only Python 3.10+ (standard library, zero third-party packages):
+`model_compare.py` needs only Python 3.12+ (standard library, zero third-party packages):
 
 ```console
 $ ./model_compare.py                          # top 5, balanced
@@ -36,7 +36,7 @@ $ ./model_compare.py --off-peak --depths      # include off-peak deals and per-d
 $ ./model_compare.py --safety-retention google  # match the published site
 ```
 
-Exit codes: `0` on success, `1` on network/fetch failure, `2` when no models survive the filters, and `130` on `Ctrl-C`.
+Exit codes: `0` on success, `1` on network/fetch failure, `2` when no models survive the filters or argparse rejects the command line, and `130` on `Ctrl-C`. A closed stdout pipe (for example `| head`) is treated as success.
 
 A typical terminal run (illustrative numbers, legend footer omitted; summary lines go to `stderr`, the table to `stdout`, paged automatically through `$PAGER` — default `less` — when output exceeds one screen):
 
@@ -64,7 +64,7 @@ RANK  MODEL               DEPTH  QUAL  $IN/M  $OUT/M  DISC  PREC  TIER   CTX    
 | `--json` | off | Print the ranked candidates as JSON (includes per-model `steering` blocks) |
 | `--catalog` | off | Print the full evaluation (ranked candidates, filtered models with reasons, schedules, and per-priority rankings) as one JSON document |
 | `--detail {simple,expert}` | `expert` | Table density (`simple` hides `DEPTH`, `PREC`, `TIER`, `CTX`, and `SCORE`) |
-| `--off-peak` | off | Append a second table of scheduled off-peak discounts |
+| `--off-peak` | off | Append a second table of up to 10 scheduled off-peak deals, ranked by discount size; deals use the models-API schedule price, not the endpoint quote, and a ranked model's deal is hidden when it is pricier than its quote |
 | `--depths` | off | Print per-effort benchmark scores, task costs, and `#<effort>` suffixes below the table |
 | `--bare` | off | Print only the table(s), omitting summaries and legends |
 | `--color {auto,on,off}` | `auto` | ANSI color mode (`auto` respects `NO_COLOR` and TTY detection) |
@@ -84,7 +84,8 @@ RANK  MODEL               DEPTH  QUAL  $IN/M  $OUT/M  DISC  PREC  TIER   CTX    
 | `--no-require-tools` | off | Include models that don't support tool/function calling |
 | `--exclude-free` | off | Drop zero-cost/free models (`:free` listings and other zero-priced candidates) |
 | `--include-batch` | off | Keep asynchronous `:batch` variants (requires `--no-zdr` in practice) |
-| `--discount` | off | List only models with an active discount |
+| `--discount` | off | List only models whose **quoted endpoint** has an active discount |
+| `--require-quality` | off | Rank only models with a measured quality score (drops `QUAL=-` models) |
 | `--aa-api-key KEY` | `$AA_API_KEY` | Artificial Analysis API key (free at [artificialanalysis.ai](https://artificialanalysis.ai)); without one, local runs hydrate quality from `model-compare.dev/catalog.json` |
 | `--openrouter-api-key KEY` | `$OPENROUTER_API_KEY` | OpenRouter API key (optional; lets `--json` and `--catalog` include OpenRouter's session-cost medians) |
 | `--no-cache` / `--cache-ttl S` | `21600` (`6h`) | Bypass or adjust the local HTTP response cache |
@@ -103,8 +104,8 @@ The published site has a **ZDR view** (the default) and an **All providers** vie
 
 Surviving models are scored across four normalized dimensions — **quality**, **price**, **context headroom**, and **listing age**:
 
-- **Quality (`QUAL` and `DEPTH`):** sourced from the Artificial Analysis intelligence index (`0`–`100`). With `AA_API_KEY` set, scores come straight from the live AA v2 API; without a key, local runs hydrate from [`model-compare.dev/catalog.json`](https://model-compare.dev/catalog.json) so your terminal matches the website out of the box. Because reasoning models score differently depending on thinking budget, each model is scored at its **best measured depth that OpenRouter lets you select** (shown in `DEPTH`).
-- **Endpoint pricing and steering (`PREC` and `TIER`):** one model ID on OpenRouter is often hosted by multiple providers at different quantizations and service tiers. Rather than trusting OpenRouter's headline number, `model_compare.py` quotes the **cheapest baseline-eligible standard-tier endpoint** at the **1M-token prompt tier**, blended 75% input / 25% output. Eligibility is endpoint-level: the quote must itself be ZDR-admitted, advertise the required tools and prompt context, and — when OpenRouter's frontend reports the endpoint's policy — be callable without a BYOK key unless `--byok` is set; a deranked endpoint is skipped while a better default route exists; a provider that trains on prompts is not ZDR; and moderation-required endpoints can be excluded with `--no-moderation`. That quote is a standard-tier **floor**, not a bill prediction: a plain request never reaches Flex or ultrafast endpoints (nor a closed-weight model's priority endpoint), but OpenRouter may serve an unsteered open-weight request from a priority endpoint at a higher rate. Pass the per-model `steering` block from `--json` or `catalog.json` to pin routing — it ignores every tier endpoint outside `order`, removing that exposure. Flex is never quoted unless you pass `--flex`. A trailing `!` on `PREC` warns that OpenRouter's unsteered routing would send most traffic to cheaper, more heavily quantized providers.
+- **Quality (`QUAL` and `DEPTH`):** sourced from the Artificial Analysis intelligence index (`0`–`100`). With `AA_API_KEY` set, scores come straight from the live AA v2 API; without a key, local runs hydrate from [`model-compare.dev/catalog.json`](https://model-compare.dev/catalog.json) so your terminal matches the website out of the box. Because reasoning models score differently depending on thinking budget, each model is scored at its **best measured depth that OpenRouter lets you select** (shown in `DEPTH`). A model with no measurement keeps `QUAL=-`, takes a zero quality score, and still competes on price/context/age; `--require-quality` excludes those rows when you want a benchmarked shortlist.
+- **Endpoint pricing and steering (`PREC` and `TIER`):** one model ID on OpenRouter is often hosted by multiple providers at different quantizations and service tiers. Rather than trusting OpenRouter's headline number, `model_compare.py` quotes the **cheapest baseline-eligible standard-tier endpoint** at the **1M-token prompt tier**, blended 75% input / 25% output. Eligibility is endpoint-level: the quote must itself be ZDR-admitted, advertise the required tools and prompt context, and — when OpenRouter's frontend reports the endpoint's policy — be callable without a BYOK key unless `--byok` is set; a deranked endpoint is skipped while a better default route exists; a provider that trains on prompts is not ZDR; and moderation-required endpoints can be excluded with `--no-moderation`. That quote is a standard-tier **floor**, not a bill prediction: a plain request never reaches Flex or ultrafast endpoints (nor a closed-weight model's priority endpoint), but OpenRouter may serve an unsteered open-weight request from a priority endpoint at a higher rate. Pass the per-model `steering` block from `--json` or `catalog.json` to pin routing — it ignores every tier endpoint outside `order`, removing that exposure. Flex is never quoted unless you pass `--flex`. A trailing `!` on `PREC` warns that OpenRouter's unsteered routing would send most traffic to cheaper endpoints excluded specifically for precision or schedule reasons; ZDR, policy and context exclusions are not counted as quantization risk. `DISC` describes the quoted endpoint's own discount, not whichever endpoint the OpenRouter frontend features.
 
 For the full scoring formulas, quality-source reconciliation rules, `catalog.json` v6 schema contract, and LiteLLM integration internals, see [DESIGN.md](DESIGN.md) and the [site FAQ](https://model-compare.dev/faq.html). For the static site pipeline, see [web/README.md](web/README.md).
 

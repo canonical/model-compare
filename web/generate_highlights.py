@@ -546,7 +546,9 @@ def main(argv=None) -> int:
         ):
             return False
         try:
-            generated = datetime.fromisoformat(str(prev.get("generated_at")))
+            generated = datetime.fromisoformat(
+                str(prev.get("generated_at")).replace("Z", "+00:00")
+            )
             if generated.tzinfo is None:
                 generated = generated.replace(tzinfo=timezone.utc)
         except ValueError:

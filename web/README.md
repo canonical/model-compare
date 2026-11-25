@@ -36,7 +36,7 @@ $ web/preview.sh                # pull live JSON feeds from model-compare.dev (o
 $ web/preview.sh --build        # run the full publish.py pipeline locally instead
 ```
 
-Note that `--build` fetches previous history/highlights from the live site and, if `OPENROUTER_API_KEY` is set in your environment, may make one real OpenRouter call to generate prose highlights.
+Note that `--build` fetches previous history, highlights and LiteLLM artifacts from the live site, fetches the BerriAI upstream cost map, and (if `OPENROUTER_API_KEY` is set) tries up to five listed `:free` models for prose highlights before falling back to templates.
 
 ## Publishing pipeline
 
@@ -82,9 +82,12 @@ The `litellm-compat` workflow runs this suite on the Python version configured i
 
 `publish.py` builds two catalogs with the same schema: `catalog.json` (the
 default ZDR view) and `catalog-nonzdr.json` (the All-providers view, from one
-extra `--catalog --no-zdr --zdr-facts` run). The three extra
-`--json --top 20 --no-zdr --zdr-facts` runs supply `priorities_nonzdr` in
-`data.json`. `--zdr-facts` is the internal switch that fetches the ZDR policy
+extra `--catalog --no-zdr --zdr-facts` run). The All-providers catalog runs
+first and is passed to `build_site_data.py --nonzdr-catalog-file`; the three
+`--json --top 20 --no-zdr --zdr-facts` runs then supply `priorities_nonzdr`.
+The rows are reordered to that catalog's rankings, and a priority with no rows
+while the catalog ranks models fails the publish instead of shipping an empty
+tab. `--zdr-facts` is the internal switch that fetches the ZDR policy
 for display only: every row and catalog entry gets `zdr_status` (`strict`,
 `safety-retention`, `listed-unknown`, `not-listed`, or null when unavailable)
 so the site can badge the quote; the flag never gates a quote, and `--no-zdr`

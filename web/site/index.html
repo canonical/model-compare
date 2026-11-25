@@ -92,7 +92,8 @@
     </div>
 
     <p class="status" id="status" hidden></p>
-    <table id="table">
+    <div class="table-wrap">
+      <table id="table">
       <thead>
         <tr>
           <th title="Ranking position">RANK</th>
@@ -144,9 +145,10 @@
             TASK$
           </th>
         </tr>
-      </thead>
-      <tbody id="tbody"></tbody>
-    </table>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
 
     <div class="actions main-actions">
       <button type="button" id="expand-main" hidden>Show more</button>
@@ -156,9 +158,10 @@
       <h2>Off-peak deals</h2>
       <p class="hint" id="deals-intro" hidden>
         Models with scheduled discount windows, ranked by the size of the
-        discount<span class="mode-zdr-note" hidden> (ZDR view only)</span>.
+        discount<span class="mode-zdr-note" hidden> (SCORE from ZDR view)</span>.
       </p>
-      <table id="deals" hidden>
+      <div class="table-wrap">
+        <table id="deals" hidden>
         <thead>
           <tr>
             <th title="Provider-qualified model id">MODEL</th>
@@ -192,8 +195,9 @@
             <th title="Balanced composite score">SCORE</th>
           </tr>
         </thead>
-        <tbody id="deals-tbody"></tbody>
-      </table>
+          <tbody id="deals-tbody"></tbody>
+        </table>
+      </div>
       <div class="actions deals-actions">
         <button type="button" id="expand-deals" hidden>Show more</button>
       </div>
@@ -228,7 +232,6 @@
       id="cookie-dialog"
       hidden
       role="dialog"
-      aria-modal="true"
       aria-label="Cookie consent for remembering your table layout and retention view"
       tabindex="-1"
     >

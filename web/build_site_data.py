@@ -97,6 +97,7 @@ CATALOG_DROP_REASONS = (
     "expired",
     "age",
     "reasoning effort",
+    "no quality",
     "no_baseline_eligible_endpoint",
     "endpoint_fetch_failed",
 )
@@ -881,8 +882,7 @@ def validate_catalog(document) -> None:
     zdr_source = sources.get("zdr")
     if zdr_source not in ("ok", "skipped", "unavailable"):
         raise ValueError(
-            "catalog sources.zdr must be ok, skipped or unavailable: "
-            f"{zdr_source!r}"
+            f"catalog sources.zdr must be ok, skipped or unavailable: {zdr_source!r}"
         )
     models = document["models"]
     if not isinstance(models, list):
@@ -992,18 +992,13 @@ def validate_catalog(document) -> None:
         retention_present = "safety_retention" in entry
         retention_flag = entry.get("safety_retention")
         if retention_flag is not None and not isinstance(retention_flag, bool):
-            raise ValueError(
-                f"models[{i}] safety_retention must be a boolean or null"
-            )
+            raise ValueError(f"models[{i}] safety_retention must be a boolean or null")
         if parameters["zdr_required"]:
             if zdr_flag is not True:
-                raise ValueError(
-                    f"models[{i}] zdr must be true under zdr_required"
-                )
+                raise ValueError(f"models[{i}] zdr must be true under zdr_required")
             if retention_present and retention_flag is None:
                 raise ValueError(
-                    f"models[{i}] safety_retention must be a boolean under "
-                    "zdr_required"
+                    f"models[{i}] safety_retention must be a boolean under zdr_required"
                 )
             if safety_mode == "none" and retention_flag is True:
                 raise ValueError(
@@ -1012,8 +1007,7 @@ def validate_catalog(document) -> None:
                 )
         elif retention_flag is not None:
             raise ValueError(
-                f"models[{i}] safety_retention must be null when zdr is not "
-                "required"
+                f"models[{i}] safety_retention must be null when zdr is not required"
             )
         zdr_status = entry.get("zdr_status")
         if zdr_status is not None and zdr_status not in ZDR_STATUSES:
@@ -1467,9 +1461,23 @@ def project_schedules(catalog) -> list:
     The row's quality provenance (source, as_of, effort) rides through
     verbatim for the Deals QUAL tooltip.
     """
+    quoted = {
+        model["id"]: model.get("pricing", {}).get("blended_per_1m")
+        for model in catalog.get("models") or []
+    }
     decorated = []
     for entry in catalog.get("schedules") or []:
         if f"{entry['max_discount']:.0%}" == "0%":
+            continue
+        # A ranked model's schedule comes from the models API; when that
+        # off-peak price is not below the live quote, it is not a deal.
+        quote = quoted.get(entry["id"])
+        offpeak = (entry.get("offpeak") or {}).get("blended_per_1m")
+        if (
+            isinstance(quote, (int, float))
+            and isinstance(offpeak, (int, float))
+            and offpeak >= quote
+        ):
             continue
         decorated.append(
             (
@@ -1517,6 +1525,7 @@ def build_data(
     catalog=None,
     revision=None,
     nonzdr_priorities=None,
+    nonzdr_catalog=None,
 ) -> dict:
     """Validate the rows and wrap them into the data.json document.
 
@@ -1528,9 +1537,11 @@ def build_data(
     Without it the rows pass through verbatim.
 
     nonzdr_priorities is the All-providers row block: the same ROW_KEYS
-    contract, but every priority may be empty (a genuinely empty pool hides
-    the switch) and there is no catalog reordering -- the CLI output is the
-    only ranking source for that mode.
+    contract. nonzdr_catalog, when given (already validated), is that mode's
+    ranking authority: rows are reordered to its rankings, and a priority
+    that the catalog ranks but the row query returned empty is an error (a
+    transient CLI divergence must not ship an empty tab). Without it the rows
+    pass through verbatim; a genuinely empty catalog keeps the switch hidden.
 
     revision, when given, is the short commit hash of the source that built
     this document; it is stamped as source_revision (an additive field) so the
@@ -1567,6 +1578,20 @@ def build_data(
         rows = (nonzdr_priorities or {}).get(name, [])
         _validate_rows(f"nonzdr_{name}", rows, allow_empty=True)
         nonzdr_rows[name] = rows
+    if nonzdr_catalog is not None:
+        for name in PRIORITIES:
+            rankings = nonzdr_catalog.get("rankings", {}).get(name)
+            if not isinstance(rankings, list) or not rankings:
+                continue
+            if not nonzdr_rows[name]:
+                raise ValueError(
+                    f"nonzdr priority {name!r} is empty but "
+                    f"catalog-nonzdr ranks {len(rankings)} models"
+                )
+            try:
+                nonzdr_rows[name] = order_rows(nonzdr_rows[name], rankings)
+            except ValueError as exc:
+                raise ValueError(f"nonzdr priority {name!r}: {exc}") from None
     # data.json rows stay lean: the producer's nested reasoning block is
     # catalog-only (the site's depth table joins it from catalog.json), so it
     # is dropped before the rows are projected into the document.
@@ -1651,7 +1676,13 @@ def main(argv=None) -> int:
         default=[],
         metavar="NAME=FILE",
         help="All-providers priority name and its model_compare.py --no-zdr "
-        "--json output file (each priority may be empty)",
+        "--json output file (each priority may be empty only when the "
+        "All-providers catalog is empty too)",
+    )
+    parser.add_argument(
+        "--nonzdr-catalog-file",
+        help="raw model_compare.py --catalog --no-zdr output; validated and "
+        "used as the All-providers row ordering authority",
     )
     parser.add_argument(
         "--revision",
@@ -1689,6 +1720,15 @@ def main(argv=None) -> int:
         except (OSError, ValueError) as exc:
             print(f"error: invalid catalog: {exc}", file=sys.stderr)
             return 1
+    nonzdr_catalog = None
+    if args.nonzdr_catalog_file:
+        try:
+            with open(args.nonzdr_catalog_file) as fh:
+                nonzdr_catalog = json.load(fh)
+            validate_catalog(nonzdr_catalog)
+        except (OSError, ValueError) as exc:
+            print(f"error: invalid nonzdr catalog: {exc}", file=sys.stderr)
+            return 1
     highlights = None
     if args.highlights_file:
         try:
@@ -1724,6 +1764,7 @@ def main(argv=None) -> int:
             catalog=catalog,
             revision=args.revision,
             nonzdr_priorities=nonzdr_priorities or None,
+            nonzdr_catalog=nonzdr_catalog,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

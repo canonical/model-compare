@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -38,12 +39,13 @@ PRIORITIES = ("balanced", "price", "quality")
 # allows Safety Retention for Google's models only, so the published tables
 # use the same rule; see model_compare.py --safety-retention.
 MODEL_COMPARE_FILTER_ARGS = ["--safety-retention", "google"]
-PREV_HISTORY_URL = "https://canonical.github.io/model-compare/history.json"
-PREV_HIGHLIGHTS_URL = "https://canonical.github.io/model-compare/highlights.json"
-PREV_LITELLM_MERGED_URL = "https://canonical.github.io/model-compare/litellm.json"
-PREV_LITELLM_STATUS_URL = (
-    "https://canonical.github.io/model-compare/litellm_merge_status.json"
-)
+# The project's own domain, not canonical.github.io: that host 301-redirects
+# to plaintext http://model-compare.dev, and the previous-artifact fetch must
+# never follow an HTTPS downgrade. See _HTTPSOnlyRedirectHandler.
+PREV_HISTORY_URL = "https://model-compare.dev/history.json"
+PREV_HIGHLIGHTS_URL = "https://model-compare.dev/highlights.json"
+PREV_LITELLM_MERGED_URL = "https://model-compare.dev/litellm.json"
+PREV_LITELLM_STATUS_URL = "https://model-compare.dev/litellm_merge_status.json"
 LITELLM_UPSTREAM_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/"
     "model_prices_and_context_window.json"
@@ -191,24 +193,60 @@ def run_validate_catalog(script: Path, path: Path) -> None:
     )
 
 
-def fetch_prev(url: str, timeout: int = 60, attempts: int = 3) -> bytes | None:
-    """Fetch a previously published file; None after all attempts fail.
+class _HTTPSOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse a redirect that would leave HTTPS.
 
-    Mirrors the old `curl -fsSL --retry 2 ... || true`: retry transient
-    failures (a single blip must never reset the accumulated history
-    baseline) and degrade to None on any failure, including truncated
-    bodies (http.client.HTTPException is outside URLError/OSError).
+    canonical.github.io 301-redirects to http://model-compare.dev today;
+    urllib follows that downgrade by default. The previous-artifact fetch
+    feeds published state (history, highlights, LiteLLM map), so a plaintext
+    hop would be tamperable. The project-owned HTTPS URLs avoid the redirect
+    in normal operation; this handler makes a future redirect fail loudly.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        scheme = urllib.parse.urlsplit(newurl).scheme.lower()
+        if scheme != "https":
+            raise urllib.error.URLError(
+                f"refusing non-HTTPS redirect from {req.full_url} to {newurl}"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_prev(req, timeout: int):
+    """Open a previous-artifact URL through the HTTPS-only redirect policy."""
+    opener = urllib.request.build_opener(_HTTPSOnlyRedirectHandler)
+    return opener.open(req, timeout=timeout)
+
+
+def fetch_prev(url: str, timeout: int = 60, attempts: int = 3) -> bytes | None:
+    """Fetch a previously published file; None only when it is absent (404).
+
+    A transient failure must abort the publish, not reset accumulated state:
+    returning None here used to collapse the 10-day history to one snapshot
+    or delete a live LiteLLM map. Retries cover short blips, but a final
+    failure raises RuntimeError. A 404 is the one honest "no previous
+    artifact" answer (first run, or a deliberately removed file).
     """
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    last_exc: Exception = RuntimeError("previous artifact fetch failed")
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _open_prev(req, timeout) as resp:
+                final_scheme = urllib.parse.urlsplit(resp.geturl()).scheme.lower()
+                if final_scheme != "https":
+                    raise RuntimeError(
+                        f"previous artifact {url} resolved to non-HTTPS {resp.geturl()}"
+                    )
                 return resp.read()
-        except (urllib.error.URLError, OSError, http.client.HTTPException):
-            if attempt == attempts - 1:
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
                 return None
+            last_exc = exc
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+            last_exc = exc
+        if attempt < attempts - 1:
             time.sleep(2**attempt)
-    return None
+    raise RuntimeError(f"publish: could not fetch previous artifact {url}: {last_exc}")
 
 
 def _load_artifact(path: Path, required: tuple[str, ...]) -> dict:
@@ -437,15 +475,12 @@ def check_nonzdr_catalog(catalog_path: Path) -> None:
     churn gate would be wrong here. A wipe (>50%) still means the artifact
     is unusable.
     """
-    catalog = _load_artifact(
-        catalog_path, ("pool", "models", "parameters", "sources")
-    )
+    catalog = _load_artifact(catalog_path, ("pool", "models", "parameters", "sources"))
     parameters = catalog["parameters"]
     sources = catalog["sources"]
     if not isinstance(parameters, dict):
         raise RuntimeError(
-            f"publish: {catalog_path.name} parameters is not an object: "
-            f"{parameters!r}"
+            f"publish: {catalog_path.name} parameters is not an object: {parameters!r}"
         )
     if parameters.get("zdr_required") is not False:
         raise RuntimeError(
@@ -624,6 +659,16 @@ def check_litellm(output_dir: Path, catalog: dict) -> None:
 
 def build_site(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = (
+        "data.json",
+        "catalog.json",
+        "catalog-nonzdr.json",
+        "history.json",  # self-feeds the next run via PREV_HISTORY_URL
+        "highlights.json",  # ditto via PREV_HIGHLIGHTS_URL
+        *LITELLM_REQUIRED,
+        "best.txt",
+        *SITE_FILES,
+    )
     with tempfile.TemporaryDirectory(prefix="mc-build-") as tmp:
         scratch = Path(tmp)
         model_compare = REPO_ROOT / "model_compare.py"
@@ -645,7 +690,7 @@ def build_site(output_dir: Path) -> None:
         run_script(
             model_compare,
             ["--best", *MODEL_COMPARE_FILTER_ARGS],
-            out=output_dir / "best.txt",
+            out=scratch / "best.txt",
         )
         for priority in PRIORITIES:
             run_script(
@@ -671,7 +716,18 @@ def build_site(output_dir: Path) -> None:
             if prev is not None:
                 (scratch / name).write_bytes(prev)
 
-        upstream = fetch_prev(LITELLM_UPSTREAM_URL)
+        # The BerriAI map is optional input: a transient GitHub failure must
+        # degrade to the "upstream failed" freeze path, not abort the whole
+        # site publish. Previous project artifacts, by contrast, are
+        # required state and fetch_prev raises on anything but 404.
+        try:
+            upstream = fetch_prev(LITELLM_UPSTREAM_URL)
+        except RuntimeError as exc:
+            print(
+                f"publish: LiteLLM upstream unavailable this run: {exc}",
+                file=sys.stderr,
+            )
+            upstream = None
         if upstream is not None:
             (scratch / "litellm-upstream.json").write_bytes(upstream)
 
@@ -718,16 +774,24 @@ def build_site(output_dir: Path) -> None:
         for name in LITELLM_REQUIRED + (LITELLM_MERGED,):
             source = scratch / "litellm" / name
             if source.is_file():
-                shutil.copyfile(source, output_dir / name)
-            elif name == LITELLM_MERGED and (output_dir / name).exists():
-                (output_dir / name).unlink()
+                shutil.copyfile(source, scratch / name)
 
         priority_args: list[str] = []
         for p in PRIORITIES:
             priority_args += ["--priority", f"{p}={scratch / f'{p}.json'}"]
 
-        # All-providers rows and catalog: the toggle's data. The row runs are
-        # cache-warm; the catalog run shares the ZDR run's caches too.
+        # All-providers catalog first, then its rows: both share the endpoint
+        # cache, and the catalog is the row-ordering authority the site
+        # validator checks against (a transient row/catalog divergence must
+        # fail the publish, never ship an empty or misordered tab).
+        nonzdr_catalog = scratch / "catalog-nonzdr.json"
+        run_catalog(
+            model_compare,
+            ["--catalog", "--no-zdr", "--zdr-facts", *MODEL_COMPARE_FILTER_ARGS],
+            nonzdr_catalog,
+        )
+        run_validate_catalog(WEB_DIR / "build_site_data.py", nonzdr_catalog)
+        check_nonzdr_catalog(nonzdr_catalog)
         nonzdr_args: list[str] = []
         for p in PRIORITIES:
             rows_path = scratch / f"{p}-nonzdr.json"
@@ -746,24 +810,18 @@ def build_site(output_dir: Path) -> None:
                 rows_path,
             )
             nonzdr_args += ["--nonzdr-priority", f"{p}={rows_path}"]
-        nonzdr_catalog = output_dir / "catalog-nonzdr.json"
-        run_catalog(
-            model_compare,
-            ["--catalog", "--no-zdr", "--zdr-facts", *MODEL_COMPARE_FILTER_ARGS],
-            nonzdr_catalog,
-        )
-        run_validate_catalog(WEB_DIR / "build_site_data.py", nonzdr_catalog)
-        check_nonzdr_catalog(nonzdr_catalog)
 
         run_script(
             WEB_DIR / "build_site_data.py",
             [
                 "--best-file",
-                str(output_dir / "best.txt"),
+                str(scratch / "best.txt"),
                 "--output",
-                str(output_dir / "data.json"),
+                str(scratch / "data.json"),
                 "--catalog-file",
                 str(scratch / "catalog.json"),
+                "--nonzdr-catalog-file",
+                str(nonzdr_catalog),
                 "--history-prev-file",
                 str(scratch / "history-prev.json"),
                 "--highlights-file",
@@ -776,26 +834,30 @@ def build_site(output_dir: Path) -> None:
         )
 
         for name in SITE_FILES:
-            shutil.copyfile(WEB_DIR / "site" / name, output_dir / name)
+            shutil.copyfile(WEB_DIR / "site" / name, scratch / name)
 
-    artifacts = (
-        "data.json",
-        "catalog.json",
-        "catalog-nonzdr.json",
-        "history.json",  # self-feeds the next run via PREV_HISTORY_URL
-        "highlights.json",  # ditto via PREV_HIGHLIGHTS_URL
-        *LITELLM_REQUIRED,
-        "best.txt",
-        *SITE_FILES,
-    )
-    missing = [name for name in artifacts if not (output_dir / name).is_file()]
-    if missing:
-        raise RuntimeError(
-            f"publish: expected artifacts not written: {', '.join(missing)}"
-        )
-    catalog = check_stamps(output_dir)
-    check_best(output_dir, catalog)
-    check_litellm(output_dir, catalog)
+        # Everything above was assembled and gated in the scratch directory;
+        # only a fully valid build may touch the deploy directory. This keeps
+        # local --output-dir trees and CI's _site free of half-updated
+        # artifacts when a late gate fails.
+        missing = [name for name in artifacts if not (scratch / name).is_file()]
+        if missing:
+            raise RuntimeError(
+                f"publish: expected artifacts not written: {', '.join(missing)}"
+            )
+        catalog = check_stamps(scratch)
+        check_best(scratch, catalog)
+        check_litellm(scratch, catalog)
+        for name in artifacts:
+            shutil.copyfile(scratch / name, output_dir / name)
+        merged_path = output_dir / LITELLM_MERGED
+        if (scratch / LITELLM_MERGED).is_file():
+            shutil.copyfile(scratch / LITELLM_MERGED, merged_path)
+            print(f"publish: wrote {merged_path}")
+        elif merged_path.exists():
+            # No merged map this run (first run, or an honest 404): do not
+            # leave a stale deployed map pretending to be current.
+            merged_path.unlink()
     for name in artifacts:
         print(f"publish: wrote {output_dir / name}")
 

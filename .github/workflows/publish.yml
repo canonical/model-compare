@@ -41,6 +41,7 @@ jobs:
           pytest
 
       - name: Build site
+        id: build
         env:
           AA_API_KEY: ${{ secrets.AA_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
@@ -55,7 +56,10 @@ jobs:
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5
 
       - name: Report LiteLLM merge status
-        if: always()
+        # Only a successful build produced this run's status artifact; an
+        # aborted build must not report against a stale _site from an
+        # earlier checkout state.
+        if: always() && steps.build.outcome == 'success'
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -508,27 +508,53 @@ def _collision_detail(
     return detail
 
 
+# The efforts OpenRouter accepts as a discrete reasoning.effort value.
+# model_compare's internal "reasoning" pseudo-effort for single-state models
+# is not one of them and must never be published.
+GATEWAY_EFFORTS = ("max", "xhigh", "high", "medium", "low", "minimal", "none")
+
+
 def _reasoning_flags(model: dict) -> dict:
     reasoning = model.get("reasoning")
     reasoning = reasoning if isinstance(reasoning, dict) else {}
     supported = []
     for effort in reasoning.get("supported_efforts") or []:
-        if isinstance(effort, str) and effort and effort not in supported:
+        if (
+            isinstance(effort, str)
+            and effort in GATEWAY_EFFORTS
+            and effort not in supported
+        ):
             supported.append(effort)
     default = reasoning.get("default_effort")
-    if not isinstance(default, str) or not default:
+    if not isinstance(default, str) or default not in GATEWAY_EFFORTS:
         default = None
     mandatory = reasoning.get("mandatory") is True
+    has_reasoning_meta = (
+        bool(supported)
+        or reasoning.get("default_effort") == "reasoning"
+        or reasoning.get("default_enabled") is not None
+        or reasoning.get("mandatory") is not None
+        or reasoning.get("supports_max_tokens") is True
+    )
+    supports_reasoning = (
+        reasoning.get("default_enabled") is not None
+        or reasoning.get("mandatory") is not None
+        or any(effort != "none" for effort in supported)
+        or reasoning.get("default_effort") == "reasoning"
+        or reasoning.get("supports_max_tokens") is True
+    )
     flags = {
-        "supports_reasoning": (
-            reasoning.get("default_enabled") is True
-            or any(effort != "none" for effort in supported)
-        ),
-        "supports_none_reasoning_effort": "none" in supported and not mandatory,
+        "supports_reasoning": supports_reasoning,
+        # A single-state reasoning model with no discrete efforts still
+        # exposes the reasoning-off toggle when reasoning is not mandatory.
+        # A plain non-reasoning model has the same empty list but no
+        # reasoning metadata, so it must not advertise a toggle.
+        "supports_none_reasoning_effort": not mandatory
+        and ("none" in supported or (not supported and has_reasoning_meta)),
     }
     if supported:
         flags["reasoning_effort_levels"] = supported
-    if default is not None:
+    if default is not None and supports_reasoning:
         flags["default_reasoning_effort"] = default
     return flags
 
@@ -724,14 +750,29 @@ def _reasoning(model: dict) -> dict:
     reasoning = reasoning if isinstance(reasoning, dict) else {}
     supported = []
     for effort in reasoning.get("supported_efforts") or []:
-        if isinstance(effort, str) and effort and effort not in supported:
+        if (
+            isinstance(effort, str)
+            and effort in GATEWAY_EFFORTS
+            and effort not in supported
+        ):
             supported.append(effort)
     default = reasoning.get("default_effort")
-    if not isinstance(default, str) or not default:
+    if not isinstance(default, str) or default not in GATEWAY_EFFORTS:
         default = None
     preferred = model.get("quality_effort")
-    if not isinstance(preferred, str) or not preferred:
+    if not isinstance(preferred, str) or preferred not in GATEWAY_EFFORTS:
         preferred = default
+    supports_reasoning = (
+        reasoning.get("default_enabled") is not None
+        or reasoning.get("mandatory") is not None
+        or any(effort != "none" for effort in supported)
+        or reasoning.get("default_effort") == "reasoning"
+        or reasoning.get("supports_max_tokens") is True
+    )
+    if not supports_reasoning:
+        # A plain non-reasoning model has no effort to pin.
+        preferred = None
+        default = None
     return {
         "preferred": {"effort": preferred} if preferred else None,
         "model_default": {"effort": default} if default else None,

@@ -62,6 +62,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `PREC !` now marks only precision/schedule exclusions; cheaper ZDR,
+  policy or short-context endpoints no longer make every Claude model look
+  quantized.
+- `DISC` and `--discount` describe the quoted baseline endpoint, applied
+  after endpoint pricing rather than trusting the featured frontend
+  endpoint's discount.
+- First-party maker detection accepts the stable tag slug (`Sakana AI`,
+  `Alibaba`), recovering `sakana/*` and `qwen/*` models.
+- Sub-floor-context endpoints can no longer pin `default_precision` and
+  disqualify a model's 1M-context endpoints; context scoring uses the quoted
+  endpoint when it advertises less than the catalog ceiling.
+- CLI `--off-peak` uses the same depth-aware schedule inputs as `--catalog`,
+  so it honors `--reasoning-effort` and no longer borrows unscoped
+  OpenRouter scores.
+- `--require-quality` (new) drops `QUAL=-` models after quality resolution;
+  the default ranking keeps the documented zero-quality policy.
+- Negative endpoint prices are rejected at parse and selection time; AA
+  indices outside 0–100 are discarded at ingestion.
+- Router aliases (`~…`) are dropped before the endpoint stage.
+- Broken pipes exit 0; `Ctrl-C` exits 130; non-finite `--quality-ref`/
+  `--recency-half-life` and negative `--max-age-days` are rejected;
+  `--best --json` is a usage error; `--no-pager` works in either order with
+  `--help`; cache temp files are unique.
+- Publishing fetches previous artifacts from `https://model-compare.dev/`,
+  refuses non-HTTPS redirects, aborts on transient previous-artifact
+  failures, and stages the whole site before touching the deploy directory.
+- LiteLLM artifacts no longer publish the internal `reasoning` sentinel as
+  an OpenRouter effort.
+- The site restores All-providers detail on page load, keeps row focus after
+  keyboard expansion, labels the refresh stamp UTC, and wraps wide tables.
 - Flex endpoints were quoted as the baseline price on 35 of 89 models,
   understating the default quote (for example `google/gemini-4-carbon` showed
   $1/$5 instead of its $2/$10 standard price).

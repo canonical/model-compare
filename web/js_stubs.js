@@ -19,8 +19,7 @@
 // the fetch path, and querySelectorAll returns [].
 
 function stubElement() {
-  return {
-    textContent: "",
+  var el = {
     hidden: false,
     disabled: false,
     title: "",
@@ -104,6 +103,20 @@ function stubElement() {
       this.open = false;
     },
   };
+  // Real DOM: assigning textContent replaces all child nodes. The old stub
+  // left them in place, so render()'s "clear the table" could never be
+  // observed and stale rows survived every re-render.
+  var text = "";
+  Object.defineProperty(el, "textContent", {
+    get: function () {
+      return text;
+    },
+    set: function (value) {
+      text = String(value);
+      this.children = [];
+    },
+  });
+  return el;
 }
 
 // One stub per element id: the script captures its elements once (the
@@ -112,9 +125,7 @@ function stubElement() {
 var stubsById = {};
 var window = { location: { href: "http://127.0.0.1:8734/index.html" } };
 var document = {
-  // cookie: the consent-first view preference is read at init() time;
-  // empty by default, tests may assign a header-shaped string.
-  cookie: "",
+  // cookie is a real jar below, so two preference cookies can coexist.
   activeElement: null,
   getElementById: function (id) {
     if (!Object.prototype.hasOwnProperty.call(stubsById, id)) {
@@ -136,6 +147,42 @@ var document = {
   },
   body: stubElement(),
 };
+// A minimal cookie jar: the site stores one layout cookie and one retention
+// cookie, so a single overwritten string hid cross-cookie bugs.
+var cookieJar = {};
+// Raw writes are recorded for tests that need to assert the attributes
+// (real document.cookie only exposes name=value pairs). An empty write
+// clears the jar: that is a test convenience standing in for a browser
+// cleared between page loads, not real cookie syntax.
+var cookieWrites = [];
+document.__cookieWrites = cookieWrites;
+Object.defineProperty(document, "cookie", {
+  get: function () {
+    return Object.keys(cookieJar)
+      .map(function (name) {
+        return name + "=" + cookieJar[name];
+      })
+      .join("; ");
+  },
+  set: function (raw) {
+    raw = String(raw);
+    cookieWrites.push(raw);
+    if (raw === "") {
+      cookieJar = {};
+      return;
+    }
+    var first = raw.split(";")[0];
+    var eq = first.indexOf("=");
+    if (eq < 0) return;
+    var name = first.slice(0, eq).trim();
+    if (!name) return;
+    if (/max-age\s*=\s*0\b/i.test(String(raw))) {
+      delete cookieJar[name];
+      return;
+    }
+    cookieJar[name] = first.slice(eq + 1).trim();
+  },
+});
 var navigator = {};
 var fetch = function () {
   return Promise.reject(new Error("stub: fetch disabled in JS tests"));

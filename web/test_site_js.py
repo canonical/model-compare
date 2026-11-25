@@ -169,6 +169,13 @@ def test_fmtprice_near_tie_rounds_to_nearest(value, expected):
     assert run_js(f"fmtPrice({value!r})") == mc.fmt_price(value) == expected
 
 
+@pytest.mark.parametrize("value", [0.0005, 0.0025, 10.05])
+def test_fmtprice_binary_near_ties_match_python(value):
+    # These sit just above the nominal midpoint in binary64; Python rounds
+    # them up, while the old 1e-9 tie window stepped them down.
+    assert run_js(f"fmtPrice({value!r})") == mc.fmt_price(value)
+
+
 def test_fmtprice_non_tie_decimal_matches_python():
     assert run_js("fmtPrice(0.15)") == mc.fmt_price(0.15) == "0.150"
     # The 1-digit path: pyFixed(0.15, 1) must be "0.1" like Python's
@@ -179,6 +186,13 @@ def test_fmtprice_non_tie_decimal_matches_python():
 
 # ---------------------------------------------------------------------------
 # Site assembly: external assets, view toggle, cookie consent, verbadge
+
+
+def test_wide_tables_have_a_scroll_wrapper():
+    html = SITE_HTML.read_text()
+    assert html.count('<div class="table-wrap">') == 2
+    css = SITE_CSS.read_text()
+    assert re.search(r"\.table-wrap\s*\{[^}]*overflow-x:\s*auto", css)
 
 
 def test_expanded_table_rows_stay_thin_and_do_not_wrap():
@@ -346,12 +360,12 @@ def test_cookie_dialog_markup():
 
 
 def test_cookie_dialog_a11y_markup():
-    # The consent dialog is a real modal to assistive tech and can take
-    # focus programmatically; the view toggles expose their state.
+    # Focus is deliberately not trapped, so the dialog must not claim to be
+    # modal; it can still take focus programmatically and is labelled.
     html = SITE_HTML.read_text()
     dialog = re.search(r'<div[^>]*id="cookie-dialog"[^>]*>', html, re.DOTALL).group(0)
     assert 'role="dialog"' in dialog
-    assert 'aria-modal="true"' in dialog
+    assert 'aria-modal="true"' not in dialog
     assert "aria-label=" in dialog
     assert 'tabindex="-1"' in dialog
     simple = re.search(r'<button[^>]*id="view-simple"[^>]*>', html).group(0)
@@ -1002,8 +1016,8 @@ def test_render_row_shapes_follow_view():
     # render() must drop exactly the six expert-only columns in simple
     # view: the row keeps 8 cells (rank, 7-day, model, quality, in, out,
     # discount, age) and the 8th visible cell is AGE, where the expert
-    # row's 8th is PREC. The stub tbody never clears its children, so
-    # the expert row lands at index 0 and the simple row at index 1.
+    # row's 8th is PREC. render() clears the tbody, so the simple row is
+    # again at index 0; the expert element is kept by reference.
     data_fix = {
         "priorities": {"balanced": [SIMPLE_VIEW_ROW]},
         "schedules": [],
@@ -1014,7 +1028,7 @@ def test_render_row_shapes_follow_view():
         ' view = "expert"; render();'
         " var expertTr = els.tbody.children[0];"
         ' view = "simple"; render();'
-        " var simpleTr = els.tbody.children[1];"
+        " var simpleTr = els.tbody.children[0];"
         " return {"
         "   expertCells: expertTr.children.length,"
         "   expertDepth: expertTr.children[3].textContent,"
@@ -1143,9 +1157,9 @@ def test_quality_tooltip_names_source_and_as_of_per_source():
         == "AA intelligence index - source: catalog, as of 2026-10-17"
     )
     # Delivery: the rendered QUAL cell carries the tooltip in both views
-    # (the column stays visible in simple view as QUALITY). The stub tbody
-    # never clears its children, so the expert row lands at index 0 and
-    # the simple row at index 1; the movement td sits at children[1], so
+    # (the column stays visible in simple view as QUALITY). render() clears
+    # the tbody, so the simple row is again at index 0; the movement td sits
+    # at children[1], so
     # the expert QUAL cell is children[4] (DEPTH precedes it) and the
     # simple QUAL cell is children[3] (DEPTH is hidden).
     row = dict(SIMPLE_VIEW_ROW)
@@ -1157,7 +1171,7 @@ def test_quality_tooltip_names_source_and_as_of_per_source():
         ' view = "expert"; render();'
         " var expertTitle = els.tbody.children[0].children[4].title;"
         ' view = "simple"; render();'
-        " var simpleTitle = els.tbody.children[1].children[3].title;"
+        " var simpleTitle = els.tbody.children[0].children[3].title;"
         " return { expertTitle: expertTitle, simpleTitle: simpleTitle };"
         "})()"
     )
@@ -1231,7 +1245,7 @@ def test_quality_tooltip_missing_fields_degrade_silently():
     # note, no JS error -- in both tables. A known source without a usable
     # as_of keeps the source part and drops only the "as of" clause (the
     # CLI footer's own handling of an unusable stamp).
-    assert run_js("qualityTooltip({})") is None
+    assert "No AA quality measurement" in run_js("qualityTooltip({})")
     assert (
         run_js(
             "qualityTooltip({quality_source: 'openrouter', quality_as_of: null,"
@@ -1254,7 +1268,7 @@ def test_quality_tooltip_missing_fields_degrade_silently():
         " return els.tbody.children[0].children[4].title;"
         "})()"
     )
-    assert out == ""
+    assert "No AA quality measurement" in out
     # Deals table: same degradation. A schedules row without provenance
     # (an older data.json, or a row whose quality came without any) must
     # leave the cell bare.
@@ -1274,7 +1288,7 @@ def test_quality_tooltip_missing_fields_degrade_silently():
         " return captured.children[0].children[3].title;"
         "})()"
     )
-    assert out == ""
+    assert "No AA quality measurement" in out
 
 
 def test_quality_tooltip_deals_row_with_provenance():
@@ -1321,6 +1335,18 @@ def test_depth_rows_union_and_selectability():
     assert out[0]["selectable"] is True
     assert out[1]["default"] is True
     assert out[2]["cost"] is None
+
+
+def test_depth_rows_single_state_default_on_has_none_button():
+    out = run_js(
+        "depthRows({default_effort:'reasoning',quality_effort:'reasoning',"
+        "supported_efforts:[],reasoning:{default_effort:'reasoning',"
+        "supported_efforts:[],default_enabled:true,mandatory:false,"
+        "depths:[{effort:'reasoning',index:60},{effort:'none',index:40}]}})"
+    )
+    by_effort = {row["effort"]: row for row in out}
+    assert by_effort["none"]["selectable"] is True
+    assert by_effort["reasoning"]["selectable"] is False
 
 
 def test_depth_rows_ratio_and_selected_flag():
@@ -1807,7 +1833,7 @@ def test_render_deals_joins_catalog_models_and_filtered_for_unlabeled():
         "})()"
     )
     assert out["degText"] == "-"
-    assert out["degTip"] == ""
+    assert "No AA quality measurement" in out["degTip"]
     assert out["r0Text"] == "- · unknown"
     assert out["r0Class"] == "na"
     assert "29.1" in out["r0Tip"]
@@ -1947,7 +1973,7 @@ def test_render_quality_cell_shows_one_quality_value_and_effort():
         " var expert = els.tbody.children[0];"
         " var quality = expert.children[4];"
         ' view = "simple"; render();'
-        " var simple = els.tbody.children[1];"
+        " var simple = els.tbody.children[0];"
         " return {"
         "   depth: expert.children[3].textContent,"
         "   quality: quality.textContent,"
@@ -2054,8 +2080,9 @@ def test_view_cookie_round_trip():
         "(function () {"
         '  view = "simple";'
         "  writeViewCookie();"
-        "  var afterWrite = { value: readCookie('model-compare-view'), header: document.cookie };"
-        "  document.cookie = \"\";"
+        "  var afterWrite = { value: readCookie('model-compare-view'), header: document.cookie,"
+        "    written: document.__cookieWrites[document.__cookieWrites.length - 1] };"
+        '  document.cookie = "";'
         "  var afterClear = { value: readCookie('model-compare-view'), asks: shouldAskForConsent(),"
         "    header: document.cookie };"
         "  return { afterWrite: afterWrite, afterClear: afterClear };"
@@ -2063,9 +2090,9 @@ def test_view_cookie_round_trip():
     )
     assert out["afterWrite"]["value"] == "simple"
     assert "model-compare-view=simple" in out["afterWrite"]["header"]
-    assert "max-age=31536000" in out["afterWrite"]["header"]
-    assert "SameSite=Lax" in out["afterWrite"]["header"]
-    assert "path=/" in out["afterWrite"]["header"]
+    assert "max-age=31536000" in out["afterWrite"]["written"]
+    assert "SameSite=Lax" in out["afterWrite"]["written"]
+    assert "path=/" in out["afterWrite"]["written"]
     assert out["afterClear"]["value"] is None
     assert out["afterClear"]["asks"] is True
 
@@ -2139,7 +2166,7 @@ def test_view_cookie_scoped_to_page_directory():
         "    'https://canonical.github.io/model-compare/index.html';"
         '  view = "simple";'
         "  writeViewCookie();"
-        "  var header = document.cookie;"
+        "  var header = document.__cookieWrites[document.__cookieWrites.length - 1];"
         "  var value = readCookie('model-compare-view');"
         '  document.cookie = "";'
         "  window.location.href = real;"
@@ -2160,11 +2187,11 @@ def test_view_cookie_secure_only_in_secure_context():
         "(function () {"
         '  view = "simple";'
         "  writeViewCookie();"
-        "  var plain = document.cookie;"
+        "  var plain = document.__cookieWrites[document.__cookieWrites.length - 1];"
         '  document.cookie = "";'
         "  window.isSecureContext = true;"
         "  writeViewCookie();"
-        "  var secure = document.cookie;"
+        "  var secure = document.__cookieWrites[document.__cookieWrites.length - 1];"
         '  document.cookie = "";'
         "  var secureClear = document.cookie;"
         "  delete window.isSecureContext;"
@@ -2187,13 +2214,17 @@ def test_cookie_dialog_focus_moves_on_show_and_back():
         "(function () {"
         "  var dlg = document.getElementById('cookie-dialog');"
         "  var simple = document.getElementById('view-simple');"
+        "  dlg.hidden = true;"
+        "  simple.focus();"
         "  simple.dispatchEvent('click');"
         "  var onShow = document.activeElement === dlg;"
         "  document.getElementById('cookie-ok').dispatchEvent('click');"
         "  var onOk = document.activeElement === simple;"
+        "  simple.focus();"
         "  simple.dispatchEvent('click');"
         "  document.getElementById('cookie-reject').dispatchEvent('click');"
         "  var onReject = document.activeElement === simple;"
+        "  simple.focus();"
         "  simple.dispatchEvent('click');"
         "  dlg.dispatchEvent('keydown', { key: 'Escape' });"
         "  var onEscape = document.activeElement === simple;"
@@ -2202,6 +2233,151 @@ def test_cookie_dialog_focus_moves_on_show_and_back():
         "})()"
     )
     assert out == {"onShow": True, "onOk": True, "onReject": True, "onEscape": True}
+
+
+def test_clicking_active_zdr_does_not_open_consent_dialog():
+    out = run_js(
+        "(function () {"
+        "  var dlg = document.getElementById('cookie-dialog');"
+        "  dlg.hidden = true;"
+        "  mode = 'zdr';"
+        "  setMode('zdr');"
+        "  return { hidden: dlg.hidden, pending: pendingMode };"
+        "})()"
+    )
+    assert out == {"hidden": True, "pending": None}
+
+
+def test_cookie_dialog_close_clears_pending_mode():
+    out = run_js(
+        "(function () {"
+        "  var dlg = document.getElementById('cookie-dialog');"
+        "  dlg.hidden = false;"
+        "  pendingMode = 'all';"
+        "  closeConsentDialog();"
+        "  return pendingMode;"
+        "})()"
+    )
+    assert out is None
+
+
+def test_cookie_dialog_is_not_declared_modal():
+    # Focus is deliberately not trapped; aria-modal would claim otherwise.
+    html = SITE_HTML.read_text()
+    assert 'aria-modal="true"' not in html
+
+
+def test_restored_all_mode_loads_nonzdr_catalog():
+    out = run_js(
+        "(function () {"
+        "  data = { priorities_nonzdr: { balanced: [{ model: 'acme/a' }] } };"
+        "  mode = 'all';"
+        "  nonZdrState = 'idle';"
+        "  var calls = 0;"
+        "  var real = loadNonZdrCatalog;"
+        "  loadNonZdrCatalog = function () { calls += 1; };"
+        "  loadRestoredNonZdrMode();"
+        "  loadNonZdrCatalog = real;"
+        "  return calls;"
+        "})()"
+    )
+    assert out == 1
+
+
+def test_row_keyboard_toggle_restores_focus():
+    out = run_js(
+        "(function () {"
+        "  data = { priorities: { balanced: [{"
+        "    model: 'acme/a', quality_index: 50, input_usd_per_m: 1,"
+        "    output_usd_per_m: 2, discount_pct: '--', prec: 'fp8',"
+        "    context_tokens: 1000000, age_days: 1, score: 0.5,"
+        "    zdr_status: 'strict' }] }, schedules: [] };"
+        "  mode = 'zdr'; current = 'balanced';"
+        "  render();"
+        "  var tr = els.tbody.children[0];"
+        "  tr.focus();"
+        "  tr.dispatchEvent('keydown', { key: 'Enter', preventDefault: function () {} });"
+        "  return document.activeElement && document.activeElement.dataset.model;"
+        "})()"
+    )
+    assert out == "acme/a"
+
+
+def test_footer_stamp_is_utc():
+    out = run_js(
+        "(function () {"
+        "  renderFooter({ generated_at: '2026-09-28T06:00:00Z' });"
+        "  return document.getElementById('generated-top').textContent;"
+        "})()"
+    )
+    assert out.endswith(" UTC")
+    assert "6:00" in out
+
+
+def test_missing_entry_discloses_catalog_failure():
+    out = run_js(
+        "(function () {"
+        "  data = { priorities: { balanced: [{"
+        "    model: 'acme/a', quality_index: 50, input_usd_per_m: 1,"
+        "    output_usd_per_m: 2, discount_pct: '--', prec: 'fp8',"
+        "    context_tokens: 1000000, age_days: 1, score: 0.5,"
+        "    zdr_status: 'strict' }] }, schedules: [] };"
+        "  catalogData = null; catalogError = true; mode = 'zdr';"
+        "  endpointExpanded = { 'acme/a': true };"
+        "  render();"
+        "  return els.tbody.children[1].children[0].textContent;"
+        "})()"
+    )
+    assert out == "depth details unavailable - catalog fetch failed"
+
+
+def test_missing_entry_while_catalog_loads_says_loading():
+    out = run_js(
+        "(function () {"
+        "  data = { priorities: { balanced: [{"
+        "    model: 'acme/a', quality_index: 50, input_usd_per_m: 1,"
+        "    output_usd_per_m: 2, discount_pct: '--', prec: 'fp8',"
+        "    context_tokens: 1000000, age_days: 1, score: 0.5,"
+        "    zdr_status: 'strict' }] }, schedules: [] };"
+        "  catalogData = null; catalogError = false; mode = 'zdr';"
+        "  endpointExpanded = { 'acme/a': true };"
+        "  render();"
+        "  return els.tbody.children[1].children[0].textContent;"
+        "})()"
+    )
+    assert out == "Loading provider detail…"
+
+
+def test_stub_text_content_clears_children_and_cookie_jar_holds_two():
+    out = run_js(
+        "(function () {"
+        "  var parent = document.createElement('div');"
+        "  parent.appendChild(document.createElement('span'));"
+        "  parent.textContent = 'x';"
+        "  document.cookie = 'model-compare-view=simple; Max-Age=31536000; Path=/';"
+        "  document.cookie = 'model-compare-mode=all; Max-Age=31536000; Path=/';"
+        "  return { children: parent.children.length, cookie: document.cookie };"
+        "})()"
+    )
+    assert out["children"] == 0
+    assert "model-compare-view=simple" in out["cookie"]
+    assert "model-compare-mode=all" in out["cookie"]
+
+
+def test_consent_reentry_keeps_the_original_focus_trigger():
+    out = run_js(
+        "(function () {"
+        "  var dlg = document.getElementById('cookie-dialog');"
+        "  var simple = document.getElementById('view-simple');"
+        "  dlg.hidden = true;"
+        "  simple.focus();"
+        "  simple.dispatchEvent('click');"
+        "  document.getElementById('mode-label-all').dispatchEvent('click');"
+        "  document.getElementById('cookie-ok').dispatchEvent('click');"
+        "  return document.activeElement === simple;"
+        "})()"
+    )
+    assert out is True
 
 
 def test_cookie_dialog_escape_dismisses_without_storing():
@@ -2236,7 +2412,7 @@ def test_should_ask_for_consent_reask_after_revoke():
         run_js(
             "(function () {"
             "  writeViewCookie();"
-            "  document.cookie = \"\";"
+            '  document.cookie = "";'
             "  return shouldAskForConsent();"
             "})()"
         )
@@ -2246,7 +2422,7 @@ def test_should_ask_for_consent_reask_after_revoke():
         run_js(
             "(function () {"
             "  writeViewCookie();"
-            "  document.cookie = \"\";"
+            '  document.cookie = "";'
             "  consentRejected = true;"
             "  return shouldAskForConsent();"
             "})()"
@@ -2257,7 +2433,9 @@ def test_should_ask_for_consent_reask_after_revoke():
 
 def test_read_cookie_parses_header_shaped_string():
     out = run_js(
-        '(function () { document.cookie = "a=1; model-compare-view=simple; b=2";'
+        '(function () { document.cookie = "a=1";'
+        ' document.cookie = "model-compare-view=simple";'
+        ' document.cookie = "b=2";'
         ' return { view: readCookie("model-compare-view"), missing: readCookie("nope") };'
         "})()"
     )
@@ -2629,7 +2807,7 @@ def test_render_all_mode_blanks_movement():
         ' mode = "all"; render();'
         " var allText = els.tbody.children[0].children[1].textContent;"
         ' mode = "zdr"; render();'
-        " var zdrText = els.tbody.children[1].children[1].textContent;"
+        " var zdrText = els.tbody.children[0].children[1].textContent;"
         " return {all: allText, zdr: zdrText};"
         "})()"
     )
@@ -2833,9 +3011,7 @@ def test_render_zdr_view_badges_sr_only():
 
 
 def test_prec_tooltip_passes_the_off_list_sentence():
-    out = run_js(
-        'fmtQuantTooltip({quant_note: "Off-list cheapest: 2.0x cheaper"})'
-    )
+    out = run_js('fmtQuantTooltip({quant_note: "Off-list cheapest: 2.0x cheaper"})')
     assert out == "Off-list cheapest: 2.0x cheaper"
 
 
@@ -2994,9 +3170,7 @@ def test_site_css_badge_hover_and_expanded_sizes():
     assert "border-radius: 0.4em" in badge
     assert "vertical-align" not in badge
     assert ".tabs button:hover" in css
-    expanded = re.search(
-        r"#table tr\.endpoint-row > td\s*\{([^}]*)\}", css
-    ).group(1)
+    expanded = re.search(r"#table tr\.endpoint-row > td\s*\{([^}]*)\}", css).group(1)
     assert "font-size: 0.8rem" in expanded
     nested = re.search(
         r"#table tr\.endpoint-row table th,\s*"
@@ -3042,7 +3216,7 @@ def test_deals_zdr_note_is_inline_in_the_table_description():
     ).group(1)
     assert "Models with scheduled discount windows" in intro
     assert (
-        'discount<span class="mode-zdr-note" hidden> (ZDR view only)</span>.'
+        'discount<span class="mode-zdr-note" hidden> (SCORE from ZDR view)</span>.'
         in intro
     )
     deals = html[html.index('id="deals-section"') : html.index('id="highlights"')]
@@ -3052,10 +3226,10 @@ def test_deals_zdr_note_is_inline_in_the_table_description():
 def test_highlights_zdr_note_sits_in_the_heading():
     html = SITE_HTML.read_text()
     assert (
-        '<h2>\n'
+        "<h2>\n"
         '        Weekly highlights<span class="mode-zdr-note heading-note" hidden>\n'
-        '          (ZDR view only)</span\n'
-        '        >\n'
+        "          (ZDR view only)</span\n"
+        "        >\n"
         "      </h2>" in html
     )
     highlights = html[html.index('id="highlights"') : html.index("<footer>")]

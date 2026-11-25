@@ -263,6 +263,10 @@
         color: var(--status);
         margin: 0.75rem 0;
       }
+      .table-wrap {
+        max-width: 100%;
+        overflow-x: auto;
+      }
       #table,
       #deals {
         border-collapse: collapse;
@@ -502,6 +506,7 @@
       }
       .prose {
         max-width: 56rem;
+        min-width: 0;
         line-height: 1.55;
       }
       .prose p {

@@ -15,6 +15,7 @@
       var nonZdrState = "idle";
       var nonZdrPromise = null;
       var endpointExpanded = {};
+      var pendingRowFocus = null;
       // Artifact failures compose into one status line (renderStatus) so
       // the catalog catch can't clobber a data.json error.
       var dataError = null;
@@ -36,6 +37,7 @@
       // in data.json; its catalog detail is fetched lazily on first use.
       var mode = "zdr";
       var pendingMode = null;
+      var consentFocus = null;
 
       function readCookie(name) {
         var parts = document.cookie.split("; ");
@@ -121,16 +123,25 @@
       // model_compare.py -- display-only duplication, keep them in sync.
       // Tie rounding is half-to-even, like Python's f-strings (toFixed
       // rounds exact ties half-away-from-zero; pyFixed corrects that).
+      function exactDecimalTie(v, n) {
+        // Decide from the binary double's decimal expansion, not a fixed
+        // absolute tolerance: 0.0005, 0.0025 and 10.05 sit just above their
+        // nominal midpoints (Python rounds them up), while true binary ties
+        // such as 0.125 have zeros after the tie digit. toFixed's maximum is
+        // 100 digits; n is at most 3 in this file.
+        var expanded = Math.abs(v).toFixed(n + 17);
+        var dot = expanded.indexOf(".");
+        var frac = dot === -1 ? expanded : expanded.slice(dot + 1);
+        return frac.charAt(n) === "5" && /^0*$/.test(frac.slice(n + 1));
+      }
+
       function pyFixed(v, n) {
         // Python's f"{v:.Nf}" rounds exact decimal ties to even; toFixed
         // rounds them half-away. The CLI's fmt_* helpers are the reference,
-        // so match Python: when v sits exactly on an N-digit tie, step the
-        // last formatted digit down to the even neighbour. Data arrives
-        // rounded to <= 6 decimals, which is always >= 1e-6 away from a
-        // non-exact tie, so a 1e-9 absolute tie tolerance cannot misfire.
+        // so match Python only when the binary value is genuinely on the
+        // tie; near-ties keep toFixed's (and Python's) nearest rounding.
         var s = v.toFixed(n);
-        var tie = Math.abs(v - (Number(s) - Math.pow(10, -n) / 2)) < 1e-9;
-        if (tie) {
+        if (exactDecimalTie(v, n)) {
           var last = parseInt(s.charAt(s.length - 1), 10);
           if (last % 2 === 1) {
             // No borrow is possible: a tie's rounded-up last digit steps
@@ -260,8 +271,15 @@
       function isSingleStateToggle(reasoning, supported) {
         if (!reasoning || supported.length) return false;
         if (reasoning.mandatory === true) return false;
+        // Catalog v6 strips is_reasoning; a default-on single-state model
+        // still exposes the reasoning-off toggle. Recognize the effective
+        // default shape as well as the legacy explicit flags.
         return (
-          reasoning.is_reasoning === true || reasoning.default_enabled === false
+          reasoning.is_reasoning === true ||
+          reasoning.default_enabled === false ||
+          reasoning.default_effort === "reasoning" ||
+          reasoning.default_enabled === true ||
+          reasoning.supports_max_tokens === true
         );
       }
 
@@ -440,6 +458,20 @@
         return nonZdrPromise;
       }
 
+      // A persisted All mode is restored before data.json lands; the lazy
+      // catalog fetch must start as soon as the rows exist, not wait for a
+      // row click (which would leave every detail cell degraded).
+      function loadRestoredNonZdrMode() {
+        if (
+          data &&
+          mode === "all" &&
+          nonzdrAvailable() &&
+          nonZdrState === "idle"
+        ) {
+          loadNonZdrCatalog();
+        }
+      }
+
       function quoteBadge(row) {
         if (!row) return null;
         var status = row.zdr_status;
@@ -479,6 +511,9 @@
 
       function setMode(next) {
         if (next === "all" && !nonzdrAvailable()) return;
+        // Clicking the already-active option is a no-op, not a consent
+        // prompt for a mode that did not change.
+        if (next === mode) return;
         mode = next;
         if (
           mode === "all" &&
@@ -502,7 +537,11 @@
       // storing anything.
       function openConsentDialog() {
         var dlg = document.getElementById("cookie-dialog");
-        if (!dlg) return;
+        if (!dlg || !dlg.hidden) return;
+        consentFocus =
+          document.activeElement && document.activeElement.focus
+            ? document.activeElement
+            : null;
         dlg.hidden = false;
         dlg.focus();
       }
@@ -510,7 +549,9 @@
         var dlg = document.getElementById("cookie-dialog");
         if (!dlg || dlg.hidden) return;
         dlg.hidden = true;
-        document.getElementById("view-simple").focus();
+        pendingMode = null;
+        if (consentFocus && consentFocus.focus) consentFocus.focus();
+        consentFocus = null;
       }
 
       // DEPTH cell: the effort QUAL was measured at, "*" on the default,
@@ -579,7 +620,15 @@
           // missing data rather than a deliberate gate.
           var unlabeled = row.reasoning && row.reasoning.aa_unlabeled;
           var unlabeledIndex = finiteNumber(unlabeled && unlabeled.index);
-          if (unlabeledIndex === null) return null;
+          if (unlabeledIndex === null) {
+            if (typeof row.score === "number") {
+              return (
+                "No AA quality measurement for this model; it scores 0 on " +
+                "quality and ranks on price, context, and age."
+              );
+            }
+            return "No AA quality measurement for this model; QUAL stays blank.";
+          }
           var checked = qualityAsOf("aa", unlabeled.as_of);
           return (
             "AA measures this model at " +
@@ -955,8 +1004,8 @@
           ["Context", "Context window at this endpoint, in tokens."],
           [
             "Tier",
-            "How this endpoint's pricing varies: a token threshold means a " +
-              "higher rate above it; a percentage means cheaper off-peak hours.",
+            "OpenRouter service tier for this endpoint: standard, flex, " +
+              "priority, ultrafast, or - when the endpoint does not report one.",
           ],
           ["Baseline", "✓ marks the endpoint this model's ranked price comes from."],
         ].forEach(function (cell) {
@@ -1145,6 +1194,17 @@
         return tr;
       }
 
+      function detailNoteRow(text) {
+        var tr = document.createElement("tr");
+        var td = document.createElement("td");
+        td.colSpan =
+          view === "simple" ? SIMPLE_TABLE_COLS : MAIN_TABLE_COLS;
+        td.className = "na";
+        td.textContent = text;
+        tr.appendChild(td);
+        return tr;
+      }
+
       function render() {
         // A stored All view must survive the early renders triggered by
         // history/catalog before data.json lands; nonzdrAvailable() cannot
@@ -1274,6 +1334,7 @@
           // Keyboard-operable disclosure toggle: the row is a button, so
           // Enter and Space both flip it (Space must not scroll the page).
           tr.tabIndex = 0;
+          tr.dataset.model = row.model;
           tr.setAttribute("role", "button");
           var detailReady = mode === "zdr" || nonZdrState === "ready";
           if (!detailReady) tr.setAttribute("aria-disabled", "true");
@@ -1282,6 +1343,7 @@
             endpointExpanded[row.model] ? "true" : "false"
           );
           tr.addEventListener("click", function () {
+            pendingRowFocus = row.model;
             if (!detailReady && mode === "all") {
               endpointExpanded[row.model] = true;
               if (nonZdrState === "idle" || nonZdrState === "failed") {
@@ -1296,6 +1358,7 @@
           tr.addEventListener("keydown", function (ev) {
             if (ev.key !== "Enter" && ev.key !== " ") return;
             if (ev.key === " ") ev.preventDefault();
+            pendingRowFocus = row.model;
             if (!detailReady && mode === "all") {
               endpointExpanded[row.model] = true;
               if (nonZdrState === "idle" || nonZdrState === "failed") {
@@ -1312,21 +1375,34 @@
             if (entry) {
               els.tbody.appendChild(depthDetailRow(entry, true));
               els.tbody.appendChild(endpointRow(entry, true));
+            } else if (mode === "zdr" && !catalogData && !catalogError) {
+              els.tbody.appendChild(detailNoteRow("Loading provider detail…"));
+            } else if (mode === "zdr") {
+              // Keep the artifact-failure and join-miss messages distinct;
+              // they already exist in the row builders and are covered by
+              // their own tests, so route through them instead of a generic
+              // placeholder.
+              els.tbody.appendChild(depthDetailRow(null, Boolean(catalogData)));
+              els.tbody.appendChild(endpointRow(null, Boolean(catalogData)));
             } else {
-              var noteRow = document.createElement("tr");
-              var noteCell = document.createElement("td");
-              noteCell.colSpan = view === "simple" ? SIMPLE_TABLE_COLS : MAIN_TABLE_COLS;
-              noteCell.className = "na";
-              noteCell.textContent =
-                mode === "all" && nonZdrState === "loading"
-                  ? "Loading provider detail…"
-                  : "Provider detail unavailable.";
-              noteRow.appendChild(noteCell);
-              els.tbody.appendChild(noteRow);
+              els.tbody.appendChild(
+                detailNoteRow(
+                  mode === "all" && nonZdrState === "loading"
+                    ? "Loading provider detail…"
+                    : "Provider detail unavailable.",
+                )
+              );
             }
           }
         });
         renderDeals();
+        if (pendingRowFocus) {
+          var wanted = pendingRowFocus;
+          pendingRowFocus = null;
+          Array.prototype.forEach.call(els.tbody.children || [], function (tr) {
+            if (tr.dataset && tr.dataset.model === wanted) tr.focus();
+          });
+        }
       }
 
       function renderDeals() {
@@ -1498,7 +1574,12 @@
       // revision link. Extracted from the fetch chain so the flow is
       // unit-testable (web/test_site_js.py drives it under node).
       function renderFooter(data) {
-        var stamp = new Date(data.generated_at).toLocaleString();
+        // The header tooltip promises UTC; render UTC explicitly instead of
+        // the visitor's local zone.
+        var stamp =
+          new Date(data.generated_at).toLocaleString(undefined, {
+            timeZone: "UTC",
+          }) + " UTC";
         els.generated.textContent = stamp;
         els.generatedTop.textContent = "last refresh: " + stamp;
         if (data.source_revision) {
@@ -1568,6 +1649,9 @@
           .getElementById("view-expert")
           .addEventListener("click", function () {
             setView("expert");
+            // Switching layout dismisses the prompt without consent; do not
+            // carry a pending retention-mode change into a later click.
+            // It is not a rejection: a later layout click may ask again.
             closeConsentDialog();
             if (consentGranted()) writeViewCookie();
           });
@@ -1619,6 +1703,7 @@
             data = payload;
             renderFooter(data);
             render();
+            loadRestoredNonZdrMode();
           })
           .catch(function (err) {
             dataError = err.message;

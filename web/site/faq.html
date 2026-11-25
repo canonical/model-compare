@@ -215,9 +215,11 @@
           </p>
           <p>
             A model with no usable quality record scores zero on quality as long
-            as at least one other model in the table has a score. If no model has
-            any quality score, quality is left out of the ranking weights
-            altogether, so the remaining factors decide the order.
+            as at least one other model in the table has a score; it can still
+            rank on price, context, and age. If no model has any quality score,
+            quality is left out of the ranking weights altogether, so the
+            remaining factors decide the order. The CLI's
+            <code>--require-quality</code> flag drops unmeasured models instead.
           </p>
         </div>
 
@@ -346,11 +348,14 @@
             discounts, built from the raw catalog. It deliberately does not apply
             the main table's ZDR, 1M-context, tool, output-text, or expiry checks,
             and it includes batch listings. That is why a deal can name a model
-            that is missing from the main table.
+            that is missing from the main table. Its prices are the models-API
+            schedule, not the quoted endpoint, so the main table remains
+            authoritative when the two differ.
           </p>
           <p>
             Each row shows the cheapest off-peak window, but its
-            <code>SCORE</code> is the normal balanced score from standard prices.
+            <code>SCORE</code> is the normal balanced score from the ZDR pool's
+            standard prices.
             A discount that rounds to 0% shows <code>SCHED</code> in the main
             table and is left out of the deals table. When a model has both a
             long-context tier and a schedule, <code>TIER</code> wins in the main

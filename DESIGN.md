@@ -62,21 +62,24 @@ with priority-dependent weights:
 - **quality score** — the AA intelligence index at the selected effort ÷
   `--quality-ref` (default 70), clamped to [0, 1]. By default, this is the
   highest index among measured efforts the model can run; ties prefer the
-  deeper effort. If `supported_efforts` is missing or empty, all measured
-  efforts are considered. An explicit `--reasoning-effort` selects exactly
-  that effort.
+  deeper effort. Missing metadata considers all measured efforts; an empty
+  list is a single-state model and admits only the internal `reasoning` row
+  (plus `none` when reasoning is not mandatory). An explicit
+  `--reasoning-effort` selects exactly that effort.
 - **context score** — logarithmic ramp from `--min-context` up to 4× that
   threshold: headroom helps, but with diminishing returns.
 - **age score** — exponential decay with a `--recency-half-life` of 120 days:
-  a listing half the age of another scores ~0.5× higher on this axis.
+  a listing twice as old scores half as high on this axis (60 days vs 120
+  days is ~1.41×, not 2×).
 - **context filter** — hard minimum (`--min-context`, default 1M tokens),
   so a cheap small-window model can never win a big-context job.
 
 `--reasoning-effort <effort>` (default `default`; choices `default`, `none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, `max`) selects the effort used
 for quality. `default` uses each model's best measured selectable effort,
-with ties going to the deeper effort; if `supported_efforts` is missing or
-empty, it considers all measured efforts. It does not filter models. An
+with ties going to the deeper effort. Missing metadata considers all measured
+efforts; an empty list is a single-state model, so only `reasoning` (and
+`none` when non-mandatory) is selectable. It does not filter models. An
 explicit effort selects exactly that effort and drops models that cannot run
 it (`reasoning effort`); another effort is never substituted. If no quality
 record is available at the selected effort after the known non-reasoning
@@ -167,8 +170,9 @@ dict.
 Selection is effort-aware. When `--reasoning-effort` is `default`,
 `resolve_quality` selects the measured record with the highest AA index among
 efforts OpenRouter can run (`supported_efforts`); ties prefer the deeper
-effort. If support metadata is missing or empty, all measured efforts are
-considered. The model's effective OpenRouter default is still carried in
+effort. Missing support metadata considers all measured efforts; an empty
+list is a single-state model and selects only `reasoning`/`none`. The model's
+effective OpenRouter default is still carried in
 `default_effort`, determined by `default_enabled` and `default_effort` (the
 models API's `reasoning` object first, the frontend `reasoning_config` as
 fallback), but does not choose the quality record. An explicit
@@ -344,12 +348,13 @@ poison the others.
 
 ## Discounts
 
-The `DISC` column and the `--discount` filter use the same data as the
-website's [`?discount=true` model filter](https://openrouter.ai/models?discount=true):
-OpenRouter's frontend models API reports, per model variant, the fraction by
-which the listed price is currently discounted (e.g. `75%`). The endpoint is
-undocumented, so the tool degrades gracefully — if it breaks, every model
-shows `--` and `--discount` returns nothing.
+The `DISC` column describes the **quoted baseline endpoint**: `parse_endpoints`
+keeps that endpoint's own `pricing.discount`, and `apply_endpoint_pricing`
+replaces the frontend's model-variant discount with it. `--discount` is applied
+after endpoint pricing for the same reason — a cheaper sibling's discount must
+not make an undiscounted baseline look discounted. The frontend discount no longer
+filters candidates (it describes only its featured endpoint); if the endpoint
+payload omits its discount, the quote is treated as undiscounted.
 
 Ranking uses the endpoint's net price: OpenRouter's endpoint `pricing`
 already has the discount applied, while the frontend's `pricing_json` (and
@@ -575,7 +580,7 @@ wins — include `-R` in it or pass `--color off`. POSIX terminals only.
 `--catalog` prints the full evaluation as one machine-readable JSON document:
 every surviving candidate, ranked, plus every filtered-out model with its drop
 reasons. The published site serves it as
-[`catalog.json`](https://canonical.github.io/model-compare/catalog.json),
+[`catalog.json`](https://model-compare.dev/catalog.json),
 refreshed on the same 3-hour schedule as the picks.
 
 ```console
@@ -657,8 +662,9 @@ deals table from three rows to two. Router aliases (`~` ids) and malformed
 ids are excluded; `:batch` variants are included as distinct deals. Each
 entry carries `id`, `name`, `context`, `quality` (the best measured
 selectable AA depth record by default, using the highest index and preferring
-the deeper effort on ties; if support metadata is missing or empty, all
-measured efforts are considered; a known non-reasoning model may use the
+the deeper effort on ties; missing support metadata considers all measured
+efforts, while an empty list selects only the single-state `reasoning`/`none`
+row; a known non-reasoning model may use the
 OpenRouter trio with `quality_effort: "none"`, but a reasoning model never
 uses the trio), `quality_effort`/`quality_as_of`/`quality_source` (the winning
 record's provenance, hydrated verbatim on unkeyed runs), `score` (the balanced
@@ -803,10 +809,12 @@ The other per-model additive blocks:
   `/api/v1/providers` and should be re-checked when the catalog changes.
 - `annotations` — quantization risk around the baseline, all four fields
   derived from one shared universe: the live non-variant **standard-tier**
-  endpoints that are **not** baseline-eligible (sub-default quantization,
-  third-party unknown/null, schedule-gate-failed). The eligible denominator
-  is standard-only too, so Flex, priority, ultrafast and unknown tiers never
-  enter either side.
+  endpoints whose only rejection reason is a quantization or schedule gate
+  (sub-default quantization, third-party unknown/null, schedule-gate-failed).
+  ZDR, endpoint-policy, capability, tier and variant rejections are excluded:
+  a cheaper non-ZDR or short-context endpoint is not a quantization risk and
+  must not drive the `!` badge. The eligible denominator is standard-only too,
+  so Flex, priority, ultrafast and unknown tiers never enter either side.
   - `price_spread`: cheapest non-eligible blended price ÷ cheapest eligible
     blended price (the `--input-share` blending convention on both sides);
     `null` when the universe is empty — generalized to `null` when either
@@ -856,8 +864,12 @@ the tool counts internally:
 ```
 malformed id, context, pricing, schedule, free, batch, no discount, not ZDR,
 safety retention, modality, tool calling, expired, age, reasoning effort,
-no_baseline_eligible_endpoint, endpoint_fetch_failed
+no quality, no_baseline_eligible_endpoint, endpoint_fetch_failed
 ```
+
+`no quality` is produced by `--require-quality` after quality resolution, so
+the default ranking keeps its documented zero-quality policy and users can opt
+into a benchmarked-only shortlist.
 
 The `schedule` reason is fail-closed by design: a model whose
 `pricing.overrides` time windows do not tile the week exactly (or whose

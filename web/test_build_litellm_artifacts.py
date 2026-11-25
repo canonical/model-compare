@@ -92,7 +92,11 @@ def _entry(
 
 def _catalog(entries):
     doc = make_catalog()
-    doc["pool"] = {"listed": len(entries), "candidates": len(entries), "dropped": make_dropped()}
+    doc["pool"] = {
+        "listed": len(entries),
+        "candidates": len(entries),
+        "dropped": make_dropped(),
+    }
     doc["models"] = entries
     doc["rankings"] = {
         p: [e["id"] for e in entries] for p in ("balanced", "price", "quality")
@@ -161,6 +165,7 @@ def _basic_catalog():
                 schedule=schedule,
                 supported=("none",),
                 default_effort="none",
+                mandatory=None,
             ),
             _entry(
                 "deepseek/deepseek-v4.1-flash",
@@ -289,6 +294,45 @@ def test_rate_card_reasoning_flags():
 
 
 def test_rate_card_non_reasoning_flags():
+    # A plain non-reasoning model may carry no effort metadata at all; it
+    # must not advertise a reasoning-off toggle just because the list is
+    # empty (the real catalog shape, not the synthetic "none" fixture).
+    flags = bla._reasoning_flags(
+        {
+            "reasoning": {
+                "default_effort": "none",
+                "supported_efforts": [],
+                "default_enabled": None,
+                "mandatory": None,
+                "supports_max_tokens": None,
+                "depths": [],
+            }
+        }
+    )
+    assert flags == {
+        "supports_reasoning": False,
+        "supports_none_reasoning_effort": False,
+    }
+
+
+def test_steering_non_reasoning_omits_efforts():
+    r = bla._reasoning(
+        {
+            "reasoning": {
+                "default_effort": "none",
+                "supported_efforts": [],
+                "default_enabled": None,
+                "mandatory": None,
+                "supports_max_tokens": None,
+                "depths": [],
+            }
+        }
+    )
+    assert r["preferred"] is None
+    assert r["model_default"] is None
+
+
+def test_rate_card_non_reasoning_synthetic_none_still_toggles():
     card, _ = bla.build_rate_card(_basic_catalog())
     e = card["openrouter/tencent/hy3"]
     assert e["supports_reasoning"] is False
@@ -496,6 +540,39 @@ def test_steering_reasoning_prefers_rank_effort():
     assert r["model_default"] == {"effort": "high"}
     assert r["supported_efforts"] == ["max", "high", "low", "none"]
     assert r["mandatory"] is False
+
+
+def _single_state_catalog():
+    catalog = _basic_catalog()
+    model = catalog["models"][0]
+    model["quality_effort"] = "reasoning"
+    model["reasoning"].update(
+        {
+            "default_effort": "reasoning",
+            "supported_efforts": [],
+            "default_enabled": True,
+            "mandatory": False,
+        }
+    )
+    return catalog
+
+
+def test_rate_card_single_state_reasoning_omits_internal_effort():
+    card, _ = bla.build_rate_card(_single_state_catalog())
+    entry = card["openrouter/z-ai/glm-5.3"]
+    assert entry["supports_reasoning"] is True
+    assert entry["supports_none_reasoning_effort"] is True
+    assert "default_reasoning_effort" not in entry
+    assert "reasoning_effort_levels" not in entry
+
+
+def test_steering_single_state_reasoning_omits_internal_effort():
+    raw, warnings = _rate_card_bytes()
+    steering = bla.build_steering(_single_state_catalog(), raw, "deadbee", warnings)
+    r = steering["openrouter/z-ai/glm-5.3"]["reasoning"]
+    assert r["preferred"] is None
+    assert r["model_default"] is None
+    assert r["supported_efforts"] == []
 
 
 def test_steering_meta_hash_and_entries():

@@ -1938,6 +1938,17 @@ def test_project_schedules():
     assert projected["quality_effort"] == "high"
 
 
+def test_project_schedules_skips_candidate_deal_above_quote():
+    catalog = make_catalog()
+    catalog["models"][0]["id"] = "acme/ranked"
+    entry = _schedule_entry("acme/ranked", 0.5)
+    entry["offpeak"]["blended_per_1m"] = 2.0  # quote is 1.25
+    catalog["schedules"] = [entry]
+    assert bsd.project_schedules(catalog) == []
+    entry["offpeak"]["blended_per_1m"] = 0.5
+    assert [row["model"] for row in bsd.project_schedules(catalog)] == ["acme/ranked"]
+
+
 def test_project_schedules_top10_cap():
     catalog = make_catalog()
     catalog["schedules"] = [
@@ -2824,23 +2835,41 @@ def test_build_data_nonzdr_rows_never_carry_detail():
     assert row["zdr_status"] == "strict"
 
 
-def test_build_data_does_not_reorder_nonzdr():
+def test_build_data_reorders_nonzdr_with_its_catalog():
     rows = {
         "balanced": [
             make_row(model="acme/model-b"),
             make_row(model="acme/model-a"),
         ]
     }
+    nonzdr_catalog = make_catalog()
+    nonzdr_catalog["rankings"] = {
+        "balanced": ["acme/model-a", "acme/model-b"],
+        "price": [],
+        "quality": [],
+    }
     data = bsd.build_data(
         "acme/model-a",
         make_priorities(),
-        catalog=make_catalog(),
         nonzdr_priorities=rows,
+        nonzdr_catalog=nonzdr_catalog,
     )
     assert [r["model"] for r in data["priorities_nonzdr"]["balanced"]] == [
-        "acme/model-b",
         "acme/model-a",
+        "acme/model-b",
     ]
+
+
+def test_build_data_rejects_empty_nonzdr_priority_when_catalog_has_rows():
+    nonzdr_catalog = make_catalog()
+    nonzdr_catalog["rankings"]["balanced"] = ["acme/model-a"]
+    with pytest.raises(ValueError, match="nonzdr.*empty"):
+        bsd.build_data(
+            "acme/model-a",
+            make_priorities(),
+            nonzdr_priorities={"balanced": []},
+            nonzdr_catalog=nonzdr_catalog,
+        )
 
 
 def test_main_accepts_nonzdr_priority_files(tmp_path):
