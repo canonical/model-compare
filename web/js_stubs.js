@@ -125,6 +125,9 @@ var document = {
   createElement: function () {
     return stubElement();
   },
+  createTextNode: function (text) {
+    return { textContent: String(text) };
+  },
   querySelectorAll: function () {
     return [];
   },

@@ -78,12 +78,25 @@ SITE_FILES = (
 # publish imports nothing from model_compare/build_site_data (subprocess-only
 # by design), so this threshold is pinned here rather than imported.
 MAX_ENDPOINT_DROP_RATE = 0.05
+# Semantic endpoint drops (no admitted endpoint, or no quoteable one) are
+# normal with the endpoint-level capability and policy gates: a model can pass
+# every model-level filter and still have no endpoint that advertises 1M prompt
+# context, tools, or an allowed policy. The live rate is roughly a third of the
+# entered pool, so this is a wipe gate, not a churn gate.
+MAX_SEMANTIC_ENDPOINT_DROP_RATE = 0.75
 # The only pool.dropped reasons the endpoint stage itself produces; every
 # other CATALOG_DROP_REASONS entry (malformed id, context, pricing, ...)
 # drops a candidate before the endpoint stage is ever tried. publish
 # imports nothing from model_compare (subprocess-only by design), so the
 # reasons are named here rather than imported.
-ENDPOINT_DROP_REASONS = ("no_baseline_eligible_endpoint", "endpoint_fetch_failed")
+ENDPOINT_DROP_REASONS = (
+    "no_baseline_eligible_endpoint",
+    "endpoint_fetch_failed",
+)
+# The All-providers pool legitimately drops many models at the endpoint stage
+# (unpriceable / unknown-format third-party endpoints). This looser gate only
+# catches a wipe, never the ZDR pool's 5% churn threshold.
+MAX_NONZDR_ENDPOINT_DROP_RATE = 0.5
 # A git commit hash in short (7) to full (40) lowercase hex form. Both
 # revision sources (GITHUB_SHA, `git rev-parse` output) are validated
 # against it: whatever lands in data.json is what the site footer links
@@ -136,6 +149,46 @@ def run_script(script: Path, args: list[str], out: Path | None = None) -> None:
     else:
         with open(out, "w") as fh:
             subprocess.run(cmd, cwd=REPO_ROOT, stdout=fh, check=True)
+
+
+def run_pool_json(script: Path, args: list[str], out: Path) -> list:
+    """Run a --json pool query; a legitimately empty pool writes [].
+
+    Exit 2 is the producer's "no models" signal. Only "no models satisfy the
+    filters" is a legitimate empty pool; "no models after the endpoint stage"
+    is a regression and must fail the publish, so stderr is inspected.
+    """
+    cmd = [sys.executable, str(script), *args]
+    result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    if result.returncode == 0:
+        out.write_text(result.stdout)
+        return json.loads(result.stdout)
+    if result.returncode == 2 and "no models satisfy the filters" in result.stderr:
+        out.write_text("[]\n")
+        return []
+    raise RuntimeError(
+        f"publish: pool query failed ({' '.join(cmd)}): {result.stderr.strip()}"
+    )
+
+
+def run_catalog(script: Path, args: list[str], out: Path) -> None:
+    """Run a --catalog build into `out`; any failure (including exit 2) fails."""
+    cmd = [sys.executable, str(script), *args]
+    result = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"publish: catalog build failed ({' '.join(cmd)}): {result.stderr.strip()}"
+        )
+    out.write_text(result.stdout)
+
+
+def run_validate_catalog(script: Path, path: Path) -> None:
+    """Validate a catalog with build_site_data's validation-only entry point."""
+    subprocess.run(
+        [sys.executable, str(script), "--validate-catalog", str(path)],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 def fetch_prev(url: str, timeout: int = 60, attempts: int = 3) -> bytes | None:
@@ -193,12 +246,12 @@ def check_stamps(output_dir: Path) -> dict:
     # required tuple above ever stops listing schema_version.
     version = data.get("schema_version")
     # Strict identity: True and 3.0 compare equal to 3 but are not v3.
-    if type(version) is not int or version != 3:
+    if type(version) is not int or version != 4:
         # publish imports nothing from build_site_data (subprocess-only by
         # design); the expected data.json version is pinned here, like the
         # opencode id prefix in check_best.
         raise RuntimeError(
-            f"publish: data.json schema_version must be 3, got {version!r}"
+            f"publish: data.json schema_version must be 4, got {version!r}"
         )
     history = _load_artifact(output_dir / "history.json", ("updated_at", "snapshots"))
     stamp = catalog["generated_at"]
@@ -348,27 +401,110 @@ def check_endpoint_drops(catalog_path: Path) -> None:
             )
         return value
 
-    no_baseline = _count(
-        dropped.get(ENDPOINT_DROP_REASONS[0]),
-        f"pool.dropped.{ENDPOINT_DROP_REASONS[0]}",
-    )
-    fetch_failed = _count(
-        dropped.get(ENDPOINT_DROP_REASONS[1]),
-        f"pool.dropped.{ENDPOINT_DROP_REASONS[1]}",
-    )
+    counts = {
+        reason: _count(dropped.get(reason), f"pool.dropped.{reason}")
+        for reason in ENDPOINT_DROP_REASONS
+    }
     candidates = _count(pool.get("candidates"), "pool.candidates")
-    dropped_total = no_baseline + fetch_failed
+    dropped_total = sum(counts.values())
     entered = candidates + dropped_total
     if entered == 0:
         return
-    if dropped_total / entered > MAX_ENDPOINT_DROP_RATE:
+    detail = ", ".join(f"{counts[reason]} {reason}" for reason in ENDPOINT_DROP_REASONS)
+    fetch_failed = counts["endpoint_fetch_failed"]
+    if fetch_failed / entered > MAX_ENDPOINT_DROP_RATE:
+        raise RuntimeError(
+            f"publish: {catalog_path.name} endpoint fetches dropped "
+            f"{fetch_failed} of {entered} "
+            f"({fetch_failed / entered:.0%} > "
+            f"{MAX_ENDPOINT_DROP_RATE:.0%} limit): {detail}"
+        )
+    semantic = counts["no_baseline_eligible_endpoint"]
+    if semantic / entered > MAX_SEMANTIC_ENDPOINT_DROP_RATE:
+        raise RuntimeError(
+            f"publish: {catalog_path.name} endpoint stage dropped "
+            f"{semantic} of {entered} "
+            f"({semantic / entered:.0%} > "
+            f"{MAX_SEMANTIC_ENDPOINT_DROP_RATE:.0%} limit): {detail}"
+        )
+
+
+def check_nonzdr_catalog(catalog_path: Path) -> None:
+    """Fail unless the All-providers catalog is non-empty and not a wipe.
+
+    The non-ZDR pool legitimately drops many models at the endpoint stage
+    (third-party endpoints with no usable price or format), so the 5% ZDR
+    churn gate would be wrong here. A wipe (>50%) still means the artifact
+    is unusable.
+    """
+    catalog = _load_artifact(
+        catalog_path, ("pool", "models", "parameters", "sources")
+    )
+    parameters = catalog["parameters"]
+    sources = catalog["sources"]
+    if not isinstance(parameters, dict):
+        raise RuntimeError(
+            f"publish: {catalog_path.name} parameters is not an object: "
+            f"{parameters!r}"
+        )
+    if parameters.get("zdr_required") is not False:
+        raise RuntimeError(
+            f"publish: {catalog_path.name} is not a non-ZDR catalog "
+            f"(zdr_required={parameters.get('zdr_required')!r})"
+        )
+    if not isinstance(sources, dict) or sources.get("zdr") != "skipped":
+        raise RuntimeError(
+            f"publish: {catalog_path.name} sources.zdr is not 'skipped': "
+            f"{sources.get('zdr') if isinstance(sources, dict) else sources!r}"
+        )
+    models = catalog["models"]
+    if not isinstance(models, list):
+        raise RuntimeError(f"publish: {catalog_path.name} models is not a list")
+    for i, model in enumerate(models):
+        if not isinstance(model, dict):
+            raise RuntimeError(
+                f"publish: {catalog_path.name} models[{i}] is not an object"
+            )
+        if model.get("zdr") is not None:
+            raise RuntimeError(
+                f"publish: {catalog_path.name} models[{i}] has zdr="
+                f"{model.get('zdr')!r}; expected null"
+            )
+        if model.get("safety_retention") is not None:
+            raise RuntimeError(
+                f"publish: {catalog_path.name} models[{i}] has "
+                f"safety_retention={model.get('safety_retention')!r}; expected null"
+            )
+    pool = catalog["pool"]
+    if not isinstance(pool, dict):
+        pool = {}
+    dropped = pool.get("dropped")
+    if not isinstance(dropped, dict):
+        dropped = {}
+
+    def _count(value: object, label: str) -> int:
+        if value is None:
+            return 0
+        if type(value) is not int or value < 0:
+            raise RuntimeError(
+                f"publish: {catalog_path.name} {label} is not a count: {value!r}"
+            )
+        return value
+
+    candidates = _count(pool.get("candidates"), "pool.candidates")
+    if candidates <= 0:
+        raise RuntimeError(f"publish: {catalog_path.name} has no ranked models")
+    counts = {
+        reason: _count(dropped.get(reason), reason) for reason in ENDPOINT_DROP_REASONS
+    }
+    dropped_total = sum(counts.values())
+    entered = candidates + dropped_total
+    if entered and dropped_total / entered > MAX_NONZDR_ENDPOINT_DROP_RATE:
         raise RuntimeError(
             f"publish: {catalog_path.name} endpoint stage dropped "
             f"{dropped_total} of {entered} "
             f"({dropped_total / entered:.0%} > "
-            f"{MAX_ENDPOINT_DROP_RATE:.0%} limit): "
-            f"{ENDPOINT_DROP_REASONS[0]} {no_baseline}, "
-            f"{ENDPOINT_DROP_REASONS[1]} {fetch_failed}"
+            f"{MAX_NONZDR_ENDPOINT_DROP_RATE:.0%} limit)"
         )
 
 
@@ -589,6 +725,36 @@ def build_site(output_dir: Path) -> None:
         priority_args: list[str] = []
         for p in PRIORITIES:
             priority_args += ["--priority", f"{p}={scratch / f'{p}.json'}"]
+
+        # All-providers rows and catalog: the toggle's data. The row runs are
+        # cache-warm; the catalog run shares the ZDR run's caches too.
+        nonzdr_args: list[str] = []
+        for p in PRIORITIES:
+            rows_path = scratch / f"{p}-nonzdr.json"
+            run_pool_json(
+                model_compare,
+                [
+                    "--priority",
+                    p,
+                    "--json",
+                    "--top",
+                    "20",
+                    "--no-zdr",
+                    "--zdr-facts",
+                    *MODEL_COMPARE_FILTER_ARGS,
+                ],
+                rows_path,
+            )
+            nonzdr_args += ["--nonzdr-priority", f"{p}={rows_path}"]
+        nonzdr_catalog = output_dir / "catalog-nonzdr.json"
+        run_catalog(
+            model_compare,
+            ["--catalog", "--no-zdr", "--zdr-facts", *MODEL_COMPARE_FILTER_ARGS],
+            nonzdr_catalog,
+        )
+        run_validate_catalog(WEB_DIR / "build_site_data.py", nonzdr_catalog)
+        check_nonzdr_catalog(nonzdr_catalog)
+
         run_script(
             WEB_DIR / "build_site_data.py",
             [
@@ -605,6 +771,7 @@ def build_site(output_dir: Path) -> None:
                 "--revision",
                 resolve_revision(),
                 *priority_args,
+                *nonzdr_args,
             ],
         )
 
@@ -614,6 +781,7 @@ def build_site(output_dir: Path) -> None:
     artifacts = (
         "data.json",
         "catalog.json",
+        "catalog-nonzdr.json",
         "history.json",  # self-feeds the next run via PREV_HISTORY_URL
         "highlights.json",  # ditto via PREV_HIGHLIGHTS_URL
         *LITELLM_REQUIRED,

@@ -59,6 +59,10 @@ ROW_KEYS = (
     # joins it from catalog.json).
     "quality_effort",
     "default_effort",
+    # data.json v4 row key (endpoint-level ZDR): the quoted endpoint's own
+    # ZDR-list status, emitted on every row (null when the policy was
+    # unavailable). Required, so the site's badge never has to guess.
+    "zdr_status",
 )
 # provider-qualified opencode id (openrouter/<provider/model>), the plain
 # catalog id (<provider/model>), each with an optional :variant suffix.
@@ -75,6 +79,29 @@ MODEL_ID_RE = re.compile(
 REVISION_RE = re.compile(r"[0-9a-f]{7,40}")
 
 CATALOG_SCHEMA_VERSION = 6
+# Duplicated from model_compare.py by convention (subprocess isolation; same
+# precedent as ENDPOINT_DROP_REASONS in web/publish.py). pool.dropped must
+# carry exactly these keys: a new reason cannot ship without the contract.
+CATALOG_DROP_REASONS = (
+    "malformed id",
+    "context",
+    "pricing",
+    "schedule",
+    "free",
+    "batch",
+    "no discount",
+    "not ZDR",
+    "safety retention",
+    "modality",
+    "tool calling",
+    "expired",
+    "age",
+    "reasoning effort",
+    "no_baseline_eligible_endpoint",
+    "endpoint_fetch_failed",
+)
+# The quoted endpoint's own ZDR-list status (additive catalog schema 6).
+ZDR_STATUSES = ("strict", "safety-retention", "listed-unknown", "not-listed")
 
 # Duplicated from model_compare.py by convention (see PRECISION_LADDER below):
 # the modes --safety-retention accepts, and the only values
@@ -799,6 +826,13 @@ def validate_catalog(document) -> None:
         isinstance(value, int) for value in dropped.values()
     ):
         raise ValueError("catalog pool.dropped must map reasons to integers")
+    if set(dropped) != set(CATALOG_DROP_REASONS):
+        missing = sorted(set(CATALOG_DROP_REASONS) - set(dropped))
+        unknown = sorted(set(dropped) - set(CATALOG_DROP_REASONS))
+        raise ValueError(
+            "catalog pool.dropped must carry exactly CATALOG_DROP_REASONS: "
+            f"missing {missing or 'none'}, unknown {unknown or 'none'}"
+        )
     listed = pool.get("listed")
     if not isinstance(listed, int):
         raise ValueError("catalog pool.listed must be an integer")
@@ -843,6 +877,12 @@ def validate_catalog(document) -> None:
     if version is not None and not _is_number(version):
         raise ValueError(
             "catalog sources.aa.intelligence_index_version must be a number or null"
+        )
+    zdr_source = sources.get("zdr")
+    if zdr_source not in ("ok", "skipped", "unavailable"):
+        raise ValueError(
+            "catalog sources.zdr must be ok, skipped or unavailable: "
+            f"{zdr_source!r}"
         )
     models = document["models"]
     if not isinstance(models, list):
@@ -944,34 +984,73 @@ def validate_catalog(document) -> None:
                 f"models[{i}] scores.overall out of range: {', '.join(bad_overall)}"
             )
         _validate_catalog_quality_fields(entry, f"models[{i}]")
-        if parameters["zdr_required"] and entry["zdr"] is not True:
-            raise ValueError(f"models[{i}] is not zdr=true under zdr_required")
-        # Additive per-model retention tier. Optional, but when present it must
-        # agree with the pool rule that produced it: under `none` no candidate
-        # may depend on the allowance, and with no ZDR gate the field is null.
-        if "safety_retention" in entry:
-            flag = entry["safety_retention"]
-            if flag is not None and not isinstance(flag, bool):
+        zdr_flag = entry["zdr"]
+        if zdr_flag is not None and not isinstance(zdr_flag, bool):
+            raise ValueError(f"models[{i}] zdr must be a boolean or null")
+        # safety_retention and zdr_status are additive: a main-era schema-6
+        # catalog predates them, so absence is valid. Validate when present.
+        retention_present = "safety_retention" in entry
+        retention_flag = entry.get("safety_retention")
+        if retention_flag is not None and not isinstance(retention_flag, bool):
+            raise ValueError(
+                f"models[{i}] safety_retention must be a boolean or null"
+            )
+        if parameters["zdr_required"]:
+            if zdr_flag is not True:
                 raise ValueError(
-                    f"models[{i}] safety_retention must be a bool or null: {flag!r}"
+                    f"models[{i}] zdr must be true under zdr_required"
                 )
-            if not parameters["zdr_required"] and flag is not None:
+            if retention_present and retention_flag is None:
                 raise ValueError(
-                    f"models[{i}] safety_retention must be null when zdr is not "
-                    "required"
+                    f"models[{i}] safety_retention must be a boolean under "
+                    "zdr_required"
                 )
-            if parameters["zdr_required"] and flag is None:
+            if safety_mode == "none" and retention_flag is True:
                 raise ValueError(
-                    f"models[{i}] safety_retention must be a bool when zdr is required"
-                )
-            if parameters["zdr_required"] and safety_mode == "none" and flag is True:
-                raise ValueError(
-                    f"models[{i}] depends on safety retention under "
+                    f"models[{i}] safety_retention is true under "
                     "allow_safety_retention=none"
                 )
-        # Schema v3 additive blocks: the producer emits all four (null when
-        # the candidate skipped the endpoint stage); the shapes downstream
-        # consumers index into are pinned here.
+        elif retention_flag is not None:
+            raise ValueError(
+                f"models[{i}] safety_retention must be null when zdr is not "
+                "required"
+            )
+        zdr_status = entry.get("zdr_status")
+        if zdr_status is not None and zdr_status not in ZDR_STATUSES:
+            raise ValueError(f"models[{i}] zdr_status is unknown: {zdr_status!r}")
+        if entry["endpoints"] is None:
+            # Pre-endpoint candidate (direct caller / legacy fixture): the
+            # endpoint stage never ran, so the quote fact is null by
+            # construction and the ZDR source state is moot.
+            if zdr_status is not None:
+                raise ValueError(
+                    f"models[{i}] has a quote fact without an endpoint block"
+                )
+        else:
+            if zdr_status is not None:
+                if zdr_source not in ("ok", "skipped"):
+                    raise ValueError(
+                        f"models[{i}] zdr_status is set but sources.zdr is "
+                        f"{zdr_source!r}"
+                    )
+                if parameters["zdr_required"]:
+                    author = str(entry.get("id") or "").partition("/")[0]
+                    admitted = (
+                        zdr_status == "strict"
+                        or (
+                            zdr_status == "safety-retention"
+                            and (
+                                safety_mode == "all"
+                                or (safety_mode == "google" and author == "google")
+                            )
+                        )
+                        or (zdr_status == "listed-unknown" and safety_mode == "all")
+                    )
+                    if not admitted:
+                        raise ValueError(
+                            f"models[{i}] quote is not ZDR-admitted under "
+                            f"allow_safety_retention={safety_mode}: {zdr_status!r}"
+                        )
         default_precision = entry["default_precision"]
         if default_precision is not None and (
             # isinstance guard first: an unhashable value must fail the
@@ -1374,7 +1453,9 @@ def order_rows(rows, ranking) -> list:
 # of ROW_KEYS' required set (print_json emits them on every row). v3
 # (thinking depth): quality_effort and default_effort join the required row
 # keys; the nested reasoning block stays catalog-only and is dropped here.
-DATA_SCHEMA_VERSION = 3
+# v4 (endpoint-level ZDR): zdr_status joins the required row keys, and the
+# additive priorities_nonzdr block appears.
+DATA_SCHEMA_VERSION = 4
 
 
 def project_schedules(catalog) -> list:
@@ -1416,8 +1497,26 @@ def project_schedules(catalog) -> list:
     return [item[2] for item in decorated[:10]]
 
 
+def _validate_rows(name, rows, *, allow_empty) -> None:
+    """Require a priority's rows to be objects carrying every ROW_KEY."""
+    if not isinstance(rows, list) or (not rows and not allow_empty):
+        raise ValueError(f"no rows for priority {name!r}")
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"{name}[{i}] is not an object")
+        missing = [key for key in ROW_KEYS if key not in row]
+        if missing:
+            raise ValueError(f"{name}[{i}] is missing keys: {', '.join(missing)}")
+
+
 def build_data(
-    best, priorities, now=None, generated_at=None, catalog=None, revision=None
+    best,
+    priorities,
+    now=None,
+    generated_at=None,
+    catalog=None,
+    revision=None,
+    nonzdr_priorities=None,
 ) -> dict:
     """Validate the rows and wrap them into the data.json document.
 
@@ -1427,12 +1526,17 @@ def build_data(
     catalog, when given (already validated), is the ranking authority: each
     priority's rows are reordered to catalog["rankings"] via order_rows.
     Without it the rows pass through verbatim.
+
+    nonzdr_priorities is the All-providers row block: the same ROW_KEYS
+    contract, but every priority may be empty (a genuinely empty pool hides
+    the switch) and there is no catalog reordering -- the CLI output is the
+    only ranking source for that mode.
+
     revision, when given, is the short commit hash of the source that built
-    this document; it is stamped as source_revision (an additive field, the
-    contract stays at schema_version 2) so the site is traceable to the code
-    that produced it without versioning the web itself. Validated against
-    REVISION_RE -- the site footer links straight to it, so arbitrary text
-    must never reach the document. Omitted when absent.
+    this document; it is stamped as source_revision (an additive field) so the
+    site is traceable to the code that produced it without versioning the web
+    itself. Validated against REVISION_RE -- the site footer links straight to
+    it, so arbitrary text must never reach the document. Omitted when absent.
     """
     if not isinstance(best, str) or not MODEL_ID_RE.fullmatch(best.strip()):
         raise ValueError(f"best model id looks wrong: {best!r}")
@@ -1457,15 +1561,12 @@ def build_data(
     else:
         generated_at = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     for name in PRIORITIES:
-        rows = priorities.get(name)
-        if not isinstance(rows, list) or not rows:
-            raise ValueError(f"no rows for priority {name!r}")
-        for i, row in enumerate(rows):
-            if not isinstance(row, dict):
-                raise ValueError(f"{name}[{i}] is not an object")
-            missing = [key for key in ROW_KEYS if key not in row]
-            if missing:
-                raise ValueError(f"{name}[{i}] is missing keys: {', '.join(missing)}")
+        _validate_rows(name, priorities.get(name), allow_empty=False)
+    nonzdr_rows = {}
+    for name in PRIORITIES:
+        rows = (nonzdr_priorities or {}).get(name, [])
+        _validate_rows(f"nonzdr_{name}", rows, allow_empty=True)
+        nonzdr_rows[name] = rows
     # data.json rows stay lean: the producer's nested reasoning block is
     # catalog-only (the site's depth table joins it from catalog.json), so it
     # is dropped before the rows are projected into the document.
@@ -1489,6 +1590,13 @@ def build_data(
         "generated_at": generated_at,
         "best": best,
         "priorities": rows_by_priority,
+        "priorities_nonzdr": {
+            name: [
+                {key: value for key, value in row.items() if key != "reasoning"}
+                for row in nonzdr_rows[name]
+            ]
+            for name in PRIORITIES
+        },
         "schedules": project_schedules(catalog) if catalog is not None else [],
     }
     if revision is not None:
@@ -1511,10 +1619,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Build data.json for the published model-compare site"
     )
+    parser.add_argument("--best-file", help="file holding the `--best` output")
+    parser.add_argument("--output", help="data.json destination path")
     parser.add_argument(
-        "--best-file", required=True, help="file holding the `--best` output"
+        "--validate-catalog",
+        metavar="PATH",
+        help="validate a catalog document and exit (writes nothing)",
     )
-    parser.add_argument("--output", required=True, help="data.json destination path")
     parser.add_argument(
         "--catalog-file",
         help="raw model_compare.py --catalog output; validated and written as catalog.json next to --output",
@@ -1530,9 +1641,17 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--priority",
         action="append",
-        required=True,
+        default=[],
         metavar="NAME=FILE",
         help="priority name and its model_compare.py --json output file",
+    )
+    parser.add_argument(
+        "--nonzdr-priority",
+        action="append",
+        default=[],
+        metavar="NAME=FILE",
+        help="All-providers priority name and its model_compare.py --no-zdr "
+        "--json output file (each priority may be empty)",
     )
     parser.add_argument(
         "--revision",
@@ -1540,6 +1659,27 @@ def main(argv=None) -> int:
         "stamped into data.json as source_revision (omitted when not given)",
     )
     args = parser.parse_args(argv)
+    if args.validate_catalog:
+        if args.best_file or args.output or args.priority:
+            print(
+                "error: --validate-catalog is standalone (no --best-file, "
+                "--output or --priority)",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            with open(args.validate_catalog) as fh:
+                validate_catalog(json.load(fh))
+        except (OSError, ValueError) as exc:
+            print(f"error: invalid catalog: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if not args.best_file or not args.output or not args.priority:
+        print(
+            "error: --best-file, --output and --priority are required",
+            file=sys.stderr,
+        )
+        return 2
     catalog = None
     if args.catalog_file:
         try:
@@ -1569,12 +1709,21 @@ def main(argv=None) -> int:
                     f"duplicate --priority {name!r} (want each priority once)"
                 )
             priorities[name] = rows
+        nonzdr_priorities = {}
+        for pair in args.nonzdr_priority:
+            name, rows = parse_priority_pair(pair)
+            if name in nonzdr_priorities:
+                raise ValueError(
+                    f"duplicate --nonzdr-priority {name!r} (want each priority once)"
+                )
+            nonzdr_priorities[name] = rows
         data = build_data(
             best,
             priorities,
             generated_at=catalog["generated_at"] if catalog is not None else None,
             catalog=catalog,
             revision=args.revision,
+            nonzdr_priorities=nonzdr_priorities or None,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

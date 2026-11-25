@@ -1830,6 +1830,32 @@ def test_endpoint_zdr_allowed_modes():
     assert not mc.endpoint_zdr_allowed(not_zdr, "acme/a", "acme", args, policy)
 
 
+def test_endpoint_zdr_status_reports_the_quote_retention():
+    policy = {
+        ("acme/a", "acme/fp8"): {"safety_retention": False},
+        ("acme/a", "acme/fp4"): {"safety_retention": True},
+        ("acme/a", "acme/unknown"): {"safety_retention": None},
+    }
+    assert (
+        mc.endpoint_zdr_status("acme/a", _endpoint(tag="acme/fp8"), policy)
+        == "strict"
+    )
+    assert (
+        mc.endpoint_zdr_status("acme/a", _endpoint(tag="acme/fp4"), policy)
+        == "safety-retention"
+    )
+    assert (
+        mc.endpoint_zdr_status("acme/a", _endpoint(tag="acme/unknown"), policy)
+        == "listed-unknown"
+    )
+    assert (
+        mc.endpoint_zdr_status("acme/a", _endpoint(tag="acme/other"), policy)
+        == "not-listed"
+    )
+    assert mc.endpoint_zdr_status("acme/a", _endpoint(tag=""), policy) == "not-listed"
+    assert mc.endpoint_zdr_status("acme/a", _endpoint(tag="acme/fp8"), None) is None
+
+
 def test_baseline_eligible_rejects_non_zdr_endpoint():
     args = make_args()
     policy = {("acme/a", "acme/fp8"): {"safety_retention": False}}
@@ -3167,6 +3193,31 @@ def _stub_endpoint_pipeline(
     return calls
 
 
+def test_no_zdr_catalog_with_facts_passes_the_site_validator(
+    monkeypatch, capsys
+):
+    models = [make_model(id="z-ai/glm", name="Z.AI: GLM")]
+    endpoints = {"z-ai/glm": _endpoint_stage_eps()}
+    _stub_endpoint_pipeline(monkeypatch, models, endpoints)
+    zdr = {"z-ai/glm"}
+    frontend = mc.FrontendResult(
+        ({}, zdr, zdr, set(), {}, set(), []),
+        zdr_endpoints={("z-ai/glm", "other/tag"): {"safety_retention": False}},
+        endpoint_policy=None,
+    )
+    monkeypatch.setattr(mc, "fetch_openrouter_frontend", lambda a: frontend)
+    args = make_args(min_context=0, catalog=True, no_zdr=True, zdr_facts=True)
+    assert mc.run(args, models, False) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["sources"]["zdr"] == "skipped"
+    (entry,) = doc["models"]
+    assert entry["zdr"] is None
+    assert entry["safety_retention"] is None
+    assert entry["zdr_status"] == "not-listed"
+    # The reconciled site contract accepts the non-ZDR catalog as-is.
+    bsd.validate_catalog(doc)
+
+
 def test_pool_accounting_balances_with_endpoint_drops(monkeypatch, capsys):
     # run() now fetches session cost once per invocation (Task 8); pin the
     # keyless path so the suite never touches the network for it.
@@ -3653,18 +3704,71 @@ def test_json_rows_carry_new_additive_keys(monkeypatch, capsys):
     # with Task 12b's steering trailing them all (an extra key NOT in
     # ROW_KEYS; the row check is missing-key-only, so it passes through).
     assert all(key in row for key in bsd.ROW_KEYS)
-    assert list(row)[-6:] == [
+    assert list(row)[-7:] == [
         "default_precision",
         "risk_flag",
         "price_spread",
         "session_cost_usd",
         "quant_note",
+        "zdr_status",
         "steering",
     ]
     assert row["default_precision"] == "fp8"
     assert row["risk_flag"] is True
     assert row["price_spread"] == pytest.approx(0.5)
     assert row["session_cost_usd"] is None  # Task 7 fills it
+
+
+def test_no_zdr_quote_facts_are_emitted_without_gating(
+    monkeypatch, capsys
+):
+    args = make_args(no_zdr=True, zdr_facts=True, min_context=0)
+    monkeypatch.setattr(
+        mc, "fetch_model_endpoints", lambda mid, a: _endpoint_stage_eps()
+    )
+    models = [make_model(id="z-ai/glm", name="Z.AI: GLM")]
+    candidates, _ = mc.build_candidates(models, args, {}, set(), [])
+    candidates, dropped = mc.apply_endpoint_pricing(
+        candidates,
+        args,
+        [],
+        zdr_policy={("z-ai/glm", "other/tag"): {"safety_retention": False}},
+    )
+    assert dropped == {}
+    assert candidates[0]["id"] == "z-ai/glm"
+    assert candidates[0]["zdr_status"] == "not-listed"
+    mc.compute_scores(candidates, args, {})
+    mc.print_json(candidates)
+    (row,) = json.loads(capsys.readouterr().out)
+    assert row["zdr_status"] == "not-listed"
+
+
+def test_zdr_facts_do_not_change_no_zdr_rankings(monkeypatch):
+    args = make_args(min_context=0, no_zdr=True, zdr_facts=True)
+    monkeypatch.setattr(
+        mc, "fetch_model_endpoints", lambda mid, a: _endpoint_stage_eps()
+    )
+    models = [make_model(id="z-ai/glm", name="Z.AI: GLM")]
+
+    def ranked(zdr_policy):
+        candidates, dropped = mc.build_candidates(models, args, {}, set(), [])
+        candidates, endpoint_dropped = mc.apply_endpoint_pricing(
+            candidates, args, [], zdr_policy=zdr_policy
+        )
+        mc.compute_scores(candidates, args, {})
+        return (
+            dropped,
+            endpoint_dropped,
+            [
+                (c["id"], round(c["price_in"], 6), round(c["price_out"], 6),
+                 round(c["score"], 6))
+                for c in candidates
+            ],
+        )
+
+    without = ranked(None)
+    with_facts = ranked({("z-ai/glm", "other/tag"): {"safety_retention": False}})
+    assert without == with_facts
 
 
 def test_json_rows_tolerate_pre_endpoint_candidates(capsys):
@@ -3675,6 +3779,7 @@ def test_json_rows_tolerate_pre_endpoint_candidates(capsys):
         assert row["default_precision"] is None
         assert row["risk_flag"] is None
         assert row["price_spread"] is None
+        assert row["zdr_status"] is None
         assert row["session_cost_usd"] is None
         assert row["quant_note"] is None
 
@@ -3809,8 +3914,9 @@ def test_json_rows_carry_quant_note(monkeypatch, capsys):
     (row,) = json.loads(capsys.readouterr().out)
     # Appended after Task 6's four keys; Task 9's ROW_KEYS extension pins
     # quant_note as the fifth (emit-first keeps the missing-key check green).
-    # Task 12b's steering trails it as an extra key NOT in ROW_KEYS.
-    assert list(row)[-2:] == ["quant_note", "steering"]
+    # The additive zdr_status fact follows it; Task 12b's steering trails them
+    # both as an extra key NOT in ROW_KEYS.
+    assert list(row)[-3:] == ["quant_note", "zdr_status", "steering"]
     assert row["quant_note"] == (
         "cheapest non-baseline: fp4 @ DeepInfra, $0.125/M in (0.50x baseline)"
     )
@@ -5316,6 +5422,28 @@ def test_fetch_openrouter_frontend_returns_endpoint_policy(monkeypatch, tmp_path
     }
     # A plain 7-tuple stub has no attribute, so the gate stays off.
     assert getattr((), "endpoint_policy", None) is None
+
+
+def test_fetch_openrouter_frontend_zdr_facts_under_no_zdr(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    calls = []
+    stub_frontend(monkeypatch, calls, frontend_payload(), zdr_payload())
+
+    # Without the internal flag, --no-zdr keeps its old no-fetch behaviour.
+    plain = mc.fetch_openrouter_frontend(make_args(no_zdr=True, no_cache=True))
+    assert mc.OPENROUTER_ZDR_URL not in calls
+    assert getattr(plain, "zdr_endpoints", None) is None
+
+    # With it, the policy is fetched for display and still does not gate.
+    calls.clear()
+    facts = mc.fetch_openrouter_frontend(
+        make_args(no_zdr=True, zdr_facts=True, no_cache=True)
+    )
+    assert mc.OPENROUTER_ZDR_URL in calls
+    policy = getattr(facts, "zdr_endpoints", None)
+    assert policy is not None
+    assert policy[("acme/a", "acme")] == {"safety_retention": False}
+    assert policy[("acme/sr", "acme")] == {"safety_retention": True}
 
 
 def test_fetch_openrouter_frontend_caches_reasoning_entries(monkeypatch, tmp_path):
@@ -7404,6 +7532,13 @@ def test_build_candidates_reasoning_filter_appends_filtered_entry():
 
 def test_catalog_drop_reasons_includes_reasoning_effort():
     assert "reasoning effort" in mc.CATALOG_DROP_REASONS
+
+
+def test_parse_args_zdr_facts_is_internal_and_default_false():
+    assert mc.parse_args([]).zdr_facts is False
+    args = mc.parse_args(["--no-zdr", "--zdr-facts"])
+    assert args.no_zdr is True
+    assert args.zdr_facts is True
 
 
 def test_parse_args_reasoning_effort():
@@ -10678,8 +10813,9 @@ def test_catalog_entry_shape():
             "steering",
             "max_output_tokens",
             "input_modalities",
-            # additive: which retention tier the model's ZDR endpoints are
+            # additive: model-level retention tier and quote fact
             "safety_retention",
+            "zdr_status",
         }
         assert set(entry["pricing"]) == {
             "input_per_1m",

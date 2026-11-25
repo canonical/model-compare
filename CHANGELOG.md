@@ -29,10 +29,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flags across regional siblings.
 - The quoted endpoint must advertise tool calling and enough prompt context
   (`max_prompt_tokens`, else `context_length`) for the run's flags.
-- Genuinely free models (all endpoints zero-priced) keep a baseline and rank;
-  `--exclude-free` still drops them at the model level.
+- Genuinely free models (all endpoints zero-priced) keep a baseline and rank
+  when they clear the same ZDR/context/tool gates; `--exclude-free` still
+  drops them at the model level. An endpoint whose own tag carries
+  `:free`/`:batch` remains a variant.
 - `--flex` quotes and steers the Flex service tier (lower price, lower
   processing priority; can exceed another provider's standard endpoint).
+- The published site gains an **All providers** view: `catalog-nonzdr.json`
+  from `--no-zdr`, a `priorities_nonzdr` block in `data.json`, a ZDR/All
+  switch, and lazily loaded provider detail. `best.txt`, history, highlights,
+  deals and the LiteLLM artifacts stay ZDR-canonical.
+- Quote-retention facts for the site: each `--json` row and catalog entry
+  carries `zdr_status` (`strict`, `safety-retention`, `listed-unknown`,
+  `not-listed`, or null when unavailable). The internal `--zdr-facts` switch
+  fetches the policy under `--no-zdr` for display only and never gates a
+  quote. Catalog `schema_version` stays 6.
+- `data.json` moves to v4: `priorities_nonzdr` and `zdr_status` are additive;
+  existing `priorities` rows keep their meaning.
+- The site badges the quoted endpoint `ZDR` or `SR` (no base-inference
+  asterisk), adds sticky tables of contents to FAQ and How to use, and fixes
+  the retention switch, badge sizing and expanded-row typography.
 
 ### Changed
 
@@ -64,6 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt.
 - `history.json` moves to schema 6 so the corrected prices are not reported as
   price rises.
+- The publish endpoint-drop gate is split: `endpoint_fetch_failed` must stay
+  at or under 5% of the entered pool, and `no_baseline_eligible_endpoint` at
+  or under 75%. The All-providers catalog has its own 50% wipe gate.
 
 ## [0.7.11] - 2026-11-20
 

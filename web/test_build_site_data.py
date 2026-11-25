@@ -42,6 +42,9 @@ def make_row(**overrides):
         # null is its unknown-effort degradation.
         "quality_effort": None,
         "default_effort": None,
+        # data.json v4 row key (endpoint-level ZDR): the quoted endpoint's
+        # status; null is the policy-unavailable degradation.
+        "zdr_status": "strict",
     }
     row.update(overrides)
     return row
@@ -342,6 +345,8 @@ def make_catalog_entry(**overrides):
         "age_days": 10,
         "tool_calling": True,
         "zdr": True,
+        "safety_retention": False,
+        "zdr_status": "strict",
         "discount": None,
         "expired": False,
         "quality": 55.0,
@@ -383,7 +388,19 @@ def make_catalog_entry(**overrides):
         "annotations": None,
     }
     entry.update(overrides)
+    if "zdr_status" not in overrides and "endpoints" in entry:
+        if entry["endpoints"] is None:
+            entry["zdr_status"] = None
+        else:
+            entry["zdr_status"] = "strict"
     return entry
+
+
+def make_dropped(**counts):
+    """A complete CATALOG_DROP_REASONS map with the named counts."""
+    dropped = {reason: 0 for reason in bsd.CATALOG_DROP_REASONS}
+    dropped.update(counts)
+    return dropped
 
 
 def make_catalog():
@@ -399,8 +416,8 @@ def make_catalog():
             "max_age_days": 0.0,
             "zdr_required": True,
             "require_tools": True,
-            "exclude_free": False,
             "include_batch": False,
+            "allow_safety_retention": "google",
             "weights": {
                 "balanced": {"quality": 0.4, "price": 0.4, "context": 0.1, "age": 0.1},
                 "price": {"quality": 0.2, "price": 0.6, "context": 0.1, "age": 0.1},
@@ -423,7 +440,7 @@ def make_catalog():
             "zdr": "ok",
             "discounts": "ok",
         },
-        "pool": {"listed": 2, "candidates": 1, "dropped": {"context": 1}},
+        "pool": {"listed": 2, "candidates": 1, "dropped": make_dropped(context=1)},
         "models": [make_catalog_entry()],
         "rankings": {p: ["acme/model-a"] for p in ("balanced", "price", "quality")},
         "schedules": [],
@@ -455,6 +472,7 @@ def catalog_argv(tmp_path, catalog_file=None):
 def make_catalog_with_new_fields():
     doc = make_catalog()
     entry = doc["models"][0]
+    entry["zdr_status"] = "strict"
     entry["max_output_tokens"] = 64000
     entry["input_modalities"] = ["text", "image"]
     pricing = entry["pricing"]
@@ -746,7 +764,7 @@ def test_validate_catalog_rejects_removed_scrape_values(mutate, field):
         lambda doc: doc["models"][0].pop("scores"),
         lambda doc: doc["models"][0]["scores"].update(price=1.5),
         lambda doc: doc["models"][0]["scores"].update(overall={"balanced": 0.5}),
-        lambda doc: doc["models"][0].update(zdr=False),
+        lambda doc: doc["models"][0].update(zdr_status="bogus"),
         lambda doc: doc["filtered"].append({"id": "x/y", "name": "X", "reasons": []}),
         lambda doc: doc["models"].append("not-a-dict"),
         # a consumer deduping on content must never see the same id twice
@@ -1507,7 +1525,7 @@ def _invariant_catalog():
         models.append(entry)
     doc = make_catalog()
     doc["models"] = models
-    doc["pool"] = {"listed": 6, "candidates": 5, "dropped": {"context": 1}}
+    doc["pool"] = {"listed": 6, "candidates": 5, "dropped": make_dropped(context=1)}
     doc["sources"]["aa"] = {
         "mode": "aa",
         "matched_aa": 0,
@@ -1945,7 +1963,7 @@ def test_build_data_schedules_key():
 
 def test_build_data_emits_schema_version():
     data = bsd.build_data("openrouter/acme/model-a", make_priorities())
-    assert data["schema_version"] == 3
+    assert data["schema_version"] == 4
 
 
 def test_row_keys_optional_passthrough():
@@ -1995,6 +2013,7 @@ def _v3_entry_blocks():
             }
         ],
         "default_precision": "fp8",
+        "zdr_status": "strict",
         "advertised_pricing": {
             "input_per_1m": 1.0,
             "output_per_1m": 2.0,
@@ -2245,7 +2264,7 @@ def test_rows_carry_new_keys_ordered_by_ranking():
             for model_id in scrambled
         ]
     data = bsd.build_data("acme/a", rows, catalog=catalog)
-    assert data["schema_version"] == 3
+    assert data["schema_version"] == 4
     for priority in bsd.PRIORITIES:
         for row, model_id in zip(
             data["priorities"][priority], catalog["rankings"][priority]
@@ -2311,7 +2330,7 @@ def test_data_v3_rows_require_depth_fields_and_drop_reasoning():
         quality_effort="high", default_effort="high", reasoning={"depths": []}
     )
     doc = bsd.build_data("acme/model-a", {p: [dict(row)] for p in bsd.PRIORITIES})
-    assert doc["schema_version"] == 3
+    assert doc["schema_version"] == 4
     assert "reasoning" not in doc["priorities"]["balanced"][0]
     assert doc["priorities"]["balanced"][0]["quality_effort"] == "high"
     assert doc["priorities"]["balanced"][0]["default_effort"] == "high"
@@ -2495,13 +2514,19 @@ def _enriched_filtered_entry(model_id="anthropic/claude-fable-5.2", **overrides)
         ),
     }
     entry.update(overrides)
+    if "zdr_status" not in overrides and "endpoints" in entry:
+        if entry["endpoints"] is None:
+            entry["zdr_status"] = None
+        else:
+            entry["zdr_status"] = "strict"
     return entry
 
 
 def test_validate_catalog_accepts_enriched_filtered_alongside_stubs():
     doc = make_catalog()
     doc["pool"]["listed"] = 5
-    doc["pool"]["dropped"] = {"context": 1, "not ZDR": 2, "endpoint_fetch_failed": 1}
+    doc["pool"]["dropped"] = make_dropped(context=1, endpoint_fetch_failed=1)
+    doc["pool"]["dropped"]["not ZDR"] = 2
     doc["filtered"] = [
         {"id": "acme/small", "name": "Small", "reasons": ["context"]},
         {
@@ -2688,8 +2713,16 @@ def test_catalog_accepts_allow_safety_retention():
 
 
 def test_catalog_accepts_documents_without_safety_retention_keys():
-    # backwards compatibility: a catalog written before the flag existed
-    bsd.validate_catalog(make_catalog())
+    # Backwards compatibility: a main-era schema-6 catalog predates both
+    # additive fields and has a real endpoint block. Absence must not fail.
+    import copy
+
+    doc = copy.deepcopy(make_catalog_with_new_fields())
+    entry = doc["models"][0]
+    assert entry["endpoints"] is not None
+    entry.pop("safety_retention")
+    entry.pop("zdr_status")
+    bsd.validate_catalog(doc)
 
 
 def test_catalog_rejects_unknown_safety_retention_mode():
@@ -2699,38 +2732,54 @@ def test_catalog_rejects_unknown_safety_retention_mode():
         bsd.validate_catalog(doc)
 
 
-def test_catalog_rejects_non_bool_safety_retention():
+def test_validate_catalog_allows_missing_quote_fact():
+    # The site degrades to no badge when the producer had no policy; a
+    # missing fact must not block a publish.
+    doc = make_catalog_with_new_fields()
+    doc["models"][0]["zdr_status"] = None
+    bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_rejects_unadmitted_quote_status():
+    doc = make_catalog_with_new_fields()
+    doc["models"][0]["zdr_status"] = "not-listed"
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_requires_complete_drop_map():
     doc = make_catalog()
+    doc["pool"]["dropped"].pop("endpoint_fetch_failed")
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_rejects_unadmitted_quote():
+    doc = make_catalog_with_new_fields()
+    doc["models"][0]["zdr_status"] = "safety-retention"
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_admits_sr_quote_for_google_under_google():
+    doc = make_catalog_with_new_fields()
     doc["parameters"]["allow_safety_retention"] = "google"
-    doc["models"][0]["safety_retention"] = "yes"
-    with pytest.raises(ValueError):
-        bsd.validate_catalog(doc)
+    doc["models"][0]["id"] = "google/gemini-x"
+    doc["models"][0]["zdr_status"] = "safety-retention"
+    doc["rankings"] = {
+        priority: ["google/gemini-x"] for priority in ("balanced", "price", "quality")
+    }
+    bsd.validate_catalog(doc)
 
 
-def test_catalog_rejects_allowance_dependent_model_under_none():
-    doc = make_catalog()
-    doc["parameters"]["allow_safety_retention"] = "none"
-    doc["models"][0]["safety_retention"] = True
-    with pytest.raises(ValueError):
-        bsd.validate_catalog(doc)
-
-
-def test_catalog_rejects_safety_retention_when_zdr_not_required():
-    doc = make_catalog()
+def test_validate_catalog_accepts_sr_under_no_zdr():
+    doc = make_catalog_with_new_fields()
     doc["parameters"]["zdr_required"] = False
+    doc["sources"]["zdr"] = "skipped"
     doc["models"][0]["zdr"] = None
-    doc["models"][0]["safety_retention"] = False
-    with pytest.raises(ValueError):
-        bsd.validate_catalog(doc)
-
-
-def test_catalog_accepts_allowance_dependent_models_under_google_and_all():
-    # the published-site shape: mode google, Google models flagged true
-    for mode in ("google", "all"):
-        doc = make_catalog()
-        doc["parameters"]["allow_safety_retention"] = mode
-        doc["models"][0]["safety_retention"] = True
-        bsd.validate_catalog(doc)
+    doc["models"][0]["safety_retention"] = None
+    doc["models"][0]["zdr_status"] = "safety-retention"
+    bsd.validate_catalog(doc)
 
 
 def test_catalog_rejects_null_allow_safety_retention():
@@ -2741,28 +2790,77 @@ def test_catalog_rejects_null_allow_safety_retention():
         bsd.validate_catalog(doc)
 
 
-def test_catalog_rejects_null_safety_retention_under_zdr_required():
-    # The producer writes null only when no ZDR gate ran; a null under the
-    # gate is a partial/broken catalog, not a valid additive omission.
-    doc = make_catalog()
-    doc["parameters"]["allow_safety_retention"] = "google"
-    doc["models"][0]["safety_retention"] = None
-    with pytest.raises(ValueError):
-        bsd.validate_catalog(doc)
+# ---------------------------------------------------------------------------
+# data.json v4: the All-providers row block (Task 5)
+# ---------------------------------------------------------------------------
 
 
-def test_catalog_rejects_allowance_dependent_model_without_policy():
-    # An entry carrying safety_retention:true must come with the policy
-    # parameter; absent is treated as the default `none` for this invariant.
-    doc = make_catalog()
-    doc["models"][0]["safety_retention"] = True
-    with pytest.raises(ValueError):
-        bsd.validate_catalog(doc)
+def test_data_schema_version_is_4():
+    assert bsd.DATA_SCHEMA_VERSION == 4
+    assert bsd.build_data("acme/model-a", make_priorities())["schema_version"] == 4
 
 
-def test_catalog_accepts_null_safety_retention_when_zdr_not_required():
-    doc = make_catalog()
-    doc["parameters"]["zdr_required"] = False
-    doc["models"][0]["zdr"] = None
-    doc["models"][0]["safety_retention"] = None
-    bsd.validate_catalog(doc)
+def test_build_data_priorities_nonzdr_defaults_empty():
+    data = bsd.build_data("acme/model-a", make_priorities())
+    assert data["priorities_nonzdr"] == {
+        "balanced": [],
+        "price": [],
+        "quality": [],
+    }
+
+
+def test_build_data_nonzdr_rows_validate_row_keys():
+    rows = {"balanced": [make_row()], "price": [make_row()], "quality": [make_row()]}
+    del rows["balanced"][0]["zdr_status"]
+    with pytest.raises(ValueError, match="zdr_status"):
+        bsd.build_data("acme/model-a", make_priorities(), nonzdr_priorities=rows)
+
+
+def test_build_data_nonzdr_rows_never_carry_detail():
+    rows = {"balanced": [make_row(reasoning={"depths": []})]}
+    data = bsd.build_data("acme/model-a", make_priorities(), nonzdr_priorities=rows)
+    (row,) = data["priorities_nonzdr"]["balanced"]
+    assert "reasoning" not in row
+    assert row["zdr_status"] == "strict"
+
+
+def test_build_data_does_not_reorder_nonzdr():
+    rows = {
+        "balanced": [
+            make_row(model="acme/model-b"),
+            make_row(model="acme/model-a"),
+        ]
+    }
+    data = bsd.build_data(
+        "acme/model-a",
+        make_priorities(),
+        catalog=make_catalog(),
+        nonzdr_priorities=rows,
+    )
+    assert [r["model"] for r in data["priorities_nonzdr"]["balanced"]] == [
+        "acme/model-b",
+        "acme/model-a",
+    ]
+
+
+def test_main_accepts_nonzdr_priority_files(tmp_path):
+    catalog = tmp_path / "catalog-raw.json"
+    catalog.write_text(json.dumps(make_catalog()))
+    argv, out = catalog_argv(tmp_path, catalog)
+    rows = tmp_path / "nonzdr.json"
+    rows.write_text(json.dumps([make_row(model="acme/model-z")]))
+    argv += ["--nonzdr-priority", f"balanced={rows}"]
+    assert bsd.main(argv) == 0
+    data = json.loads(out.read_text())
+    assert data["priorities_nonzdr"]["balanced"][0]["model"] == "acme/model-z"
+    assert data["priorities_nonzdr"]["price"] == []
+
+
+def test_validate_catalog_entry_point(tmp_path, capsys):
+    valid = tmp_path / "valid.json"
+    valid.write_text(json.dumps(make_catalog()))
+    assert bsd.main(["--validate-catalog", str(valid)]) == 0
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text(json.dumps({"schema_version": 7}))
+    assert bsd.main(["--validate-catalog", str(invalid)]) == 1
+    assert "error: invalid catalog" in capsys.readouterr().err

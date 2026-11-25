@@ -81,9 +81,14 @@ def test_preview_sh_serves_synthetic_fallback(tmp_path):
         assert data is not None, "preview.sh never served data.json"
 
         assert set(data["priorities"]) == {"balanced", "price", "quality"}
+        assert data["priorities_nonzdr"] == {
+            "balanced": [],
+            "price": [],
+            "quality": [],
+        }
         assert all(len(rows) == 20 for rows in data["priorities"].values())
-        assert data["schema_version"] == 2  # data.json is schema-versioned too
-        assert data["schedules"] == []  # every v2 data.json carries the key
+        assert data["schema_version"] == 4  # data.json is schema-versioned too
+        assert data["schedules"] == []  # every v4 data.json carries the key
         assert data["best"].startswith("openrouter/")
         assert (
             _get(f"http://127.0.0.1:{port}/best.txt").strip() == data["best"].encode()
@@ -119,5 +124,10 @@ def test_preview_fetches_companion_json_artifacts_when_live_succeeds(tmp_path):
     # Without highlights.json, history.json and catalog.json, local preview
     # hides Weekly highlights, blanks 7-DAY, and shows a red catalog error.
     text = SCRIPT.read_text()
-    for artifact in ("highlights.json", "history.json", "catalog.json"):
+    for artifact in (
+        "highlights.json",
+        "history.json",
+        "catalog.json",
+        "catalog-nonzdr.json",
+    ):
         assert f"$LIVE_URL/{artifact}" in text, artifact

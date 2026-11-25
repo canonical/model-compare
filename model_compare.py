@@ -794,6 +794,32 @@ def endpoint_zdr_allowed(endpoint, model_id, author, args, zdr_policy) -> bool:
     return False
 
 
+def endpoint_zdr_status(model_id, endpoint, zdr_policy) -> str | None:
+    """The quoted endpoint's ZDR-list status, for display only.
+
+    ``None`` means no policy was available. A policy with no entry for the
+    endpoint is ``not-listed``; a listed endpoint with no boolean
+    ``safety_retention`` flag is ``listed-unknown``. This never gates a
+    quote -- endpoint_zdr_allowed owns that decision.
+    """
+    if zdr_policy is None:
+        return None
+    if not isinstance(model_id, str) or not model_id:
+        return "not-listed"
+    tag = endpoint.get("tag")
+    if not isinstance(tag, str) or not tag:
+        return "not-listed"
+    info = zdr_policy.get((model_id, tag))
+    if info is None:
+        return "not-listed"
+    flag = info.get("safety_retention")
+    if flag is True:
+        return "safety-retention"
+    if flag is False:
+        return "strict"
+    return "listed-unknown"
+
+
 def endpoint_policy_allowed(
     endpoint, model_id, args, endpoint_policy, *, allow_deranked=False
 ) -> bool:
@@ -1600,6 +1626,7 @@ def apply_endpoint_pricing(
                 endpoint_policy=endpoint_policy,
             )
             continue
+        cand["zdr_status"] = endpoint_zdr_status(cand_id, baseline, zdr_policy)
         # The advertised models-API scalars, captured before the mutation.
         advertised_pricing = {
             "input_per_1m": cand["price_in"],
@@ -2696,7 +2723,7 @@ def fetch_openrouter_frontend(args):
                     "BYOK/moderation/deranked/training gates as unavailable"
                 )
 
-    if args.no_zdr:
+    if args.no_zdr and not getattr(args, "zdr_facts", False):
         return FrontendResult(
             (
                 discounts,
@@ -6403,6 +6430,10 @@ def print_json(top):
             # (Task 11 shows it verbatim). Emit-first: Task 9's ROW_KEYS
             # pins this key last; pre-endpoint candidates degrade to None.
             "quant_note": fmt_quant_note(cand.get("annotations")),
+            # Additive quote-retention fact for the site's ZDR/SR badge:
+            # the quoted endpoint's own ZDR-list status, never the
+            # model-level flag. None when no policy was available.
+            "zdr_status": cand.get("zdr_status"),
             # One extra row key AFTER quant_note -- steering is NOT in
             # ROW_KEYS. build_site_data's row check is missing-key-only, so
             # extras pass through (tier_note precedent) and the site
@@ -6744,6 +6775,7 @@ def build_catalog(
                 "tool_calling": cand["tool_calling"],
                 "zdr": cand["zdr"],
                 "safety_retention": cand.get("safety_retention"),
+                "zdr_status": cand.get("zdr_status"),
                 "discount": round(cand["discount"], 4)
                 if has_discount(cand["discount"])
                 else None,
@@ -7471,6 +7503,11 @@ def parse_args(argv=None):
         "--no-zdr",
         action="store_true",
         help="consider all models, not just zero-data-retention (ZDR) ones",
+    )
+    filters.add_argument(
+        "--zdr-facts",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     filters.add_argument(
         "--safety-retention",

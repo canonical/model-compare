@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="style.css?v=0.8.0-9" />
   </head>
   <body>
     <h1>model-compare</h1>
@@ -33,217 +33,230 @@
       tools.
     </p>
 
-    <div class="prose">
-      <div class="faq-item">
-        <h3>OpenCode v1 — Launch flag, shell alias</h3>
-        <p>
-          OpenCode v1 lets you pass a model ID straight on the command line with
-          <code>--model</code>. Alongside the web tables, this site publishes a
-          tiny plain-text file —
-          <a href="https://model-compare.dev/best.txt"><code>best.txt</code></a>
-          — that always holds the current <em>balanced</em> #1 pick, refreshed
-          every 3 hours.
-        </p>
-        <p>
-          Drop this alias into your shell config (<code>.bashrc</code>,
-          <code>.zshrc</code>, and similar), and every launch will pick up the
-          freshest winner automatically:
-        </p>
-        <pre
-          class="jsonbox"
-        >alias oc-best=<span class="js">'opencode --model "$(curl -fsSL https://model-compare.dev/best.txt)"'</span></pre>
-        <p class="hint">
-          Nothing fancy, but you never have to check the table or copy-paste a
-          model ID by hand.
-        </p>
+    <div class="page-with-toc">
+      <div class="prose">
+        <div class="faq-item">
+          <h3 id="opencode-v1">OpenCode v1 — Launch flag, shell alias</h3>
+          <p>
+            OpenCode v1 lets you pass a model ID straight on the command line with
+            <code>--model</code>. Alongside the web tables, this site publishes a
+            tiny plain-text file —
+            <a href="https://model-compare.dev/best.txt"><code>best.txt</code></a>
+            — that always holds the current <em>balanced</em> #1 pick, refreshed
+            every 3 hours.
+          </p>
+          <p>
+            Drop this alias into your shell config (<code>.bashrc</code>,
+            <code>.zshrc</code>, and similar), and every launch will pick up the
+            freshest winner automatically:
+          </p>
+          <pre
+            class="jsonbox"
+          >alias oc-best=<span class="js">'opencode --model "$(curl -fsSL https://model-compare.dev/best.txt)"'</span></pre>
+          <p class="hint">
+            Nothing fancy, but you never have to check the table or copy-paste a
+            model ID by hand.
+          </p>
 
-        <h3>OpenCode v2 — model-compare plugin</h3>
-        <p>
-          OpenCode v2 dropped the <code>--model</code> flag for interactive TUI
-          sessions. Instead, install <code>model-compare-opencode-plugin</code>:
-          it adds live <code>balanced</code>, <code>price</code>, and
-          <code>quality</code> aliases right into your OpenRouter model picker,
-          keeps them updated while you work, steers requests to the ranked
-          endpoint, and pins reasoning depth.
-        </p>
-        <p>
-          See <a href="plugin.html">the OpenCode plugin tab</a> for setup,
-          examples, and keyboard shortcuts.
-        </p>
-      </div>
+          <h3 id="opencode-v2">OpenCode v2 — model-compare plugin</h3>
+          <p>
+            OpenCode v2 dropped the <code>--model</code> flag for interactive TUI
+            sessions. Instead, install <code>model-compare-opencode-plugin</code>:
+            it adds live <code>balanced</code>, <code>price</code>, and
+            <code>quality</code> aliases right into your OpenRouter model picker,
+            keeps them updated while you work, steers requests to the ranked
+            endpoint, and pins reasoning depth.
+          </p>
+          <p>
+            See <a href="plugin.html">the OpenCode plugin tab</a> for setup,
+            examples, and keyboard shortcuts.
+          </p>
+        </div>
 
-      <div class="faq-item">
-        <h3>How do I pin routing with the steering block?</h3>
-        <p>
-          When you call OpenRouter with just a model name, OpenRouter decides
-          which backend provider handles your request. As explained in the
-          <a href="faq.html">FAQ</a>, that default route can land on a pricier
-          provider — or on a more heavily compressed quantization — than the one
-          that earned the model its spot on
-          <a href="index.html">the Picks page</a>.
-        </p>
-        <p>
-          To get the exact setup we ranked, attach OpenRouter's
-          <code>provider</code> routing object to your request. You don't have
-          to put it together yourself: every ranked model in the published
-          <a href="https://model-compare.dev/catalog.json"
-            ><code>catalog.json</code></a
-          >
-          file includes a ready-made <code>steering</code> block:
-        </p>
-        <pre class="jsonbox"><span class="jp">{</span>
-  <span class="jk">"model"</span><span class="jp">:</span> <span class="js">"deepseek/deepseek-v4.1-flash-1017"</span><span class="jp">,</span>
-  <span class="jk">"provider"</span><span class="jp">:</span> <span class="jp">{</span>
-    <span class="jk">"order"</span><span class="jp">:</span> <span class="jp">[</span><span class="js">"DeepInfra/fp8"</span><span class="jp">,</span> <span class="js">"Baidu/bf16"</span><span class="jp">]</span><span class="jp">,</span>
-    <span class="jk">"ignore"</span><span class="jp">:</span> <span class="jp">[</span><span class="js">"Morph/int4"</span><span class="jp">]</span><span class="jp">,</span>
-    <span class="jk">"quantizations"</span><span class="jp">:</span> <span class="jp">[</span><span class="js">"bf16"</span><span class="jp">,</span> <span class="js">"fp8"</span><span class="jp">]</span><span class="jp">,</span>
-    <span class="jk">"allow_fallbacks"</span><span class="jp">:</span> <span class="js">true</span>
-  <span class="jp">}</span>
-<span class="jp">}</span></pre>
-        <p>Here is what each piece inside <code>provider</code> does:</p>
-        <ul>
-          <li>
-            <code>order</code> — eligible backend providers, listed cheapest
-            first, so OpenRouter tries the best-value option first.
-          </li>
-          <li>
-            <code>ignore</code> — live providers excluded from the ranking (for
-            instance, lower-precision quantizations or incompatible pricing
-            tiers).
-          </li>
-          <li>
-            <code>quantizations</code> — acceptable precision levels, at or
-            above the model's baseline (left out when providers don't disclose
-            precision).
-          </li>
-          <li>
-            <code>allow_fallbacks</code> — lets OpenRouter fall back if every
-            provider listed in <code>order</code> is temporarily unavailable,
-            rather than failing the request (while still honoring
-            <code>ignore</code> and <code>quantizations</code>).
-          </li>
-        </ul>
-        <p>
-          Pass that <code>provider</code> object along with your API request as
-          is. If you're using Python's OpenAI SDK, put it inside
-          <code>extra_body</code> — the SDK strips unfamiliar top-level
-          arguments before sending the call:
-        </p>
-        <pre
-          class="jsonbox"
-        ><span class="jk">client.chat.completions.create</span><span class="jp">(</span>
-  <span class="jk">model</span><span class="jp">=</span><span class="js">"deepseek/deepseek-v4.1-flash-1017"</span><span class="jp">,</span>
-  <span class="jk">messages</span><span class="jp">=[…]</span><span class="jp">,</span>
-  <span class="jk">extra_body</span><span class="jp">={</span><span class="js">"provider"</span><span class="jp">:</span> steering<span class="jp">[</span><span class="js">"provider"</span><span class="jp">]}</span><span class="jp">,</span>
-<span class="jp">)</span></pre>
-        <p class="hint">
-          Using OpenCode v2?
-          <a href="plugin.html">The OpenCode plugin</a> injects this block for
-          you automatically whenever you use one of its aliases.
-        </p>
-      </div>
-
-      <div class="faq-item">
-        <h3>How do I verify which endpoint served a call?</h3>
-        <p>
-          Every completion response from OpenRouter includes a
-          <code>provider</code> field naming the backend that actually answered.
-          Check it against the row's expanded <strong>Providers</strong> table
-          on <a href="index.html">the Picks page</a> (where <code>✓</code> marks
-          the ranked endpoint) — or against
-          <code>steering.provider.order[0]</code> if you pinned routing.
-        </p>
-        <p>
-          For billing ground truth, open the <strong>Activity</strong> view in
-          your OpenRouter dashboard. It logs the serving provider, exact price,
-          and latency for each request. (In OpenCode with the plugin installed,
-          you can also press <code>alt+e</code> to pop up a quick toast showing
-          which endpoint served your last reply.)
-        </p>
-      </div>
-
-      <div class="faq-item">
-        <h3>How do I pull the live rankings into my own scripts?</h3>
-        <p>
-          Everything powering this site is published as static files over HTTPS
-          and rebuilt every 3 hours. You don't need an API key, and you don't
-          need to scrape HTML:
-        </p>
-        <ul>
-          <li>
-            <a href="https://model-compare.dev/best.txt"
-              ><code>best.txt</code></a
-            >
-            — just the current <em>balanced</em> #1 model ID on a single line
-            (<code>openrouter/&lt;provider&gt;/&lt;model&gt;</code>), ideal for
-            shell one-liners.
-          </li>
-          <li>
-            <a href="https://model-compare.dev/data.json"
-              ><code>data.json</code></a
-            >
-            — the top 20 rows for <code>balanced</code>, <code>price</code>, and
-            <code>quality</code>, plus the off-peak deals list and the refresh
-            timestamp.
-          </li>
-          <li>
+        <div class="faq-item">
+          <h3 id="steering-block">How do I pin routing with the steering block?</h3>
+          <p>
+            When you call OpenRouter with just a model name, OpenRouter decides
+            which backend provider handles your request. As explained in the
+            <a href="faq.html">FAQ</a>, that default route can land on a pricier
+            provider — or on a more heavily compressed quantization — than the one
+            that earned the model its spot on
+            <a href="index.html">the Picks page</a>.
+          </p>
+          <p>
+            To get the exact setup we ranked, attach OpenRouter's
+            <code>provider</code> routing object to your request. You don't have
+            to put it together yourself: every ranked model in the published
             <a href="https://model-compare.dev/catalog.json"
               ><code>catalog.json</code></a
             >
-            — the full dataset: every ranked candidate (and every filtered-out
-            model, with the reason it was dropped), per-endpoint pricing,
-            reasoning-depth scores, and <code>steering</code> blocks.
-          </li>
-        </ul>
-        <p>
-          For example, to grab the current #1 <code>quality</code> pick with
-          <code>curl</code> and <code>jq</code>:
-        </p>
-        <pre
-          class="jsonbox"
-        >curl -fsSL https://model-compare.dev/data.json | jq -r <span class="js">'.priorities.quality[0].opencode_model'</span></pre>
-      </div>
+            file includes a ready-made <code>steering</code> block:
+          </p>
+          <pre class="jsonbox"><span class="jp">{</span>
+    <span class="jk">"model"</span><span class="jp">:</span> <span class="js">"deepseek/deepseek-v4.1-flash-1017"</span><span class="jp">,</span>
+    <span class="jk">"provider"</span><span class="jp">:</span> <span class="jp">{</span>
+      <span class="jk">"order"</span><span class="jp">:</span> <span class="jp">[</span><span class="js">"DeepInfra/fp8"</span><span class="jp">,</span> <span class="js">"Baidu/bf16"</span><span class="jp">]</span><span class="jp">,</span>
+      <span class="jk">"ignore"</span><span class="jp">:</span> <span class="jp">[</span><span class="js">"Morph/int4"</span><span class="jp">]</span><span class="jp">,</span>
+      <span class="jk">"quantizations"</span><span class="jp">:</span> <span class="jp">[</span><span class="js">"bf16"</span><span class="jp">,</span> <span class="js">"fp8"</span><span class="jp">]</span><span class="jp">,</span>
+      <span class="jk">"allow_fallbacks"</span><span class="jp">:</span> <span class="js">true</span>
+    <span class="jp">}</span>
+  <span class="jp">}</span></pre>
+          <p>Here is what each piece inside <code>provider</code> does:</p>
+          <ul>
+            <li>
+              <code>order</code> — eligible backend providers, listed cheapest
+              first, so OpenRouter tries the best-value option first.
+            </li>
+            <li>
+              <code>ignore</code> — live providers excluded from the ranking (for
+              instance, lower-precision quantizations or incompatible pricing
+              tiers).
+            </li>
+            <li>
+              <code>quantizations</code> — acceptable precision levels, at or
+              above the model's baseline (left out when providers don't disclose
+              precision).
+            </li>
+            <li>
+              <code>allow_fallbacks</code> — lets OpenRouter fall back if every
+              provider listed in <code>order</code> is temporarily unavailable,
+              rather than failing the request (while still honoring
+              <code>ignore</code> and <code>quantizations</code>).
+            </li>
+          </ul>
+          <p>
+            Pass that <code>provider</code> object along with your API request as
+            is. If you're using Python's OpenAI SDK, put it inside
+            <code>extra_body</code> — the SDK strips unfamiliar top-level
+            arguments before sending the call:
+          </p>
+          <pre
+            class="jsonbox"
+          ><span class="jk">client.chat.completions.create</span><span class="jp">(</span>
+    <span class="jk">model</span><span class="jp">=</span><span class="js">"deepseek/deepseek-v4.1-flash-1017"</span><span class="jp">,</span>
+    <span class="jk">messages</span><span class="jp">=[…]</span><span class="jp">,</span>
+    <span class="jk">extra_body</span><span class="jp">={</span><span class="js">"provider"</span><span class="jp">:</span> steering<span class="jp">[</span><span class="js">"provider"</span><span class="jp">]}</span><span class="jp">,</span>
+  <span class="jp">)</span></pre>
+          <p class="hint">
+            Using OpenCode v2?
+            <a href="plugin.html">The OpenCode plugin</a> injects this block for
+            you automatically whenever you use one of its aliases.
+          </p>
+        </div>
 
-      <div class="faq-item">
-        <h3>How do I use these prices and routing rules with LiteLLM?</h3>
-        <p>
-          If you route traffic through a
-          <a href="https://docs.litellm.ai/">LiteLLM</a> proxy, its built-in
-          cost map only knows OpenRouter's headline rates — not per-endpoint
-          prices, long-context tiers, or off-peak discount windows.
-        </p>
-        <p>
-          On every refresh, this site publishes
-          <a href="https://model-compare.dev/litellm.json"
-            ><code>litellm.json</code></a
-          >: LiteLLM's upstream price map merged with accurate
-          <code>openrouter/&lt;model&gt;</code> entries for every ranked
-          candidate. Point LiteLLM at it in your environment before starting the
-          proxy:
-        </p>
-        <pre
-          class="jsonbox"
-        >export LITELLM_MODEL_COST_MAP_URL=<span class="js">https://model-compare.dev/litellm.json</span></pre>
-        <p>
-          Two companion files are published alongside it if you want finer
-          control:
-          <a href="https://model-compare.dev/litellm_rate_card.json"
-            ><code>litellm_rate_card.json</code></a
-          >
-          (just our <code>openrouter/</code> entries, if you prefer merging
-          upstream yourself) and
-          <a href="https://model-compare.dev/litellm_steering.json"
-            ><code>litellm_steering.json</code></a
-          >
-          (matching <code>provider</code> routing profiles and scored reasoning
-          depths, ready for a LiteLLM pre-call hook). See the
-          <a
-            href="https://github.com/canonical/model-compare/blob/main/DESIGN.md#litellm-artifacts"
-            >LiteLLM section in DESIGN.md</a
-          >
-          for hook wiring and edge cases.
-        </p>
+        <div class="faq-item">
+          <h3 id="verify-endpoint">How do I verify which endpoint served a call?</h3>
+          <p>
+            Every completion response from OpenRouter includes a
+            <code>provider</code> field naming the backend that actually answered.
+            Check it against the row's expanded <strong>Providers</strong> table
+            on <a href="index.html">the Picks page</a> (where <code>✓</code> marks
+            the ranked endpoint) — or against
+            <code>steering.provider.order[0]</code> if you pinned routing.
+          </p>
+          <p>
+            For billing ground truth, open the <strong>Activity</strong> view in
+            your OpenRouter dashboard. It logs the serving provider, exact price,
+            and latency for each request. (In OpenCode with the plugin installed,
+            you can also press <code>alt+e</code> to pop up a quick toast showing
+            which endpoint served your last reply.)
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="rankings-scripts">How do I pull the live rankings into my own scripts?</h3>
+          <p>
+            Everything powering this site is published as static files over HTTPS
+            and rebuilt every 3 hours. You don't need an API key, and you don't
+            need to scrape HTML:
+          </p>
+          <ul>
+            <li>
+              <a href="https://model-compare.dev/best.txt"
+                ><code>best.txt</code></a
+              >
+              — just the current <em>balanced</em> #1 model ID on a single line
+              (<code>openrouter/&lt;provider&gt;/&lt;model&gt;</code>), ideal for
+              shell one-liners.
+            </li>
+            <li>
+              <a href="https://model-compare.dev/data.json"
+                ><code>data.json</code></a
+              >
+              — the top 20 rows for <code>balanced</code>, <code>price</code>, and
+              <code>quality</code>, plus the off-peak deals list and the refresh
+              timestamp.
+            </li>
+            <li>
+              <a href="https://model-compare.dev/catalog.json"
+                ><code>catalog.json</code></a
+              >
+              — the full dataset: every ranked candidate (and every filtered-out
+              model, with the reason it was dropped), per-endpoint pricing,
+              reasoning-depth scores, and <code>steering</code> blocks.
+            </li>
+          </ul>
+          <p>
+            For example, to grab the current #1 <code>quality</code> pick with
+            <code>curl</code> and <code>jq</code>:
+          </p>
+          <pre
+            class="jsonbox"
+          >curl -fsSL https://model-compare.dev/data.json | jq -r <span class="js">'.priorities.quality[0].opencode_model'</span></pre>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="litellm">How do I use these prices and routing rules with LiteLLM?</h3>
+          <p>
+            If you route traffic through a
+            <a href="https://docs.litellm.ai/">LiteLLM</a> proxy, its built-in
+            cost map only knows OpenRouter's headline rates — not per-endpoint
+            prices, long-context tiers, or off-peak discount windows.
+          </p>
+          <p>
+            On every refresh, this site publishes
+            <a href="https://model-compare.dev/litellm.json"
+              ><code>litellm.json</code></a
+            >: LiteLLM's upstream price map merged with accurate
+            <code>openrouter/&lt;model&gt;</code> entries for every ranked
+            candidate. Point LiteLLM at it in your environment before starting the
+            proxy:
+          </p>
+          <pre
+            class="jsonbox"
+          >export LITELLM_MODEL_COST_MAP_URL=<span class="js">https://model-compare.dev/litellm.json</span></pre>
+          <p>
+            Two companion files are published alongside it if you want finer
+            control:
+            <a href="https://model-compare.dev/litellm_rate_card.json"
+              ><code>litellm_rate_card.json</code></a
+            >
+            (just our <code>openrouter/</code> entries, if you prefer merging
+            upstream yourself) and
+            <a href="https://model-compare.dev/litellm_steering.json"
+              ><code>litellm_steering.json</code></a
+            >
+            (matching <code>provider</code> routing profiles and scored reasoning
+            depths, ready for a LiteLLM pre-call hook). See the
+            <a
+              href="https://github.com/canonical/model-compare/blob/main/DESIGN.md#litellm-artifacts"
+              >LiteLLM section in DESIGN.md</a
+            >
+            for hook wiring and edge cases.
+          </p>
+        </div>
       </div>
+      <nav class="toc" aria-label="On this page">
+        <p class="toc-title">On this page</p>
+        <ul>
+          <li><a href="#opencode-v1">OpenCode v1 — launch flag, alias</a></li>
+          <li><a href="#opencode-v2">OpenCode v2 — plugin</a></li>
+          <li><a href="#steering-block">Pin routing with the steering block</a></li>
+          <li><a href="#verify-endpoint">Verify which endpoint served a call</a></li>
+          <li><a href="#rankings-scripts">Pull rankings into scripts</a></li>
+          <li><a href="#litellm">Use with LiteLLM</a></li>
+        </ul>
+      </nav>
     </div>
 
     <footer>
@@ -251,6 +264,11 @@
       <a href="https://github.com/canonical/model-compare"
         >canonical/model-compare</a
       >
+    <p class="hint">
+      The Picks page has a ZDR view (the default) and an All providers view.
+      Provider details in the All-providers view load on first use. Plugin
+      aliases always come from the ZDR view.
+    </p>
     </footer>
   </body>
 </html>

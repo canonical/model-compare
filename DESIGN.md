@@ -91,7 +91,8 @@ tool-calling support (`--no-require-tools` to relax), unparseable/negative
 prices, expired listings, `:batch` variants (asynchronous completion — no
 good for interactive agents; `--include-batch` to keep them), models without
 a zero-data-retention (ZDR) endpoint by default (`--no-zdr` to consider
-everything), (with `--exclude-free`) rate-limited `:free` variants, and (with
+everything), (with `--exclude-free`) zero-priced/free candidates (including
+rate-limited `:free` listings), and (with
 `--reasoning-effort <effort>`) models that cannot run the selected effort.
 
 The baseline endpoint must also carry the capability the model advertised:
@@ -142,7 +143,9 @@ policy, fail-closed on a known rejection).
 A genuinely free model — one whose endpoints are all zero-priced — keeps a
 baseline: the zero-price "variant" rule identifies a cheap variant of a
 *paid* model, so it only applies when the model has at least one paid
-endpoint. `--exclude-free` still drops free models at the model level.
+endpoint. It still passes the same ZDR, context and tool gates as any other
+model, so a non-ZDR free model normally ranks only under `--no-zdr`.
+`--exclude-free` still drops free models at the model level.
 
 ## Quality sources and reconciliation
 
@@ -478,6 +481,37 @@ gate ran. The same block records `byok`, `no_moderation` and
 `include_deranked`, so a published artifact states which endpoint-policy gates
 were active; they are additive and carry the run's defaults on the site.
 
+## The published site: ZDR and All providers
+
+The site publishes two catalogs of the same schema, both validated by
+`web/build_site_data.py`: `catalog.json` from the default ZDR run, and
+`catalog-nonzdr.json` from `--catalog --no-zdr --zdr-facts`. `--zdr-facts` is
+an internal flag: it fetches the ZDR policy only to annotate each quote with
+`zdr_status` (`strict`, `safety-retention`, `listed-unknown`, `not-listed`, or
+`null` when no policy was available) and never gates a quote. The field is
+additive on catalog entries and on `--json` rows, so the catalog stays schema
+6. `--no-zdr` without `--zdr-facts` keeps its old behaviour: no ZDR fetch,
+null facts, no badges.
+
+`data.json` is v4: `priorities` carries the ZDR rows and the additive
+`priorities_nonzdr` block carries the All-providers rows. Every row carries
+`zdr_status`; the site shows `SR` in both views and `ZDR` only in All providers
+(in the ZDR view the badge would be redundant). The retired `ZDR*`/`SR*`
+base-inference badge is not part of this contract: the backend's ZDR match is
+exact, so only the quoted endpoint's own listing decides the badge. A missing
+badge means the endpoint is not listed, its retention flag is unknown, or the
+build had no policy data.
+
+The All-providers catalog is fetched lazily on the first flip; provider detail
+loads on first use. `best.txt`, history, highlights, deals and the LiteLLM
+artifacts remain ZDR-canonical. The publish gate is split: endpoint fetch
+failures must stay at or under 5% of the entered pool, and semantic endpoint
+drops (`no_baseline_eligible_endpoint`) at or under 75%; the non-ZDR catalog
+has its own 50% wipe gate and requires a real non-ZDR identity
+(`zdr_required=false`, `sources.zdr=skipped`, null `zdr`/`safety_retention`).
+An empty All-providers catalog fails the publish; the site still hides the
+switch defensively if a `data.json` has an empty block.
+
 ## CLI output
 
 The plain table path splits across the two streams. stdout carries the table,
@@ -553,11 +587,10 @@ catalog — feeds internal Canonical tooling: tokens.canonical.com (the
 `canonical/agent-provisioner` backend) fetches `data.json` daily and reads
 only its `priorities` mapping (rows with a string `model` id, optional
 `quality_index`, optional `discount`), and pins its schema. `data.json` is
-now v3: the field-level shape is unchanged, but `quality_index` is the
-scored-effort value (best measured selectable depth by default, exact
-`--reasoning-effort` when explicitly requested) and can differ from the
-max-effort values the backend used to read. Its `ARTIFACT_SCHEMA_VERSION` pin (1 today; issue
-#21 tracks the in-flight bump to 2) needs to reach 3 in the same window,
+now v4: `priorities` keeps the existing row shape and meaning (the
+`quality_index` semantics described below), while `priorities_nonzdr` and
+`zdr_status` are additive. Its `ARTIFACT_SCHEMA_VERSION` pin (1 today; issue
+#21 tracks the in-flight bump to 2) needs to reach 4 in the same window,
 tracked in `canonical/agent-provisioner#638`; the backend fails closed until
 then and keeps its previous snapshot. The
 catalog's strict consumer is the [model-compare OpenCode
@@ -594,7 +627,7 @@ needs nothing else), `sources` (`openrouter`, `aa` with `mode`
 `matched_aa`, `matched_catalog` and `matched_openrouter`, the depth counts
 `depth_rows`/`matched_depth`/`matched_default`, and the provenance
 meta `catalog_generated_at`/`intelligence_index_version`, `zdr`
-`ok`/`skipped`, `discounts`
+`ok`/`skipped`/`unavailable`, `discounts`
 `ok`/`unavailable` — where `unavailable` covers both a failed discount fetch
 and a live pool with zero discounts, `endpoints` always `ok` — endpoint-stage
 failures surface as pool drops, never as source state, `session_cost`
@@ -683,9 +716,10 @@ v5 additive `quality_effort` (the effort behind `quality`) and `reasoning`
 block, `scores` —
 the four component scores plus
 `overall` for all three priorities, so downstream consumers never re-run
-the scorer — and the v3 additive per-model blocks `endpoints`,
-`default_precision`, `advertised_pricing`, `annotations` (plus `steering`,
-below).
+the scorer — the v3 additive per-model blocks `endpoints`,
+`default_precision`, `advertised_pricing`, `annotations`, the additive
+`zdr_status` (the quoted endpoint's own ZDR-list status; null when the policy
+was unavailable) (plus `steering`, below).
 
 **The `reasoning` block (v5) is always present**: `default_effort` (the
 effective default, not the raw pre-select value),
@@ -754,9 +788,11 @@ The other per-model additive blocks:
   fail-closed.
   The per-model endpoint cache key is
   `endpoints-v3:<id>`; the stale-annotation read uses the same helper.
-- `default_precision` — the precision the ranked price is quoted at (the
-  maker's own best, else the best available in the derivation universe —
-  live non-variant endpoints that pass the schedule gate); one of the
+- `default_precision` — the model-level baseline precision derived from the
+  live non-variant endpoints that pass the schedule gate (the maker's own
+  best, else the best available). It is not necessarily the precision of the
+  endpoint that sets the ranked price, and it is view-independent: both the
+  ZDR and All-providers catalogs derive it the same way. One of the
   precision-ladder labels, or `null` when no live endpoint names a known
   quantization (common for closed models — eligibility then relies solely on
   the first-party carve-out). The carve-out matches the maker's own author
@@ -840,7 +876,7 @@ pool-accounting invariant (`sum(dropped) + candidates == listed`, enforced by
 `web/build_site_data.py`) and the publish drop-rate gate below, which read
 `pool.dropped`, break if a reason is produced but not registered.
 
-Version gates: catalog `schema_version` 6, `data.json` 3, and
+Version gates: catalog `schema_version` 6, `data.json` 4, and
 `history.json` 6 — each a strict identity check accepting exactly that value
 and rejecting anything else. The catalog producer in `model_compare.py` and
 its reader gate (`CATALOG_QUALITY_SCHEMA_VERSION`, derived from the producer)
@@ -848,7 +884,11 @@ use v6; the web catalog validator in `web/build_site_data.py` also requires
 v6. The `max_output_tokens`, `input_modalities`, cache-rate and endpoint
 `max_completion_tokens` fields are additive, so v6 stays 6; the validator
 checks them only when present so pre-change catalogs still load.
-`data.json` stays at schema 3, and `highlights.json` stays at schema 1.
+`data.json` is at schema 4: `priorities_nonzdr` and the per-row `zdr_status`
+are additive, but the document version moved with the site's All-providers
+contract; existing `priorities` rows keep their meaning. Downstream consumers
+that pin the document version must accept 4. `highlights.json` stays at
+schema 1.
 The v5 cutover moved the catalog, data and history gates together: `quality`
 changed to the selected/default-effort meaning, `data.json` gained the
 required `quality_effort` and `default_effort` row keys, and the max-based
@@ -865,10 +905,14 @@ only an explicit version mismatch triggers the reset. `web/build_site_data.py` h
 the catalog, `data.json` and history gates; `web/publish.py` pins
 `data.json`'s version in `check_stamps`. It also fails the run when more than
 5% of the entered pool (`candidates` + the two endpoint-stage drops) is
-dropped for an endpoint-derived reason (`no_baseline_eligible_endpoint` or
-`endpoint_fetch_failed`; constant `MAX_ENDPOINT_DROP_RATE = 0.05`) — a
-transient API outage or a first-party-detection miss must shrink the public
-ranking loudly, never silently. The history bump at the pricing cutover reset
+dropped for `endpoint_fetch_failed` (`MAX_ENDPOINT_DROP_RATE = 0.05`), or when
+more than 75% is dropped for `no_baseline_eligible_endpoint`
+(`MAX_SEMANTIC_ENDPOINT_DROP_RATE = 0.75`). The split distinguishes transient
+API churn from endpoint-state churn: a provider outage should fail loudly,
+while a few models legitimately losing their quote should not. A
+first-party-detection miss still shrinks the public ranking loudly, never
+silently. The non-ZDR catalog has its own 50% wipe gate
+(`MAX_NONZDR_ENDPOINT_DROP_RATE`). The history bump at the pricing cutover reset
 all snapshot history: prices, rank movement, the AA index and pool ids. Old
 snapshots describe old price semantics (advertised models-API scalars), so
 mixing them with baseline-endpoint prices would fabricate a fake price trend;

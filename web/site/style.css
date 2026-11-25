@@ -178,6 +178,13 @@
         border-radius: 999px;
         cursor: pointer;
         font: inherit;
+        transition:
+          background-color 0.15s,
+          border-color 0.15s;
+      }
+      .tabs button:hover:not(.active) {
+        background: var(--btn-bg);
+        border-color: var(--btn-border);
       }
       .tabs button.active {
         background: var(--btn-bg);
@@ -227,6 +234,13 @@
         font-size: 0.85rem;
         color: var(--muted);
         margin: 0.5rem 0 0.65rem;
+      }
+      /* An All-view note that rides next to a section heading without
+         inheriting the heading's size, weight, or colour. */
+      .heading-note {
+        font-size: 0.85rem;
+        font-weight: 400;
+        color: var(--muted);
       }
       /* Inline monospaced text stands out as a neutral rounded chip across
          all four pages (including model IDs in Weekly highlights). */
@@ -311,11 +325,12 @@
       #table .endpoint-note {
         color: var(--muted);
         margin: 0.1rem 0;
-        font-size: 0.75rem;
+        font-size: 0.72rem;
       }
-      #table tr.endpoint-row td {
+      #table tr.endpoint-row > td {
         padding: 0.15rem 0.6rem 0.3rem;
         background: var(--row-hover);
+        font-size: 0.8rem;
       }
       #table tr.depth-row td {
         padding-top: 0.15rem;
@@ -328,11 +343,12 @@
       }
       #table tr.endpoint-row table {
         width: 100%;
-        font-size: 0.8rem;
+        font-size: 0.75rem;
       }
       #table tr.endpoint-row table th,
       #table tr.endpoint-row table td {
         padding: 0.1rem 0.4rem;
+        font-size: 0.72rem;
       }
       #table .depth-table th:first-child,
       #table .depth-table td:first-child {
@@ -418,6 +434,72 @@
       }
       /* Prose container for the non-table pages (plugin, how-to-use, faq):
          keeps line length comfortable while tables on Picks use full width. */
+      /* Long-form pages (FAQ, How to use): a sticky "On this page"
+         column to the right of the article. The article keeps at least
+         450px; below that the TOC moves above it and stops sticking. */
+      .page-with-toc {
+        display: grid;
+        /* The text column keeps its 56rem reading measure; the TOC
+           grows to 500px and starts at the text column's right edge,
+           instead of being pushed to the far right of the page. */
+        grid-template-columns: minmax(450px, 56rem) minmax(15rem, 500px);
+        justify-content: start;
+        gap: clamp(1.5rem, 3vw, 2.5rem);
+        align-items: start;
+      }
+      .page-with-toc .toc {
+        position: sticky;
+        top: 1rem;
+        max-height: calc(100vh - 2rem);
+        overflow-y: auto;
+        padding-left: 0.9rem;
+        border-left: 1px solid var(--row-border);
+        font-size: 0.82rem;
+        line-height: 1.35;
+      }
+      .toc-title {
+        margin: 0 0 0.45rem;
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .toc ul {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .toc li + li {
+        margin-top: 0.35rem;
+      }
+      .toc a {
+        color: var(--muted);
+        text-decoration: none;
+      }
+      .toc a:hover {
+        color: var(--text);
+        text-decoration: underline;
+      }
+      /* Anchor targets clear the viewport edge when the TOC jumps. */
+      .faq-item h3 {
+        scroll-margin-top: 1rem;
+      }
+      @media (max-width: 52rem) {
+        .page-with-toc {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 1rem;
+        }
+        .page-with-toc .toc {
+          order: -1;
+          position: static;
+          max-height: none;
+          overflow: visible;
+          padding: 0 0 0.85rem;
+          border-left: 0;
+          border-bottom: 1px solid var(--row-border);
+        }
+      }
       .prose {
         max-width: 56rem;
         line-height: 1.55;
@@ -630,3 +712,81 @@
         cursor: pointer;
         font: inherit;
       }
+
+/* Retention view switch (ZDR view / All providers) and quote badges. */
+.mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin-left: 0.4rem;
+  font-size: 0.85rem;
+}
+.mode-switch[hidden] {
+  display: none;
+}
+.mode-label {
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.mode-label:hover,
+.mode-label.active {
+  color: var(--text);
+}
+.mode-label.active {
+  font-weight: 600;
+}
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex: 0 0 auto;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background-color: var(--btn-bg);
+  transition: background-color 0.2s;
+}
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: var(--muted);
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.switch input:checked + .slider {
+  background-color: var(--btn-bg);
+}
+.switch input:focus-visible + .slider {
+  box-shadow: 0 0 0 2px var(--btn-border);
+}
+.switch input:checked + .slider:before {
+  transform: translateX(20px);
+}
+.slider.round {
+  border-radius: 24px;
+}
+/* Quote badges: small enough not to grow the row's line box. */
+.zdr-badge {
+  display: inline-block;
+  padding: 0 0.25em;
+  border-radius: 0.4em;
+  font-size: 0.62em;
+  line-height: 1.1;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid currentColor;
+  opacity: 0.8;
+}

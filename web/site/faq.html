@@ -7,12 +7,12 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self'"
     />
-    <title>model-compare — FAQ: precision, price, and variants</title>
+    <title>model-compare — FAQ: precision, price, and missing models</title>
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="style.css?v=0.8.0-9" />
   </head>
   <body>
     <h1>model-compare</h1>
@@ -26,185 +26,450 @@
 
     <h2>FAQ</h2>
     <p class="intro">
-      How to read the numbers on <a href="index.html">the picks page</a> — and
-      why your OpenRouter bill can sometimes tell a slightly different story.
-      For practical setup and routing guides, head over to
+      Short answers to the questions the tables raise: which models appear, how
+      prices and quality are picked, and why the numbers can differ from
+      OpenRouter. For setup and routing guides, head over to
       <a href="how-to-use.html">How to use</a>.
     </p>
 
-    <div class="prose faq-list">
-      <div class="faq-item">
-        <h3>What do PREC and the "!" marker mean?</h3>
-        <p>
-          On OpenRouter, a single model name isn't necessarily tied to one
-          company's servers. Several backend providers ("endpoints") can host
-          the exact same open-weight model at different prices and compression
-          levels.
-        </p>
-        <p>
-          <i
-            >That compression is called quantization: converting a model's
-            high-precision weights (such as <code>bf16</code>) into smaller
-            number formats (such as <code>fp8</code> or <code>int4</code>). It
-            cuts memory use and speeds up replies — though pushing it too far
-            can chip away at answer quality.</i
-          >
-        </p>
-        <p>
-          Rather than taking OpenRouter's headline number at face value,
-          <code>model-compare</code> checks every live endpoint for a model and
-          ranks it using the <strong>cheapest eligible</strong> one that meets
-          (or beats) the model's baseline precision. The
-          <code>PREC</code> column shows that baseline precision — the model
-          maker's disclosed format, the best format disclosed across live
-          providers, or <code>n/a</code> when none is disclosed.
-        </p>
-        <p>
-          A trailing <code>!</code> (for example, <code>fp8!</code>) is a
-          heads-up. Left to its own devices, OpenRouter weights traffic toward
-          whichever provider is cheapest overall — and the <code>!</code> means
-          even cheaper, lower-precision endpoints exist and would soak up more
-          than half of your requests by default.
-        </p>
-        <p>
-          The upshot: without routing rules, your calls can quietly land on a
-          more heavily compressed version of the model than the row describes.
-          Hover the <code>PREC</code> cell (or click the row) to inspect the
-          competing endpoints, their precisions, and their prices — and see
-          <a href="how-to-use.html">How to use</a> for how to lock routing down.
-        </p>
-      </div>
+    <div class="page-with-toc">
+      <div class="prose faq-list">
+        <div class="faq-item">
+          <h3 id="prec-marker">What do PREC and the "!" marker mean?</h3>
+          <p>
+            On OpenRouter, a single model name isn't necessarily tied to one
+            company's servers. Several backend providers ("endpoints") can host
+            the exact same open-weight model at different prices and compression
+            levels.
+          </p>
+          <p>
+            <i
+              >That compression is called quantization: converting a model's
+              high-precision weights (such as <code>bf16</code>) into smaller
+              number formats (such as <code>fp8</code> or <code>int4</code>). It
+              cuts memory use and speeds up replies — though pushing it too far
+              can chip away at answer quality.</i
+            >
+          </p>
+          <p>
+            Rather than taking OpenRouter's headline number at face value,
+            <code>model-compare</code> checks every live endpoint for a model and
+            ranks it using the <strong>cheapest eligible</strong> one that meets
+            (or beats) the model's baseline precision. In the ZDR view the quote
+            also has to come from a zero-data-retention endpoint that advertises
+            the required tools and prompt context and passes OpenRouter's
+            endpoint-policy gates (BYOK, moderation, deranked and training). The
+            <code>PREC</code> column shows the model-level baseline precision
+            across its live non-variant endpoints — the maker's highest disclosed
+            format, or the best available when the maker discloses none;
+            <code>n/a</code> means nothing is known. <code>PREC</code> is not
+            necessarily the precision of the endpoint that sets the price, and it
+            is the same in both views.
+          </p>
+          <p>
+            A trailing <code>!</code> (for example, <code>fp8!</code>) is a rough
+            heads-up, not a traffic measurement. It compares how cheap the
+            lower-precision endpoints are with the eligible ones. When the cheaper
+            side wins that comparison, <code>!</code> appears. No
+            <code>!</code> is not a guarantee: OpenRouter can still route some
+            calls to a cheaper endpoint.
+          </p>
+          <p>
+            The upshot: without routing rules, your calls can quietly land on a
+            more heavily compressed version of the model than the row describes.
+            Hover the <code>PREC</code> cell (or click the row) to inspect the
+            competing endpoints, their precisions, and their prices — and see
+            <a href="how-to-use.html">How to use</a> for how to lock routing down.
+          </p>
+        </div>
 
-      <div class="faq-item">
-        <h3>Why can the price I pay differ from the ranked price?</h3>
-        <p>
-          If you compare a row here against the model's page on
-          <code>openrouter.ai</code>, the two prices often won't match. That's
-          by design: OpenRouter's page shows the rate for its default route,
-          while this site quotes the <strong>cheapest eligible</strong>
-          endpoint.
-        </p>
-        <p>
-          To judge overall value for money, <code>model-compare</code> blends
-          input and output prices at a 75% / 25% split. Coding sessions tend to
-          send plenty of file context in and get comparatively short patches
-          back, so weighting input heavier reflects real usage much better than
-          a 50 / 50 average.
-        </p>
-        <p>
-          In practice, three things can nudge your actual bill away from the
-          table price:
-        </p>
+        <div class="faq-item">
+          <h3 id="prec-na">Why does PREC say n/a?</h3>
+          <p>
+            It means no live provider disclosed a recognized number format. That
+            does not automatically remove the model. An endpoint run by the model
+            maker, or by an official partner host, can still set the baseline when
+            its format is unknown. A third-party endpoint with an unknown format
+            cannot.
+          </p>
+          <p>
+            <code>n/a</code> means no live endpoint in the derivation universe
+            disclosed a recognized format. It is a gap in the data, not a claim
+            that the model runs at full precision.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="price-differs">Why can the price I pay differ from the ranked price?</h3>
+          <p>
+            If you compare a row here against the model's page on
+            <code>openrouter.ai</code>, the two prices often won't match. That's
+            by design: OpenRouter's page shows its default route and headline
+            price, while this site quotes the <strong>cheapest eligible</strong>
+            standard-tier endpoint that meets the model's baseline precision.
+            Faster priority or ultrafast tiers are never used, and Flex is only
+            used when the ranking explicitly asks for it.
+          </p>
+          <p>
+            Endpoint policy is part of eligibility too. A BYOK-only endpoint is
+            skipped unless you pass <code>--byok</code>, a deranked endpoint is
+            skipped while a better default route exists, and an endpoint whose
+            provider trains on prompts is not quoted under the default ZDR mode.
+          </p>
+          <p>
+            To judge overall value for money, <code>model-compare</code> blends
+            input and output prices at a 75% / 25% split. Coding sessions tend to
+            send plenty of file context in and get comparatively short patches
+            back, so weighting input heavier reflects real usage much better than
+            a 50 / 50 average.
+          </p>
+          <p>
+            In practice, three things can nudge your actual bill away from the
+            table price:
+          </p>
+          <ul>
+            <li>
+              <strong>Default routing:</strong> if you don't pin your provider
+              list, OpenRouter may route a call to a pricier (or cheaper) backend
+              than the one ranked here.
+            </li>
+            <li>
+              <strong>Long-context tiers</strong> (<code>TIER</code> shows
+              <code>&gt;200k</code>, <code>&gt;272k</code>, and similar): some
+              providers charge more per token once a conversation grows past a
+              prompt-size threshold. To avoid bait-and-switch starter rates,
+              <code>model-compare</code> evaluates prices at a 1M-token prompt
+              size — what a long coding session actually pays. The endpoint behind
+              the quote can have a smaller context window than the model; the
+              <code>CTX</code> tooltip says so when that happens.
+            </li>
+            <li>
+              <strong>Off-peak discounts</strong> (<code>TIER</code> shows
+              <code>-38%</code>, and similar): a few providers cut rates during
+              quieter UTC hours. The main table sticks to standard rates so the
+              ranking stays predictable, while the
+              <strong>Off-peak deals</strong> table highlights those scheduled
+              windows separately. Discounts never lower the ranking price, and
+              ones that round to 0% are ignored.
+            </li>
+          </ul>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="reasoning-depths">What about reasoning depths and model variants?</h3>
+          <p>
+            Many newer "thinking" models let you dial in how much effort they
+            spend reasoning before they answer — levels like
+            <code>minimal</code>, <code>low</code>, <code>medium</code>,
+            <code>high</code>, or <code>max</code>. More thinking generally lifts
+            answer quality, at the cost of extra internal tokens and a higher bill
+            per task.
+          </p>
+          <p>
+            Quality scores (<code>QUAL</code>) come from the
+            <a href="https://artificialanalysis.ai/models">Artificial Analysis</a>
+            (AA) intelligence index, which often benchmarks the same model across
+            several thinking levels. Each row here is scored at the model's
+            <strong
+              >highest-rated depth that OpenRouter actually lets you
+              select</strong
+            >, and <code>DEPTH</code> tells you which one won (an asterisk like
+            <code>max*</code> just notes that it also happens to be OpenRouter's
+            default).
+          </p>
+          <p>
+            Click any row on the Picks page to unfold its full depth table —
+            quality score, benchmark cost, and a button to copy the ready-to-use
+            ID. In OpenCode, you pick a depth by tacking
+            <code>#&lt;depth&gt;</code>
+            onto the model ID, such as
+            <code>openrouter/deepseek/deepseek-v4.1-flash-1017#max</code> (or
+            <code>#xhigh</code>, <code>#high</code>, <code>#medium</code>,
+            <code>#low</code>, <code>#minimal</code>, or <code>#none</code>). If
+            you use the <a href="plugin.html">OpenCode plugin</a>, it pins that
+            scored depth automatically.
+          </p>
+          <p>
+            One more wrinkle: suffixes like <code>:free</code> (rate-limited free
+            tier) and <code>:batch</code> (asynchronous batch jobs) are separate
+            listings on OpenRouter with their own limits, context windows, and
+            pricing. A <code>:free</code> model listing whose endpoints are all
+            zero-priced and not themselves tagged <code>:free</code>/<code>:batch</code>
+            is a genuinely free model and can rank; a zero-priced endpoint of a
+            paid model is a variant, so it never sets that model's quote.
+            <code>:batch</code> listings are opt-in on the command line because
+            interactive coding needs live replies. Treat variants as distinct
+            models — don't pair a variant ID with another row's routing block.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="qual-blank">Why is QUAL sometimes blank?</h3>
+          <p>
+            Artificial Analysis sometimes publishes a score without saying which
+            reasoning effort it was measured at. That score is useful as a
+            reference, but it may not be the quality you get at any depth
+            OpenRouter lets you select. So <code>QUAL</code> stays blank,
+            <code>DEPTH</code> shows <code>unknown</code>, and the number appears
+            only in the expanded depth table. It does not affect the ranking.
+          </p>
+          <p>
+            A model with no usable quality record scores zero on quality as long
+            as at least one other model in the table has a score. If no model has
+            any quality score, quality is left out of the ranking weights
+            altogether, so the remaining factors decide the order.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="popular-models-missing">Why are some popular models missing from the main table?</h3>
+          <p>
+            The main ranking applies a few strict filters up front so every pick
+            is practical (and safe) for day-to-day coding work:
+          </p>
+          <ul>
+            <li>
+              <strong>Zero-data-retention (ZDR) only:</strong> a model must have
+              at least one live ZDR endpoint — a provider committed to not storing
+              or training on your prompts and completions. An endpoint that only
+              offers <strong>Safety Retention</strong> does not count: it may keep
+              prompts and responses to investigate abuse. The site makes an
+              exception for Google-authored models; the command-line default does
+              not. More on that below.
+            </li>
+            <li>
+              <strong>1M-token context window:</strong> models with smaller
+              context limits are filtered out so long agent sessions don't hit a
+              wall mid-task.
+            </li>
+            <li>
+              <strong>Tool calling and prompt context:</strong> the model must
+              support tools, and the endpoint that sets its quote must itself
+              advertise tool calling and accept the requested prompt size.
+            </li>
+            <li>
+              <strong>Endpoint policy:</strong> BYOK-only endpoints need
+              <code>--byok</code>; deranked endpoints are skipped while a better
+              default route exists; an endpoint whose provider trains on prompts
+              is not ZDR.
+            </li>
+            <li>
+              <strong>Free listings:</strong> a zero-priced endpoint of a paid
+              model is a variant and never the quoted endpoint. A genuinely free
+              model (every endpoint zero-priced, including a
+              <code>:free</code> listing) can still rank; a command-line option
+              drops those if you prefer.
+            </li>
+          </ul>
+          <p>
+            Need something looser for your own workflow? Those filters are
+            configurable when you run <code>model_compare.py</code> on the command
+            line — you can lower the context-window floor, include non-ZDR
+            providers, or drop the tool-calling check. See the
+            <a href="https://github.com/canonical/model-compare"
+              >repository README</a
+            >
+            for the options.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="checked-but-missing">A model passes checks — why is it still missing?</h3>
+          <p>
+            A model can clear every filter and still drop out at the endpoint
+            stage. The price has to come from a live endpoint that is not a
+            <code>:free</code>/<code>:batch</code>-marked variant and not a
+            zero-priced variant of a paid model, not a special Flex, priority,
+            or ultrafast service tier, not below the model's baseline precision,
+            and able to serve the
+            run's tools and prompt size. It must also pass the endpoint-policy
+            gates: a BYOK-only or deranked endpoint can be skipped, and a
+            provider that trains on prompts is not ZDR. If the only endpoints
+            left are third-party ones with an undisclosed format, or ones with a
+            broken off-peak schedule, there is nothing to quote.
+          </p>
+          <p>
+            Expired listings and models that output something other than text are
+            skipped too. The published data records only the first failed check,
+            so a missing model may have more than one reason.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="zero-retention">Is the model I see actually zero-retention?</h3>
+          <p>
+            In the ZDR view, yes for the quote: the price and provider order
+            come from an endpoint on OpenRouter's ZDR list. <code>PREC</code> is
+            a model-level baseline and may come from another endpoint.
+            That is stronger than the old promise, which only required the model
+            to have some ZDR endpoint somewhere. The match is exact: the
+            quoted endpoint's own listing decides, and a batch or free variant
+            cannot borrow its base model's listing. The quote must also pass
+            the BYOK, deranked and training policy gates. It is still not a promise about calls you route yourself: the
+            published routing keeps steered calls on ZDR endpoints as of the
+            last snapshot, but OpenRouter's own request-level ZDR control is the
+            live guarantee. Unsteered calls can land anywhere.
+          </p>
+          <p>
+            <strong>Safety Retention</strong> is not ZDR: it may keep prompts and
+            responses to investigate abuse. The site allows it for models authored
+            by Google; the command-line default does not. That exception is narrow
+            — the author must be Google, not merely a model hosted on Google
+            infrastructure. A model whose retention status is unknown is only
+            admitted by the loosest mode.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="scores-change">Why do the scores change?</h3>
+          <p>
+            <code>SCORE</code> is relative to the current set of models. Prices
+            are compared on a log scale (each doubling counts the same), context
+            is compared with the 1M floor, and quality is compared with a
+            reference intelligence score (70 by default). Add or remove one model
+            and every score can shift, even if no price changed. Scores are not
+            percentages. Compare ranks within one tab; don't compare scores across
+            tabs or days.
+          </p>
+          <p>
+            Balanced weights quality and price at 40% each. The quality and price
+            tabs are 60/20 in favor of quality and price respectively. Context and
+            age are 10% each. Ties go to the higher raw quality, then the cheaper
+            model, then the model ID.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="off-peak-deals">What are the off-peak deals?</h3>
+          <p>
+            The deals table is a separate index of OpenRouter's scheduled
+            discounts, built from the raw catalog. It deliberately does not apply
+            the main table's ZDR, 1M-context, tool, output-text, or expiry checks,
+            and it includes batch listings. That is why a deal can name a model
+            that is missing from the main table.
+          </p>
+          <p>
+            Each row shows the cheapest off-peak window, but its
+            <code>SCORE</code> is the normal balanced score from standard prices.
+            A discount that rounds to 0% shows <code>SCHED</code> in the main
+            table and is left out of the deals table. When a model has both a
+            long-context tier and a schedule, <code>TIER</code> wins in the main
+            table.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="qual-task-cost">Where do QUAL and TASK$ come from?</h3>
+          <p>
+            <code>QUAL</code> is the Artificial Analysis intelligence index. It
+            comes from their API when an AA API key is available, from our
+            published catalog on an unkeyed local run, or from OpenRouter's
+            snapshot as a last resort. The tooltip shows the source and date, and
+            notes when AA and OpenRouter disagree by three or more points. A local
+            run can therefore use a catalog up to two weeks old.
+          </p>
+          <p>
+            <code>TASK$</code> is not AA's cost-per-task. It is OpenRouter's
+            median session cost for 10–49-turn sessions, and it never affects the
+            score.
+          </p>
+        </div>
+
+
+        <div class="faq-item">
+          <h3 id="free-models">Can free models appear?</h3>
+          <p>
+            Yes, if every endpoint is genuinely zero-priced and not itself
+            marked <code>:free</code>/<code>:batch</code>: a free model keeps a
+            baseline and can rank. The ZDR view still requires a ZDR endpoint, so
+            a non-ZDR free model normally appears only in All providers (or with
+            <code>--no-zdr</code>). A zero-priced endpoint of a paid model is a
+            variant, so it never sets that model's quote. Only a handful of free
+            models clear the 1M context floor while supporting tools. Local runs
+            can drop them with a command-line option; the published tables keep
+            them.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="zdr-sr-badges">What are the ZDR and SR badges?</h3>
+          <p>
+            <strong>ZDR</strong> means the quoted endpoint is on OpenRouter's
+            zero-data-retention list. <strong>SR</strong> means it is a Safety
+            Retention endpoint: it may keep prompts and responses to investigate
+            abuse, so it is not zero-retention. The badges appear in the All
+            providers view; the ZDR view shows <code>SR</code> where the Google
+            exception applies. A missing badge means the endpoint is not on the
+            list, is on it with an undisclosed retention status, or the site had
+            no retention data for that build.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="cheaper-all-providers">Why can I see cheaper prices in All providers?</h3>
+          <p>
+            Because zero retention is not free. The ZDR view only quotes
+            endpoints committed to not storing your prompts, so a cheaper
+            provider that keeps them is out of scope; the All providers view
+            shows that cheaper route. The difference can be large — several times
+            the ZDR price for the same model. Expand the row to compare the live
+            endpoint prices behind the quote.
+          </p>
+        </div>
+        <div class="faq-item">
+          <h3 id="freshness">How fresh is the site?</h3>
+          <p>
+            The site rebuilds every three hours. History keeps up to ten daily
+            snapshots and compares exactly seven days back, within the top 20
+            only. The 7-DAY column is tracked for the ZDR view; the All-providers
+            view leaves it blank. <code>new</code> means the model entered the top 20, not that it
+            is new to OpenRouter. History starts blank for a week after a
+            ranking-definition change.
+          </p>
+          <p>
+            If a publish check fails — a timestamp mismatch, a disagreement about
+            the number-one pick, or a sudden endpoint drop — the previous site
+            stays live. An old timestamp is deliberate, not a broken clock.
+          </p>
+        </div>
+
+        <div class="faq-item">
+          <h3 id="plugin-litellm">What about the plugin and the LiteLLM files?</h3>
+          <p>
+            The plugin pins the scored depth and steers requests to the ranked
+            provider order, but it does not enforce ZDR. Its aliases refresh with
+            the site, so a model can change or disappear between builds.
+          </p>
+          <p>
+            The LiteLLM files contain ranked models only. At most one off-peak
+            level is used per model; if a model has both token tiers and off-peak
+            windows, the off-peak level is left out. If two sources disagree on a
+            price, the merge is frozen rather than guessed. Set the cost-map URL
+            before starting LiteLLM.
+          </p>
+        </div>
+      </div>
+      <nav class="toc" aria-label="On this page">
+        <p class="toc-title">On this page</p>
         <ul>
-          <li>
-            <strong>Default routing:</strong> if you don't pin your provider
-            list, OpenRouter may route a call to a pricier (or cheaper) backend
-            than the one ranked here.
-          </li>
-          <li>
-            <strong>Long-context tiers</strong> (<code>TIER</code> shows
-            <code>&gt;200k</code>, <code>&gt;272k</code>, and similar): some
-            providers charge more per token once a conversation grows past a
-            prompt-size threshold. To avoid bait-and-switch starter rates,
-            <code>model-compare</code> always evaluates prices at a 1M-token
-            prompt size — what a long coding session actually pays.
-          </li>
-          <li>
-            <strong>Off-peak discounts</strong> (<code>TIER</code> shows
-            <code>-38%</code>, and similar): a few providers cut rates during
-            quieter UTC hours. The main table sticks to standard rates so the
-            ranking stays predictable, while the
-            <strong>Off-peak deals</strong> table highlights those scheduled
-            windows separately.
-          </li>
+          <li><a href="#prec-marker">What PREC and "!" mean</a></li>
+          <li><a href="#prec-na">Why PREC says n/a</a></li>
+          <li><a href="#price-differs">Why the price differs</a></li>
+          <li><a href="#reasoning-depths">Reasoning depths and variants</a></li>
+          <li><a href="#qual-blank">Why QUAL is blank</a></li>
+          <li><a href="#popular-models-missing">Why popular models are missing</a></li>
+          <li><a href="#checked-but-missing">Why a checked model is missing</a></li>
+          <li><a href="#zero-retention">Is it actually zero-retention?</a></li>
+          <li><a href="#scores-change">Why scores change</a></li>
+          <li><a href="#off-peak-deals">Off-peak deals</a></li>
+          <li><a href="#qual-task-cost">Where QUAL and TASK$ come from</a></li>
+          <li><a href="#free-models">Can free models appear?</a></li>
+          <li><a href="#zdr-sr-badges">ZDR and SR badges</a></li>
+          <li><a href="#cheaper-all-providers">Cheaper prices in All providers</a></li>
+          <li><a href="#freshness">How fresh the site is</a></li>
+          <li><a href="#plugin-litellm">Plugin and LiteLLM files</a></li>
         </ul>
-      </div>
-
-      <div class="faq-item">
-        <h3>What about reasoning depths and model variants?</h3>
-        <p>
-          Many newer "thinking" models let you dial in how much effort they
-          spend reasoning before they answer — levels like
-          <code>minimal</code>, <code>low</code>, <code>medium</code>,
-          <code>high</code>, or <code>max</code>. More thinking generally lifts
-          answer quality, at the cost of extra internal tokens and a higher bill
-          per task.
-        </p>
-        <p>
-          Quality scores (<code>QUAL</code>) come from the
-          <a href="https://artificialanalysis.ai/models">Artificial Analysis</a>
-          intelligence index, which often benchmarks the same model across
-          several thinking levels. Each row here is scored at the model's
-          <strong>highest-rated depth that OpenRouter actually lets you
-          select</strong>, and <code>DEPTH</code> tells you which one won (an
-          asterisk like <code>max*</code> just notes that it also happens to be
-          OpenRouter's default).
-        </p>
-        <p>
-          Click any row on the Picks page to unfold its full depth table —
-          quality score, benchmark cost, and a button to copy the ready-to-use
-          ID. In OpenCode, you pick a depth by tacking <code>#&lt;depth&gt;</code>
-          onto the model ID, such as
-          <code>openrouter/deepseek/deepseek-v4.1-flash-1017#max</code> (or
-          <code>#xhigh</code>, <code>#high</code>, <code>#medium</code>,
-          <code>#low</code>, <code>#minimal</code>, or <code>#none</code>). If
-          you use the <a href="plugin.html">OpenCode plugin</a>, it pins that
-          scored depth automatically.
-        </p>
-        <p>
-          One more wrinkle: suffixes like <code>:free</code> (rate-limited free
-          tier) and <code>:batch</code> (asynchronous batch jobs) are separate
-          listings on OpenRouter with their own limits, context windows, and
-          pricing. The rankings skip <code>:batch</code> listings because
-          interactive coding tools need live replies, and include
-          <code>:free</code> listings when they pass every other check. Treat
-          them as distinct models — don't pair a variant ID with another row's
-          routing block.
-        </p>
-      </div>
-
-      <div class="faq-item">
-        <h3>Why are some popular models missing from the main table?</h3>
-        <p>
-          The main ranking applies a few strict filters up front so every pick
-          is practical (and safe) for day-to-day coding work:
-        </p>
-        <ul>
-          <li>
-            <strong>Zero-data-retention (ZDR) only:</strong> a model must have
-            at least one live ZDR endpoint — a provider committed to not storing
-            or training on your prompts and completions. An endpoint that only
-            offers <strong>Safety Retention</strong> does not count: it may keep
-            prompts and responses to investigate abuse. Google's models are the
-            exception here, because that is what our guardrail allows.
-          </li>
-          <li>
-            <strong>1M-token context window:</strong> models with smaller
-            context limits are filtered out so long agent sessions don't hit a
-            wall mid-task.
-          </li>
-          <li>
-            <strong>Tool calling:</strong> models that can't call functions or
-            tools aren't usable in coding agents and are excluded.
-          </li>
-        </ul>
-        <p>
-          Need something looser for your own workflow? Every one of those
-          filters is configurable when you run <code>model_compare.py</code> on
-          the command line — you can lower the context-window floor, include
-          non-ZDR providers, or drop the tool-calling check. See the
-          <a href="https://github.com/canonical/model-compare"
-            >repository README</a
-          >
-          for the options.
-        </p>
-        <p>
-          And if you spot a model in <strong>Off-peak deals</strong> that doesn't
-          appear in the main ranking above it, that's expected: the deals table
-          is a straight index of scheduled discounts across OpenRouter and
-          deliberately skips the ZDR and context-window filters.
-        </p>
-      </div>
+      </nav>
     </div>
 
     <footer>

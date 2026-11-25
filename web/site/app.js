@@ -11,6 +11,9 @@
       var data = null;
       var historyData = null;
       var catalogData = null;
+      var nonZdrCatalogData = null;
+      var nonZdrState = "idle";
+      var nonZdrPromise = null;
       var endpointExpanded = {};
       // Artifact failures compose into one status line (renderStatus) so
       // the catalog catch can't clobber a data.json error.
@@ -21,12 +24,18 @@
       // 8-column summary). Persisted via the consent-first preference
       // cookie below.
       var view = "expert";
-      // Consent-first: the preference cookie is only written after the
-      // user accepts in the dialog. Reject keeps the view for this page
-      // load but stores nothing, and it suppresses re-asking only until
-      // the next page load. Nothing else is ever stored.
+      // Consent-first: the two preference cookies (layout and retention
+      // view) are only written after the user accepts in the dialog. Reject
+      // keeps both choices for this page load but stores nothing, and it
+      // suppresses re-asking only until the next page load. Nothing else is
+      // ever stored.
       var COOKIE_NAME = "model-compare-view";
+      var COOKIE_NAME_MODE = "model-compare-mode";
       var consentRejected = false;
+      // Retention view: "zdr" (default) or "all". The All-providers rows ship
+      // in data.json; its catalog detail is fetched lazily on first use.
+      var mode = "zdr";
+      var pendingMode = null;
 
       function readCookie(name) {
         var parts = document.cookie.split("; ");
@@ -44,8 +53,7 @@
         return null;
       }
 
-      // Attributes shared by the write and the delete, so deletion
-      // always matches the write (a mismatch silently breaks removal).
+      // Attributes shared by the preference and mode cookies.
       // The path is scoped to this page's directory: canonical.github.io
       // serves every project page from one origin, and a path=/ cookie
       // with a generic name would leak to — and collide with — sibling
@@ -64,20 +72,31 @@
         );
       }
       function writeViewCookie() {
-        // One year: a layout preference, not a session.
+        // One year: a layout preference, not a session. Writes the CURRENT
+        // view, so accepting from Expert persists Expert rather than flipping
+        // the layout to Simple.
         document.cookie =
-          COOKIE_NAME + "=simple; max-age=31536000" + cookieAttrs();
+          COOKIE_NAME + "=" + view + "; max-age=31536000" + cookieAttrs();
       }
-      function clearViewCookie() {
-        document.cookie = COOKIE_NAME + "=; max-age=0" + cookieAttrs();
+      function consentGranted() {
+        // Any stored view value means the user accepted; the value itself is
+        // the preference.
+        return readCookie(COOKIE_NAME) !== null;
+      }
+      function writeModeCookie() {
+        document.cookie =
+          COOKIE_NAME_MODE +
+          "=" +
+          mode +
+          "; max-age=31536000" +
+          cookieAttrs();
       }
 
-      // The dialog asks only when no consent decision is stored: not
-      // accepted (no cookie) and not rejected on this page load. After
-      // OK -> Expert (cookie deleted) -> Simple it asks again, matching
-      // the consent-first contract.
+      // The dialog asks only when no consent decision is stored: no view
+      // cookie and not rejected on this page load. Accepting stores the
+      // current view and, when one is pending, the retention mode.
       function shouldAskForConsent() {
-        return readCookie(COOKIE_NAME) !== "simple" && !consentRejected;
+        return !consentGranted() && !consentRejected;
       }
 
       function applyView() {
@@ -354,9 +373,9 @@
         };
       }
 
-      function findCatalogEntry(modelId) {
-        if (!catalogData || !modelId) return null;
-        var lists = [catalogData.models, catalogData.filtered];
+      function findEntryIn(doc, modelId) {
+        if (!doc || !modelId) return null;
+        var lists = [doc.models, doc.filtered];
         for (var k = 0; k < lists.length; k++) {
           var list = lists[k];
           if (!Array.isArray(list)) continue;
@@ -365,6 +384,133 @@
           }
         }
         return null;
+      }
+
+      function findCatalogEntry(modelId) {
+        return findEntryIn(catalogData, modelId);
+      }
+
+      function findNonZdrEntry(modelId) {
+        return findEntryIn(nonZdrCatalogData, modelId);
+      }
+
+      function findModeEntry(modelId) {
+        return mode === "zdr"
+          ? findCatalogEntry(modelId)
+          : findNonZdrEntry(modelId);
+      }
+
+      function rowsFor(priority) {
+        var block =
+          data && (mode === "zdr" ? data.priorities : data.priorities_nonzdr);
+        return (block && block[priority]) || [];
+      }
+
+      function nonzdrAvailable() {
+        var block = data && data.priorities_nonzdr;
+        if (!block) return false;
+        return ["balanced", "price", "quality"].some(function (name) {
+          return Array.isArray(block[name]) && block[name].length > 0;
+        });
+      }
+
+      // One fetch at a time, started only by the mode switch or an explicit
+      // row click -- never by detailFor/render. A failed fetch is retried by
+      // the next row click.
+      function loadNonZdrCatalog() {
+        if (nonZdrPromise) return nonZdrPromise;
+        nonZdrState = "loading";
+        nonZdrPromise = fetch("catalog-nonzdr.json", { cache: "no-cache" })
+          .then(function (resp) {
+            if (!resp.ok) throw new Error("http " + resp.status);
+            return resp.json();
+          })
+          .then(function (doc) {
+            nonZdrCatalogData = doc;
+            nonZdrState = "ready";
+            renderStatus();
+            if (data) render();
+          })
+          .catch(function () {
+            nonZdrState = "failed";
+            nonZdrPromise = null;
+            renderStatus();
+            if (data) render();
+          });
+        return nonZdrPromise;
+      }
+
+      function quoteBadge(row) {
+        if (!row) return null;
+        var status = row.zdr_status;
+        if (status !== "strict" && status !== "safety-retention") return null;
+        if (status === "safety-retention") {
+          return {
+            text: "SR",
+            title: "Safety Retention, not ZDR",
+          };
+        }
+        // The ZDR badge is redundant in the ZDR view.
+        if (mode === "zdr") return null;
+        return {
+          text: "ZDR",
+          title: "Quoted endpoint is zero-data-retention",
+        };
+      }
+
+      function applyMode() {
+        var input = document.getElementById("mode-all-input");
+        var zdrLabel = document.getElementById("mode-label-zdr");
+        var allLabel = document.getElementById("mode-label-all");
+        var switchEl = document.getElementById("mode-switch");
+        var all = mode === "all";
+        if (!input || !zdrLabel || !allLabel || !switchEl) return;
+        input.checked = all;
+        zdrLabel.classList.toggle("active", !all);
+        allLabel.classList.toggle("active", all);
+        switchEl.hidden = !nonzdrAvailable();
+        Array.prototype.forEach.call(
+          document.querySelectorAll(".mode-zdr-note"),
+          function (note) {
+            note.hidden = !all;
+          },
+        );
+      }
+
+      function setMode(next) {
+        if (next === "all" && !nonzdrAvailable()) return;
+        mode = next;
+        if (
+          mode === "all" &&
+          (nonZdrState === "idle" || nonZdrState === "failed")
+        ) {
+          loadNonZdrCatalog();
+        }
+        applyMode();
+        if (consentGranted()) {
+          writeModeCookie();
+        } else if (shouldAskForConsent()) {
+          pendingMode = mode;
+          openConsentDialog();
+        }
+        if (data) render();
+      }
+
+      // Focus moves into the dialog when it opens (it carries tabindex="-1")
+      // and back to the toggle that opened it when it closes, so keyboard and
+      // screen-reader users see the conversation. Escape dismisses without
+      // storing anything.
+      function openConsentDialog() {
+        var dlg = document.getElementById("cookie-dialog");
+        if (!dlg) return;
+        dlg.hidden = false;
+        dlg.focus();
+      }
+      function closeConsentDialog() {
+        var dlg = document.getElementById("cookie-dialog");
+        if (!dlg || dlg.hidden) return;
+        dlg.hidden = true;
+        document.getElementById("view-simple").focus();
       }
 
       // DEPTH cell: the effort QUAL was measured at, "*" on the default,
@@ -1000,14 +1146,19 @@
       }
 
       function render() {
-        var rows = (data && data.priorities[current]) || [];
+        // A stored All view must survive the early renders triggered by
+        // history/catalog before data.json lands; nonzdrAvailable() cannot
+        // answer while data is null.
+        if (data && mode === "all" && !nonzdrAvailable()) mode = "zdr";
+        applyMode();
+        var rows = data ? rowsFor(current) : [];
         var shown = mainExpanded ? rows : rows.slice(0, DEFAULT_MAIN_ROWS);
         var expandMain = document.getElementById("expand-main");
         expandMain.hidden = rows.length <= DEFAULT_MAIN_ROWS;
         expandMain.textContent = mainExpanded ? "Show fewer" : "Show more";
         els.tbody.textContent = "";
         var baseline = null;
-        if (historyData && historyData.snapshots) {
+        if (mode === "zdr" && historyData && historyData.snapshots) {
           var today = data
             ? data.generated_at.slice(0, 10)
             : new Date().toISOString().slice(0, 10);
@@ -1032,7 +1183,7 @@
             else movement = { cls: "flat", text: "•" };
           }
           var tier = tierCellData(row);
-          var entry = findCatalogEntry(row.model);
+          var entry = findModeEntry(row.model);
           // data.json drops the nested reasoning block (it stays lean); the
           // depth table and the DEPTH/QUAL hints join it back from the
           // catalog entry looked up above.
@@ -1083,6 +1234,17 @@
             }
             var td = document.createElement("td");
             td.textContent = cell;
+            if (idx === 1) {
+              var badge = quoteBadge(row);
+              if (badge) {
+                td.appendChild(document.createTextNode(" "));
+                var badgeEl = document.createElement("span");
+                badgeEl.className = "zdr-badge";
+                badgeEl.textContent = badge.text;
+                if (badge.title) badgeEl.title = badge.title;
+                td.appendChild(badgeEl);
+              }
+            }
             if (idx === 2) {
               if (cell === "unknown") td.className = "na";
               if (depthTip) td.title = depthTip;
@@ -1113,24 +1275,55 @@
           // Enter and Space both flip it (Space must not scroll the page).
           tr.tabIndex = 0;
           tr.setAttribute("role", "button");
+          var detailReady = mode === "zdr" || nonZdrState === "ready";
+          if (!detailReady) tr.setAttribute("aria-disabled", "true");
           tr.setAttribute(
             "aria-expanded",
             endpointExpanded[row.model] ? "true" : "false"
           );
           tr.addEventListener("click", function () {
+            if (!detailReady && mode === "all") {
+              endpointExpanded[row.model] = true;
+              if (nonZdrState === "idle" || nonZdrState === "failed") {
+                loadNonZdrCatalog();
+              }
+              render();
+              return;
+            }
             endpointExpanded[row.model] = !endpointExpanded[row.model];
             render();
           });
           tr.addEventListener("keydown", function (ev) {
             if (ev.key !== "Enter" && ev.key !== " ") return;
             if (ev.key === " ") ev.preventDefault();
+            if (!detailReady && mode === "all") {
+              endpointExpanded[row.model] = true;
+              if (nonZdrState === "idle" || nonZdrState === "failed") {
+                loadNonZdrCatalog();
+              }
+              render();
+              return;
+            }
             endpointExpanded[row.model] = !endpointExpanded[row.model];
             render();
           });
           els.tbody.appendChild(tr);
           if (endpointExpanded[row.model]) {
-            els.tbody.appendChild(depthDetailRow(entry, catalogData));
-            els.tbody.appendChild(endpointRow(entry, catalogData));
+            if (entry) {
+              els.tbody.appendChild(depthDetailRow(entry, true));
+              els.tbody.appendChild(endpointRow(entry, true));
+            } else {
+              var noteRow = document.createElement("tr");
+              var noteCell = document.createElement("td");
+              noteCell.colSpan = view === "simple" ? SIMPLE_TABLE_COLS : MAIN_TABLE_COLS;
+              noteCell.className = "na";
+              noteCell.textContent =
+                mode === "all" && nonZdrState === "loading"
+                  ? "Loading provider detail…"
+                  : "Provider detail unavailable.";
+              noteRow.appendChild(noteCell);
+              els.tbody.appendChild(noteRow);
+            }
           }
         });
         renderDeals();
@@ -1287,7 +1480,16 @@
         if (catalogError) {
           parts.push("endpoint details unavailable (catalog fetch failed)");
         }
-        if (!parts.length) return;
+        if (nonZdrState === "failed") {
+          parts.push(
+            "All-providers details unavailable (catalog-nonzdr fetch failed)",
+          );
+        }
+        if (!parts.length) {
+          els.status.textContent = "";
+          els.status.hidden = true;
+          return;
+        }
         els.status.textContent = parts.join(" ; ");
         els.status.hidden = false;
       }
@@ -1328,30 +1530,38 @@
         // Restore the persisted view (consent-first cookie) before any
         // fetch: a "simple" cookie restores simple view, absence (or
         // anything else) restores the expert default.
-        if (readCookie(COOKIE_NAME) === "simple") view = "simple";
+        var storedView = readCookie(COOKIE_NAME);
+        if (storedView === "simple" || storedView === "expert") view = storedView;
+        if (consentGranted() && readCookie(COOKIE_NAME_MODE) === "all") {
+          mode = "all";
+        }
         applyView();
+        applyMode();
 
-        // Focus moves into the dialog when it opens (it carries
-        // tabindex="-1") and back to the toggle that opened it when it
-        // closes, so keyboard and screen-reader users see the
-        // conversation. Escape dismisses without storing anything.
-        function openConsentDialog() {
-          var dlg = document.getElementById("cookie-dialog");
-          dlg.hidden = false;
-          dlg.focus();
-        }
-        function closeConsentDialog() {
-          var dlg = document.getElementById("cookie-dialog");
-          if (dlg.hidden) return;
-          dlg.hidden = true;
-          document.getElementById("view-simple").focus();
-        }
+        document
+          .getElementById("mode-all-input")
+          .addEventListener("change", function () {
+            setMode(this.checked ? "all" : "zdr");
+          });
+        document
+          .getElementById("mode-label-zdr")
+          .addEventListener("click", function () {
+            setMode("zdr");
+          });
+        document
+          .getElementById("mode-label-all")
+          .addEventListener("click", function () {
+            setMode("all");
+          });
+
         document
           .getElementById("view-simple")
           .addEventListener("click", function () {
             setView("simple");
             if (shouldAskForConsent()) {
               openConsentDialog();
+            } else if (consentGranted()) {
+              writeViewCookie();
             }
           });
         document
@@ -1359,12 +1569,16 @@
           .addEventListener("click", function () {
             setView("expert");
             closeConsentDialog();
-            if (readCookie(COOKIE_NAME) === "simple") clearViewCookie();
+            if (consentGranted()) writeViewCookie();
           });
         document
           .getElementById("cookie-ok")
           .addEventListener("click", function () {
             writeViewCookie();
+            if (pendingMode) {
+              writeModeCookie();
+              pendingMode = null;
+            }
             consentRejected = false;
             closeConsentDialog();
           });

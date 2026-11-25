@@ -54,7 +54,7 @@ def _write_artifacts(out_dir, overrides=None, best_id="z-ai/glm-5.3-flash"):
     """
     docs = {
         "data.json": {
-            "schema_version": 3,
+            "schema_version": 4,
             "generated_at": STAMP,
             "source_revision": STUB_REV,
         },
@@ -139,7 +139,13 @@ HEALTHY_AA = {
 # stage and none dropped for endpoint reasons -- the healthy happy path.
 HEALTHY_POOL = {
     "candidates": 20,
-    "dropped": {"no_baseline_eligible_endpoint": 0, "endpoint_fetch_failed": 0},
+    "dropped": {
+        reason: 0
+        for reason in (
+            "no_baseline_eligible_endpoint",
+            "endpoint_fetch_failed",
+        )
+    },
 }
 
 
@@ -164,6 +170,28 @@ def _is_catalog_run(cmd):
     return Path(cmd[1]).name == "model_compare.py" and "--catalog" in cmd
 
 
+def _catalog_payload(cmd, aa=HEALTHY_AA, pool=HEALTHY_POOL):
+    """A catalog payload that satisfies both endpoint and non-ZDR checks."""
+    doc = {
+        "generated_at": STAMP,
+        "sources": {"aa": aa},
+        "pool": pool,
+        "models": [],
+    }
+    if "--no-zdr" in cmd:
+        doc["parameters"] = {"zdr_required": False}
+        doc["sources"]["zdr"] = "skipped"
+        doc["models"] = [
+            {
+                "id": f"acme/model-{i}",
+                "zdr": None,
+                "safety_retention": None,
+            }
+            for i in range(pool["candidates"])
+        ]
+    return json.dumps(doc)
+
+
 def _fake_run(
     calls,
     simulate_build_site_data=True,
@@ -172,31 +200,43 @@ def _fake_run(
     aa=HEALTHY_AA,
     pool=HEALTHY_POOL,
 ):
-    def fake_run(cmd, cwd=None, stdout=None, check=True, **kwargs):
+    def fake_run(
+        cmd,
+        cwd=None,
+        stdout=None,
+        check=True,
+        capture_output=False,
+        text=False,
+        **kwargs,
+    ):
         if Path(cmd[0]).name == "git":
             # resolve_revision's git rev-parse (capture_output, no stdout
             # file): never part of the recorded pipeline, it only supplies
             # the data.json stamp value.
             return subprocess.CompletedProcess(cmd, 0, stdout=STUB_REV + "\n")
         calls.append(cmd)
+
+        def emit(payload):
+            if stdout is not None:
+                stdout.write(payload)
+                return subprocess.CompletedProcess(cmd, 0)
+            return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+
+        if Path(cmd[1]).name == "build_site_data.py":
+            if "--validate-catalog" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if simulate_build_site_data:
+                _write_artifacts(Path(cmd[cmd.index("--output") + 1]).parent, overrides)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
         if _is_catalog_run(cmd):
-            stdout.write(
-                json.dumps(
-                    {
-                        "generated_at": STAMP,
-                        "sources": {"aa": aa},
-                        "pool": pool,
-                        "models": [],
-                    }
-                )
-            )
+            return emit(_catalog_payload(cmd, aa, pool))
+        if "--json" in cmd and "--no-zdr" in cmd:
+            return emit("[]")
         if "--best" in cmd:
-            stdout.write(best + "\n")
+            return emit(best + "\n")
         if Path(cmd[1]).name == "build_litellm_artifacts.py":
             _write_litellm_artifacts(Path(cmd[cmd.index("--output-dir") + 1]))
-        if simulate_build_site_data and Path(cmd[1]).name == "build_site_data.py":
-            _write_artifacts(Path(cmd[cmd.index("--output") + 1]).parent, overrides)
-        return subprocess.CompletedProcess(cmd, 0)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     return fake_run
 
@@ -218,30 +258,36 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
         "model_compare.py",  # quality --json --top 20
         "generate_highlights.py",
         "build_litellm_artifacts.py",
-        "build_site_data.py",
+        "model_compare.py",  # balanced --no-zdr (All providers rows)
+        "model_compare.py",  # price --no-zdr
+        "model_compare.py",  # quality --no-zdr
+        "model_compare.py",  # --catalog --no-zdr (All providers detail)
+        "build_site_data.py",  # --validate-catalog catalog-nonzdr.json
+        "build_site_data.py",  # the data.json build
     ]
     assert "--catalog" in calls[0]
     assert "--best" in calls[1]
     best_cmd = next(cmd for cmd in calls if "--best" in cmd)
     assert not any(a == "--priority" for a in best_cmd)
-    assert (
-        sum(
-            1
-            for cmd in calls
-            if Path(cmd[1]).name == "model_compare.py" and "--catalog" in cmd
-        )
-        == 1
-    )
+    catalog_calls = [
+        cmd
+        for cmd in calls
+        if Path(cmd[1]).name == "model_compare.py" and "--catalog" in cmd
+    ]
+    assert len(catalog_calls) == 2
+    assert sum(1 for cmd in catalog_calls if "--no-zdr" in cmd) == 1
     json_calls = [cmd for cmd in calls if "--json" in cmd]
     assert [
         json_calls[i][json_calls[i].index("--priority") + 1]
         for i in range(len(json_calls))
-    ] == ["balanced", "price", "quality"]
+    ] == ["balanced", "price", "quality"] * 2
     assert (out / "best.txt").read_text().strip() == "openrouter/z-ai/glm-5.3-flash"
     # Every ranking run must agree on the safety-retention mode: --best off one
     # setting and the tables off another lets best.txt name an unranked model.
-    model_compare_calls = [cmd for cmd in calls if Path(cmd[1]).name == "model_compare.py"]
-    assert len(model_compare_calls) == 5
+    model_compare_calls = [
+        cmd for cmd in calls if Path(cmd[1]).name == "model_compare.py"
+    ]
+    assert len(model_compare_calls) == 9
     for cmd in model_compare_calls:
         assert cmd[cmd.index("--safety-retention") + 1] == "google"
     assert (out / "index.html").is_file()
@@ -261,7 +307,21 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
     assert gh_paths[3].name == "highlights-new.json"
     assert all(p.parent == gh_paths[0].parent for p in gh_paths)
 
-    bsd_cmd = next(cmd for cmd in calls if Path(cmd[1]).name == "build_site_data.py")
+    nonzdr_calls = [cmd for cmd in calls if "--no-zdr" in cmd]
+    assert nonzdr_calls
+    for cmd in nonzdr_calls:
+        assert "--zdr-facts" in cmd, cmd
+
+    validate_cmds = [cmd for cmd in calls if "--validate-catalog" in cmd]
+    assert len(validate_cmds) == 1
+    validated = validate_cmds[0][validate_cmds[0].index("--validate-catalog") + 1]
+    assert Path(validated).name == "catalog-nonzdr.json"
+    bsd_cmd = next(
+        cmd
+        for cmd in calls
+        if Path(cmd[1]).name == "build_site_data.py"
+        and "--validate-catalog" not in cmd
+    )
     assert bsd_cmd[2:12:2] == [
         "--best-file",
         "--output",
@@ -274,15 +334,37 @@ def test_build_site_pipeline_order_and_assembly(tmp_path, monkeypatch):
     assert bsd_paths[1] == out / "data.json"
     assert bsd_paths[2].parent == gh_paths[0].parent  # shared scratch dir
     assert bsd_cmd[12:14] == ["--revision", STUB_REV]
-    priority_values = bsd_cmd[15::2]
+    tail = bsd_cmd[14:]
+    priority_values = [
+        tail[i + 1] for i, arg in enumerate(tail) if arg == "--priority"
+    ]
+    nonzdr_values = [
+        tail[i + 1] for i, arg in enumerate(tail) if arg == "--nonzdr-priority"
+    ]
     assert [p.split("=", 1)[0] for p in priority_values] == [
         "balanced",
         "price",
         "quality",
     ]
+    assert [p.split("=", 1)[0] for p in nonzdr_values] == [
+        "balanced",
+        "price",
+        "quality",
+    ]
     assert all(
-        Path(p.split("=", 1)[1]).parent == gh_paths[0].parent for p in priority_values
+        Path(p.split("=", 1)[1]).parent == gh_paths[0].parent
+        for p in priority_values + nonzdr_values
     )
+
+
+def test_run_validate_catalog_rejects_a_malformed_document(tmp_path):
+    # The publish path must invoke the real validator, not no-op it.
+    path = tmp_path / "catalog.json"
+    path.write_text(json.dumps({"schema_version": 6}))
+    with pytest.raises(subprocess.CalledProcessError):
+        publish.run_validate_catalog(
+            Path(__file__).resolve().parent / "build_site_data.py", path
+        )
 
 
 def test_build_site_removes_stale_merged_map(tmp_path, monkeypatch):
@@ -359,21 +441,23 @@ def test_fetch_success_feeds_prev_files_to_generators(tmp_path, monkeypatch):
         if Path(cmd[0]).name == "git":
             return subprocess.CompletedProcess(cmd, 0, stdout=STUB_REV + "\n")
         if _is_catalog_run(cmd):
-            stdout.write(
-                json.dumps(
-                    {
-                        "generated_at": STAMP,
-                        "sources": HEALTHY_AA,
-                        "pool": HEALTHY_POOL,
-                        "models": [],
-                    }
-                )
-            )
+            payload = _catalog_payload(cmd)
+            if stdout is None:
+                return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+            stdout.write(payload)
         if "--best" in cmd:
+            if stdout is None:
+                return subprocess.CompletedProcess(
+                    cmd, 0, stdout="openrouter/x/y\n", stderr=""
+                )
             stdout.write("openrouter/x/y\n")
+        if "--json" in cmd and stdout is None:
+            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
         if Path(cmd[1]).name == "build_litellm_artifacts.py":
             _write_litellm_artifacts(Path(cmd[cmd.index("--output-dir") + 1]))
         if Path(cmd[1]).name == "build_site_data.py":
+            if "--validate-catalog" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
             prev_arg = Path(cmd[cmd.index("--history-prev-file") + 1])
             # read during the call: the scratch dir is removed afterwards
             seen["history_bytes"] = prev_arg.read_bytes() if prev_arg.exists() else None
@@ -394,17 +478,14 @@ def test_build_site_fails_when_expected_artifacts_missing(tmp_path, monkeypatch)
             return subprocess.CompletedProcess(cmd, 0, stdout=STUB_REV + "\n")
         calls.append(cmd)
         if _is_catalog_run(cmd):
-            stdout.write(
-                json.dumps(
-                    {
-                        "generated_at": STAMP,
-                        "sources": HEALTHY_AA,
-                        "pool": HEALTHY_POOL,
-                    }
-                )
-            )
+            payload = _catalog_payload(cmd)
+            if stdout is None:
+                return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+            stdout.write(payload)
         if "--best" in cmd:
             stdout.write("openrouter/x/y\n")
+        if "--json" in cmd and stdout is None:
+            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
         return subprocess.CompletedProcess(cmd, 0)
 
     monkeypatch.setattr(publish.subprocess, "run", fake_run)
@@ -419,7 +500,7 @@ def test_build_site_fails_when_expected_artifacts_missing(tmp_path, monkeypatch)
         (
             "data.json",
             {
-                "schema_version": 3,
+                "schema_version": 4,
                 "generated_at": "2026-09-27T06:00:00Z",
                 "source_revision": STUB_REV,
             },
@@ -464,7 +545,7 @@ def test_build_site_fails_on_malformed_artifact(tmp_path, monkeypatch, name):
             {"generated_at": STAMP, "source_revision": STUB_REV},
         ),  # missing only schema_version
         # missing only source_revision
-        ("data.json", {"schema_version": 3, "generated_at": STAMP}),
+        ("data.json", {"schema_version": 4, "generated_at": STAMP}),
         (
             "data.json",
             {"schema_version": 2, "generated_at": STAMP, "source_revision": STUB_REV},
@@ -518,7 +599,7 @@ def test_build_site_requires_data_json_source_revision(tmp_path, monkeypatch):
     # ("schema_version", "generated_at") must turn this red. _load_artifact
     # names every absent key at once, so the exact one-key message proves
     # the other two were present.
-    overrides = {"data.json": json.dumps({"schema_version": 3, "generated_at": STAMP})}
+    overrides = {"data.json": json.dumps({"schema_version": 4, "generated_at": STAMP})}
     monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=overrides))
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
     with pytest.raises(RuntimeError, match="data.json lacks source_revision"):
@@ -536,7 +617,7 @@ def test_data_json_version_pin_is_3(tmp_path, monkeypatch):
     }
     monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=overrides))
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
-    with pytest.raises(RuntimeError, match="data.json schema_version must be 3, got 1"):
+    with pytest.raises(RuntimeError, match="data.json schema_version must be 4, got 1"):
         publish.build_site(tmp_path / "site")
     # v3 passes: rerun with the happy-path fixtures (no v1 override).
     monkeypatch.setattr(publish.subprocess, "run", _fake_run([], overrides=None))
@@ -577,18 +658,41 @@ def test_endpoint_drop_rate_gate_passes_under_threshold(tmp_path):
     publish.check_endpoint_drops(path)  # must not raise
 
 
-def test_endpoint_drop_rate_gate_fails_over_threshold(tmp_path):
+def test_endpoint_drop_rate_gate_accepts_endpoint_state_churn(tmp_path):
+    # 4 semantic + 2 fetch drops of 100 is ordinary endpoint-state churn.
     path = tmp_path / "catalog.json"
     path.write_text(
         json.dumps(_pool_catalog(candidates=94, no_baseline=4, fetch_failed=2))
     )
-    with pytest.raises(RuntimeError) as exc:
+    publish.check_endpoint_drops(path)
+
+
+def test_endpoint_drop_rate_gate_accepts_the_live_capability_drops(tmp_path):
+    # The live ZDR pool: 31 of 87 entered models have no endpoint that meets
+    # the 1M prompt/tool/policy gates. That is expected filtering, not a wipe.
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        json.dumps(_pool_catalog(candidates=56, no_baseline=31))
+    )
+    publish.check_endpoint_drops(path)
+
+
+def test_endpoint_drop_rate_gate_fails_on_fetch_churn(tmp_path):
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        json.dumps(_pool_catalog(candidates=90, fetch_failed=6))
+    )
+    with pytest.raises(RuntimeError, match="endpoint fetches dropped"):
         publish.check_endpoint_drops(path)
-    message = str(exc.value)
-    assert "dropped 6 of 100" in message
-    assert "6%" in message and "5%" in message
-    assert "no_baseline_eligible_endpoint 4" in message
-    assert "endpoint_fetch_failed 2" in message
+
+
+def test_endpoint_drop_rate_gate_fails_on_semantic_mass_drop(tmp_path):
+    path = tmp_path / "catalog.json"
+    path.write_text(
+        json.dumps(_pool_catalog(candidates=20, no_baseline=80))
+    )
+    with pytest.raises(RuntimeError, match="endpoint stage dropped"):
+        publish.check_endpoint_drops(path)
 
 
 def test_endpoint_drop_rate_gate_zero_denominator_safe(tmp_path):
@@ -832,7 +936,7 @@ def test_faq_page_is_linked_from_the_index_footer_and_answers_routing():
     assert 'href="faq.html"' in index[nav_at : index.index("</nav>", nav_at)]
     assert 'href="how-to-use.html"' in index[nav_at : index.index("</nav>", nav_at)]
     # Same shell as the index page: shared stylesheet, same CSP posture.
-    assert 'href="style.css"' in faq
+    assert 'href="style.css?v=0.8.0-9"' in faq
     assert "Content-Security-Policy" in faq
     assert "default-src 'none'" in faq
     # Conceptual table questions are on FAQ (without unexplained CLI flags);
@@ -1027,14 +1131,17 @@ def test_build_site_endpoint_gate_runs_before_any_artifact_is_written(
     # Both gates read the scratch catalog before anything else runs: a
     # drop-rate exodus must write no publish artifacts to output_dir.
     exodus = {
-        "candidates": 94,
-        "dropped": {"no_baseline_eligible_endpoint": 4, "endpoint_fetch_failed": 2},
+        "candidates": 90,
+        "dropped": {
+            "no_baseline_eligible_endpoint": 0,
+            "endpoint_fetch_failed": 6,
+        },
     }
     calls = []
     monkeypatch.setattr(publish.subprocess, "run", _fake_run(calls, pool=exodus))
     monkeypatch.setattr(publish, "fetch_prev", lambda url: None)
     out = tmp_path / "site"
-    with pytest.raises(RuntimeError, match="endpoint stage dropped"):
+    with pytest.raises(RuntimeError, match="endpoint fetches dropped"):
         publish.build_site(out)
     assert [name for name in PUBLISH_ARTIFACTS if (out / name).exists()] == []
     assert len(calls) == 1 and _is_catalog_run(calls[0])
@@ -1239,5 +1346,134 @@ def test_every_asset_the_pages_reference_is_published():
         for ref in re.findall(r'(?:href|src)="([^"]+)"', html):
             if ref.startswith(("http://", "https://", "#", "mailto:")):
                 continue
-            refs.add(ref)
+            # Cache-busting query strings are not part of the file name.
+            refs.add(ref.split("?", 1)[0])
     assert sorted(refs - set(publish.SITE_FILES)) == []
+
+
+# ---------------------------------------------------------------------------
+# All-providers pool plumbing (Task 6)
+# ---------------------------------------------------------------------------
+
+
+def test_run_pool_json_empty_pool_writes_empty_list(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        publish.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            [], 2, stdout="", stderr="warning: no models satisfy the filters"
+        ),
+    )
+    out = tmp_path / "rows.json"
+    assert publish.run_pool_json(Path("m.py"), ["--json"], out) == []
+    assert json.loads(out.read_text()) == []
+
+
+def test_run_pool_json_endpoint_wipe_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        publish.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            [], 2, stdout="", stderr="warning: no models after the endpoint stage"
+        ),
+    )
+    with pytest.raises(RuntimeError, match="pool query failed"):
+        publish.run_pool_json(Path("m.py"), ["--json"], tmp_path / "rows.json")
+
+
+def test_run_pool_json_other_nonzero_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        publish.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess([], 1, stdout="", stderr="boom"),
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        publish.run_pool_json(Path("m.py"), ["--json"], tmp_path / "rows.json")
+
+
+def _nonzdr_catalog(candidates, **dropped):
+    reasons = {
+        "no_baseline_eligible_endpoint": 0,
+        "endpoint_fetch_failed": 0,
+    }
+    reasons.update(dropped)
+    return {
+        "generated_at": STAMP,
+        "parameters": {"zdr_required": False},
+        "sources": {"zdr": "skipped"},
+        "pool": {
+            "listed": candidates + sum(reasons.values()),
+            "candidates": candidates,
+            "dropped": reasons,
+        },
+        "models": [
+            {
+                "id": f"acme/model-{i}",
+                "zdr": None,
+                "safety_retention": None,
+            }
+            for i in range(candidates)
+        ],
+    }
+
+
+def test_nonzdr_catalog_rejects_a_zdr_catalog(tmp_path):
+    doc = _nonzdr_catalog(1)
+    doc["parameters"]["zdr_required"] = True
+    doc["sources"]["zdr"] = "ok"
+    doc["models"][0]["zdr"] = True
+    doc["models"][0]["safety_retention"] = False
+    path = tmp_path / "catalog-nonzdr.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(RuntimeError, match="not a non-ZDR catalog"):
+        publish.check_nonzdr_catalog(path)
+
+
+def test_nonzdr_catalog_rejects_malformed_parameters(tmp_path):
+    doc = _nonzdr_catalog(1)
+    doc["parameters"] = []
+    path = tmp_path / "catalog-nonzdr.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(RuntimeError, match="parameters is not an object"):
+        publish.check_nonzdr_catalog(path)
+
+
+def test_nonzdr_catalog_rejects_a_zdr_sourced_artifact(tmp_path):
+    doc = _nonzdr_catalog(1)
+    doc["sources"]["zdr"] = "ok"
+    path = tmp_path / "catalog-nonzdr.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(RuntimeError, match="sources.zdr is not 'skipped'"):
+        publish.check_nonzdr_catalog(path)
+
+
+def test_nonzdr_catalog_rejects_a_wipe(tmp_path):
+    path = tmp_path / "catalog-nonzdr.json"
+    path.write_text(
+        json.dumps(_nonzdr_catalog(1, no_baseline_eligible_endpoint=3))
+    )
+    with pytest.raises(RuntimeError, match="50%"):
+        publish.check_nonzdr_catalog(path)
+
+
+def test_nonzdr_catalog_accepts_the_live_rate(tmp_path):
+    path = tmp_path / "catalog-nonzdr.json"
+    path.write_text(
+        json.dumps(_nonzdr_catalog(11, no_baseline_eligible_endpoint=4))
+    )
+    publish.check_nonzdr_catalog(path)
+
+
+def test_faq_explains_the_retention_view_and_free_listings():
+    site = Path(__file__).resolve().parent / "site"
+    faq = (site / "faq.html").read_text(encoding="utf-8")
+    for needle in (
+        "All providers",
+        "Can free models appear?",
+        "What are the ZDR and SR badges?",
+        "Why can I see cheaper prices in All providers?",
+        "Safety Retention",
+    ):
+        assert needle in faq, needle
+    how_to = (site / "how-to-use.html").read_text(encoding="utf-8")
+    assert "ZDR view" in how_to

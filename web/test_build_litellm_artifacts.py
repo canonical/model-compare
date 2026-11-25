@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import build_litellm_artifacts as bla
-from test_build_site_data import make_catalog, make_catalog_entry
+from test_build_site_data import make_catalog, make_catalog_entry, make_dropped
 
 
 def _entry(
@@ -29,6 +29,7 @@ def _entry(
     quantizations=("fp8",),
 ):
     entry = make_catalog_entry(id=model_id, quality_effort=quality_effort)
+    entry["zdr_status"] = "strict"
     entry["max_output_tokens"] = max_output
     entry["input_modalities"] = list(modalities)
     entry["context"] = 1_048_576
@@ -91,7 +92,7 @@ def _entry(
 
 def _catalog(entries):
     doc = make_catalog()
-    doc["pool"] = {"listed": len(entries), "candidates": len(entries), "dropped": {}}
+    doc["pool"] = {"listed": len(entries), "candidates": len(entries), "dropped": make_dropped()}
     doc["models"] = entries
     doc["rankings"] = {
         p: [e["id"] for e in entries] for p in ("balanced", "price", "quality")
@@ -396,7 +397,7 @@ def test_rate_card_missing_optional_fields():
 def test_rate_card_rejects_empty_catalog():
     catalog = _basic_catalog()
     catalog["models"] = []
-    catalog["pool"] = {"listed": 0, "candidates": 0, "dropped": {}}
+    catalog["pool"] = {"listed": 0, "candidates": 0, "dropped": make_dropped()}
     catalog["rankings"] = {p: [] for p in ("balanced", "price", "quality")}
     catalog["sources"]["aa"].update(
         matched_aa=0,

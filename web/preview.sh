@@ -114,6 +114,7 @@ elif command -v curl >/dev/null &&
 	curl -fsSL --max-time 10 "$LIVE_URL/highlights.json" -o "$PREVIEW_DIR/highlights.json" 2>/dev/null || true
 	curl -fsSL --max-time 10 "$LIVE_URL/history.json" -o "$PREVIEW_DIR/history.json" 2>/dev/null || true
 	curl -fsSL --max-time 15 "$LIVE_URL/catalog.json" -o "$PREVIEW_DIR/catalog.json" 2>/dev/null || true
+	curl -fsSL --max-time 15 "$LIVE_URL/catalog-nonzdr.json" -o "$PREVIEW_DIR/catalog-nonzdr.json" 2>/dev/null || true
 	echo "using live data from $LIVE_URL"
 else
 	echo "live data unavailable; using synthetic placeholder data" >&2
@@ -137,13 +138,21 @@ def row(model, q, inp, outp, disc, ctx, age, score):
         "discount_pct": f"{disc:.0%}" if disc else "--",
         "context_tokens": ctx,
         "age_days": age,
-        # data.json v2 row keys (Task 9): the preview stub serves the
-        # degraded pre-endpoint shape -- nulls/false for all five.
+        # data.json v2/v3/v4 row keys: the preview stub serves the
+        # degraded pre-endpoint shape -- nulls/false where no record exists.
         "default_precision": None,
         "risk_flag": False,
         "price_spread": None,
         "session_cost_usd": None,
         "quant_note": None,
+        "quality_source": "openrouter",
+        "quality_as_of": None,
+        "quality_drift": None,
+        "quality_or_index": None,
+        "quality_or_as_of": None,
+        "quality_effort": None,
+        "default_effort": None,
+        "zdr_status": "strict",
     }
 
 
@@ -170,7 +179,7 @@ rows = [
     row("moonshotai/kimi-k2.5", 39.0, 0.6, 2.5, 0, 256000, 41, 0.568),
 ]
 data = {
-    "schema_version": 2,
+    "schema_version": 4,
     "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     "best": "openrouter/google/gemini-2.5-pro",
     "priorities": {
@@ -178,7 +187,10 @@ data = {
         "price": sorted(rows, key=lambda r: (r["input_usd_per_m"], -r["score"])),
         "quality": sorted(rows, key=lambda r: -r["quality_index"]),
     },
-    # v2 shape: build_data always emits the key (empty without a catalog)
+    # The synthetic fallback has no non-ZDR catalog, so leave this empty:
+    # the site hides the All switch rather than offering a dead toggle.
+    "priorities_nonzdr": {"balanced": [], "price": [], "quality": []},
+    # v4 shape: build_data always emits the key (empty without a catalog)
     "schedules": [],
 }
 with open(sys.argv[1], "w") as fh:

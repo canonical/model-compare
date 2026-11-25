@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="style.css" />
+    <link rel="stylesheet" href="style.css?v=0.8.0-9" />
   </head>
   <body>
     <h1>model-compare</h1>
@@ -54,6 +54,23 @@
       >
         quality
       </button>
+      <span
+        id="mode-switch"
+        class="mode-switch"
+        title="ZDR: quotes from zero-data-retention endpoints (Safety Retention is allowed for Google-authored models and badged SR). All: the cheapest eligible endpoints regardless of retention; details load on first use."
+      >
+        <span class="mode-label active" id="mode-label-zdr">ZDR</span>
+        <label class="switch">
+          <input
+            type="checkbox"
+            id="mode-all-input"
+            role="switch"
+            aria-label="Show all providers (off: ZDR view)"
+          />
+          <span class="slider round"></span>
+        </label>
+        <span class="mode-label" id="mode-label-all">All</span>
+      </span>
       <span id="generated-top" class="stamp" title="When this data was fetched (UTC)."></span>
       <button
         type="button"
@@ -79,7 +96,7 @@
       <thead>
         <tr>
           <th title="Ranking position">RANK</th>
-          <th title="Rank change in the last 7 days">7-DAY</th>
+          <th title="Rank change in the last 7 days (tracked for the ZDR view only)">7-DAY</th>
           <th title="Provider-qualified model id">MODEL</th>
           <th
             class="hide-simple"
@@ -107,7 +124,7 @@
           </th>
           <th
             class="hide-simple"
-            title="Quantization the ranked price is quoted at (the maker's default precision when disclosed; best available otherwise): how many bits store the model's parameters. Lower precision is faster and cheaper but can slightly reduce answer quality. Best-to-cheapest levels: FP32, BF16/FP16, FP8, FP6, INT8, FP4, INT4. ! = default OpenRouter routing favors cheaper sub-default-quantization endpoints."
+            title="Model-level baseline precision derived from the model's live non-variant endpoints (the maker's default when disclosed; best available otherwise), not necessarily the endpoint that sets the quote: how many bits store the model's parameters. Lower precision is faster and cheaper but can slightly reduce answer quality. Best-to-cheapest levels: FP32, BF16/FP16, FP8, FP6, INT8, FP4, INT4. ! = default OpenRouter routing favors cheaper sub-default-quantization endpoints."
           >
             PREC
           </th>
@@ -139,7 +156,7 @@
       <h2>Off-peak deals</h2>
       <p class="hint" id="deals-intro" hidden>
         Models with scheduled discount windows, ranked by the size of the
-        discount.
+        discount<span class="mode-zdr-note" hidden> (ZDR view only)</span>.
       </p>
       <table id="deals" hidden>
         <thead>
@@ -186,7 +203,11 @@
     </div>
 
     <div id="highlights" hidden>
-      <h2>Weekly highlights</h2>
+      <h2>
+        Weekly highlights<span class="mode-zdr-note heading-note" hidden>
+          (ZDR view only)</span
+        >
+      </h2>
       <h3>News from OpenRouter</h3>
       <p id="hl-week"></p>
       <h3>Quality moves</h3>
@@ -208,12 +229,14 @@
       hidden
       role="dialog"
       aria-modal="true"
-      aria-label="Cookie consent for remembering your table layout"
+      aria-label="Cookie consent for remembering your table layout and retention view"
       tabindex="-1"
     >
       <p>
-        This page stores one cookie ("model-compare-view=simple") to
-        remember your table layout choice. Nothing is tracked or shared.
+        This page stores two preference cookies — your table layout
+        ("model-compare-view") and your retention view
+        ("model-compare-mode") — so the page opens the way you left it.
+        Nothing is tracked or shared.
       </p>
       <div class="cookie-actions">
         <button type="button" id="cookie-reject">Reject</button>
@@ -221,6 +244,6 @@
       </div>
     </div>
 
-    <script src="app.js" defer></script>
+    <script src="app.js?v=0.8.0-9" defer></script>
   </body>
 </html>

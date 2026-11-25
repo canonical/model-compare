@@ -195,7 +195,7 @@ def test_expanded_table_rows_stay_thin_and_do_not_wrap():
 
     outer_padding = re.search(
         r"padding:\s*([\d.]+)rem\s+([\d.]+)rem\s+([\d.]+)rem\s*;",
-        rule_body("#table tr.endpoint-row td"),
+        rule_body("#table tr.endpoint-row > td"),
     )
     assert outer_padding is not None
     assert float(outer_padding.group(1)) < 0.4
@@ -221,8 +221,8 @@ def test_site_references_the_external_assets():
     # links them, and its CSP allows same-origin assets but no inline
     # code (the hand-marked JSON highlighting is markup, not script).
     html = SITE_HTML.read_text()
-    assert '<link rel="stylesheet" href="style.css" />' in html
-    assert '<script src="app.js" defer></script>' in html
+    assert '<link rel="stylesheet" href="style.css?v=0.8.0-9" />' in html
+    assert '<script src="app.js?v=0.8.0-9" defer></script>' in html
     assert "style-src 'self'" in html
     assert "script-src 'self'" in html
     assert "unsafe-inline" not in html
@@ -333,8 +333,8 @@ def test_opencode_headings_keep_version_text_drop_badge():
     # their exact text so the section is recognisable across the move.
     html = (SITE_DIR / "how-to-use.html").read_text()
     assert "verbadge" not in html
-    assert "<h3>OpenCode v1 — Launch flag, shell alias</h3>" in html
-    assert "<h3>OpenCode v2 — model-compare plugin</h3>" in html
+    assert '<h3 id="opencode-v1">OpenCode v1 — Launch flag, shell alias</h3>' in html
+    assert '<h3 id="opencode-v2">OpenCode v2 — model-compare plugin</h3>' in html
     assert "use-opencode" not in SITE_HTML.read_text()
 
 
@@ -2052,9 +2052,10 @@ def test_view_cookie_round_trip():
     # contract: the full OK -> Expert -> Simple sequence re-asks.
     out = run_js(
         "(function () {"
+        '  view = "simple";'
         "  writeViewCookie();"
         "  var afterWrite = { value: readCookie('model-compare-view'), header: document.cookie };"
-        "  clearViewCookie();"
+        "  document.cookie = \"\";"
         "  var afterClear = { value: readCookie('model-compare-view'), asks: shouldAskForConsent(),"
         "    header: document.cookie };"
         "  return { afterWrite: afterWrite, afterClear: afterClear };"
@@ -2067,11 +2068,6 @@ def test_view_cookie_round_trip():
     assert "path=/" in out["afterWrite"]["header"]
     assert out["afterClear"]["value"] is None
     assert out["afterClear"]["asks"] is True
-    # The delete must agree with the write on path/attributes (a
-    # disagreement silently breaks deletion in a real browser).
-    assert "max-age=0" in out["afterClear"]["header"]
-    assert "SameSite=Lax" in out["afterClear"]["header"]
-    assert "path=/" in out["afterClear"]["header"]
 
 
 def test_consent_wiring_ok_writes_cookie_only():
@@ -2121,13 +2117,14 @@ def test_consent_wiring_ok_writes_cookie_only():
     assert out["afterOk"]["dialogHidden"] is True
     assert out["afterOk"]["cookie"] == "simple"
     assert "model-compare-view=simple" in out["okHeader"]
-    # Expert removes the cookie (and never re-opens the dialog).
-    assert out["afterExpert"] == {"dialogHidden": True, "cookie": None}
-    # OK -> Expert -> Simple asks again: no consent decision is stored.
-    assert out["reAsk"] == {"dialogHidden": False, "cookie": None}
-    # Reject stores nothing but silences the dialog for this page load.
-    assert out["afterReject"] == {"dialogHidden": True, "cookie": None}
-    assert out["afterRejectSimple"] == {"dialogHidden": True, "cookie": None}
+    # Expert persists the expert layout (and never re-opens the dialog).
+    assert out["afterExpert"] == {"dialogHidden": True, "cookie": "expert"}
+    # Consent exists, so Simple persists instead of re-asking.
+    assert out["reAsk"] == {"dialogHidden": True, "cookie": "simple"}
+    # Reject stores nothing new; the prior consent remains, and it only
+    # silences the dialog for this page load.
+    assert out["afterReject"] == {"dialogHidden": True, "cookie": "simple"}
+    assert out["afterRejectSimple"] == {"dialogHidden": True, "cookie": "simple"}
 
 
 def test_view_cookie_scoped_to_page_directory():
@@ -2140,10 +2137,11 @@ def test_view_cookie_scoped_to_page_directory():
         "  var real = window.location.href;"
         "  window.location.href ="
         "    'https://canonical.github.io/model-compare/index.html';"
+        '  view = "simple";'
         "  writeViewCookie();"
         "  var header = document.cookie;"
         "  var value = readCookie('model-compare-view');"
-        "  clearViewCookie();"
+        '  document.cookie = "";'
         "  window.location.href = real;"
         "  return { header: header, value: value };"
         "})()"
@@ -2160,13 +2158,14 @@ def test_view_cookie_secure_only_in_secure_context():
     # not, and the cookie must keep working there).
     out = run_js(
         "(function () {"
+        '  view = "simple";'
         "  writeViewCookie();"
         "  var plain = document.cookie;"
-        "  clearViewCookie();"
+        '  document.cookie = "";'
         "  window.isSecureContext = true;"
         "  writeViewCookie();"
         "  var secure = document.cookie;"
-        "  clearViewCookie();"
+        '  document.cookie = "";'
         "  var secureClear = document.cookie;"
         "  delete window.isSecureContext;"
         "  return { plain: plain, secure: secure, secureClear: secureClear };"
@@ -2176,12 +2175,8 @@ def test_view_cookie_secure_only_in_secure_context():
     assert "Secure" not in out["plain"]
     assert "model-compare-view=simple" in out["secure"]
     assert "; Secure" in out["secure"]
-    # The secure write and its delete still agree on the other
-    # attributes, so deletion works there too.
     assert "SameSite=Lax" in out["secure"]
-    assert "max-age=0" in out["secureClear"]
-    assert "SameSite=Lax" in out["secureClear"]
-    assert "; Secure" in out["secureClear"]
+    assert out["secureClear"] == ""
 
 
 def test_cookie_dialog_focus_moves_on_show_and_back():
@@ -2241,7 +2236,7 @@ def test_should_ask_for_consent_reask_after_revoke():
         run_js(
             "(function () {"
             "  writeViewCookie();"
-            "  clearViewCookie();"
+            "  document.cookie = \"\";"
             "  return shouldAskForConsent();"
             "})()"
         )
@@ -2251,7 +2246,7 @@ def test_should_ask_for_consent_reask_after_revoke():
         run_js(
             "(function () {"
             "  writeViewCookie();"
-            "  clearViewCookie();"
+            "  document.cookie = \"\";"
             "  consentRejected = true;"
             "  return shouldAskForConsent();"
             "})()"
@@ -2529,7 +2524,7 @@ def test_plugin_lightbox_ignores_modified_clicks_and_closes_on_backdrop():
 def test_every_page_has_the_tight_csp():
     for name in PAGE_FILES:
         html = (SITE_DIR / name).read_text()
-        assert '<link rel="stylesheet" href="style.css" />' in html, name
+        assert '<link rel="stylesheet" href="style.css?v=0.8.0-9" />' in html, name
         assert "Content-Security-Policy" in html, name
         assert "default-src 'none'" in html, name
         assert "unsafe-inline" not in html, name
@@ -2548,11 +2543,525 @@ def test_every_page_has_the_tight_csp():
 
 def test_pages_load_only_the_scripts_they_need():
     index = (SITE_DIR / "index.html").read_text()
-    assert '<script src="app.js" defer></script>' in index
+    assert '<script src="app.js?v=0.8.0-9" defer></script>' in index
     assert "copy.js" not in index
-    assert "<h2>Weekly highlights</h2>" in index
+    assert "Weekly highlights" in index
     assert "<h3>News from OpenRouter</h3>" in index
     plugin = (SITE_DIR / "plugin.html").read_text()
     assert '<script src="plugin.js" defer></script>' in plugin
     for name in ("how-to-use.html", "faq.html"):
         assert "<script" not in (SITE_DIR / name).read_text(), name
+
+
+# ---------------------------------------------------------------------------
+# Retention view: rows, badges, movement, loader (Task 7)
+# ---------------------------------------------------------------------------
+
+MODE_ROW = dict(
+    SIMPLE_VIEW_ROW,
+    zdr_status="strict",
+)
+
+
+def test_render_all_mode_uses_nonzdr_rows():
+    data_fix = {
+        "generated_at": "2026-11-24T00:00:00+00:00",
+        "priorities": {"balanced": [dict(MODE_ROW, model="m/zdr")]},
+        "priorities_nonzdr": {"balanced": [dict(MODE_ROW, model="m/all")]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        ' mode = "all"; render();'
+        " return els.tbody.children[0].children[2].textContent;"
+        "})()"
+    )
+    assert out == "m/all"
+
+
+def test_render_all_mode_badges_quote_status():
+    rows = [
+        dict(MODE_ROW, model="m/strict"),
+        dict(MODE_ROW, model="m/sr", zdr_status="safety-retention"),
+        dict(MODE_ROW, model="m/none", zdr_status="not-listed"),
+    ]
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": rows},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        ' mode = "all"; render();'
+        " function badge(tr) {"
+        "   var td = tr.children[2];"
+        "   for (var i = 0; i < td.children.length; i++) {"
+        '     if (td.children[i].className === "zdr-badge") {'
+        "       return td.children[i].textContent;"
+        "     }"
+        "   }"
+        "   return null;"
+        " }"
+        " return els.tbody.children.map(badge);"
+        "})()"
+    )
+    assert out == ["ZDR", "SR", None]
+
+
+def test_render_all_mode_blanks_movement():
+    data_fix = {
+        "generated_at": "2026-11-24T00:00:00+00:00",
+        "priorities": {"balanced": [dict(MODE_ROW, model="m/zdr")]},
+        "priorities_nonzdr": {"balanced": [dict(MODE_ROW, model="m/zdr")]},
+        "schedules": [],
+    }
+    history_fix = {
+        "snapshots": {
+            "2026-11-17": {"tabs": {"balanced": [{"id": "m/zdr", "rank": 3}]}}
+        }
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        f" historyData = {json.dumps(history_fix)};"
+        ' mode = "all"; render();'
+        " var allText = els.tbody.children[0].children[1].textContent;"
+        ' mode = "zdr"; render();'
+        " var zdrText = els.tbody.children[1].children[1].textContent;"
+        " return {all: allText, zdr: zdrText};"
+        "})()"
+    )
+    assert out == {"all": "", "zdr": "▴2"}
+
+
+def test_mode_switch_hidden_when_nonzdr_empty():
+    data_fix = {"priorities": {"balanced": []}, "schedules": []}
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " render();"
+        " return document.getElementById('mode-switch').hidden;"
+        "})()"
+    )
+    assert out is True
+
+
+def test_nonzdr_catalog_fetched_once_on_repeated_flips():
+    row = dict(MODE_ROW, model="m/all")
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": [row]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " var calls = 0;"
+        " var realFetch = fetch;"
+        " fetch = function () { calls += 1; return Promise.reject(new Error('x')); };"
+        ' setMode("all"); setMode("all"); setMode("zdr"); setMode("all");'
+        " fetch = realFetch;"
+        " return calls;"
+        "})()"
+    )
+    assert out == 1
+
+
+def test_early_render_keeps_the_stored_all_mode():
+    out = run_js(
+        "(function () {"
+        " data = null; mode = 'all'; render();"
+        " return { mode: mode, hidden: document.getElementById('mode-switch').hidden };"
+        "})()"
+    )
+    assert out == {"mode": "all", "hidden": True}
+
+
+def test_reject_then_mode_toggle_does_not_reopen_dialog():
+    row = dict(MODE_ROW, model="m/all")
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": [row]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " document.cookie = ''; consentRejected = false; pendingMode = null;"
+        " mode = 'zdr'; setMode('all');"
+        " var first = document.getElementById('cookie-dialog').hidden;"
+        " document.getElementById('cookie-reject').dispatchEvent('click');"
+        " setMode('zdr');"
+        " return {first: first, second: document.getElementById('cookie-dialog').hidden,"
+        "   rejected: consentRejected};"
+        "})()"
+    )
+    assert out == {"first": False, "second": True, "rejected": True}
+
+
+def test_mode_cookie_written_only_after_consent():
+    row = dict(MODE_ROW, model="m/all")
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": [row]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        ' document.cookie = "";'
+        ' mode = "zdr"; setMode("all");'
+        " var before = document.cookie;"
+        ' document.cookie = "model-compare-view=simple";'
+        ' setMode("zdr");'
+        " var after = document.cookie;"
+        " return {before: before, after: after};"
+        "})()"
+    )
+    assert "model-compare-mode" not in out["before"]
+    assert "model-compare-mode=zdr" in out["after"]
+
+
+def test_find_mode_entry_uses_the_mode_catalog():
+    out = run_js(
+        "(function () {"
+        ' catalogData = {models: [{id: "m/x", tag: "zdr"}]};'
+        ' nonZdrCatalogData = {models: [{id: "m/x", tag: "all"}]};'
+        ' mode = "zdr"; var a = findModeEntry("m/x").tag;'
+        ' mode = "all"; var b = findModeEntry("m/x").tag;'
+        " return {zdr: a, all: b};"
+        "})()"
+    )
+    assert out == {"zdr": "zdr", "all": "all"}
+
+
+def test_index_has_the_mode_switch_and_zdr_notes():
+    html = SITE_HTML.read_text()
+    for needle in (
+        'id="mode-switch"',
+        'id="mode-all-input"',
+        'id="mode-label-zdr"',
+        'id="mode-label-all"',
+        "mode-zdr-note",
+        "Model-level baseline precision",
+    ):
+        assert needle in html, needle
+    # The retention slider sits immediately after the priority buttons.
+    assert html.index('data-priority="quality"') < html.index('id="mode-switch"')
+    assert html.index('id="mode-switch"') < html.index('id="generated-top"')
+
+
+def test_write_view_cookie_persists_the_current_view():
+    out = run_js(
+        '(function () { document.cookie = ""; view = "expert";'
+        " writeViewCookie(); return document.cookie; })()"
+    )
+    assert "model-compare-view=expert" in out
+
+
+def test_consent_accepts_any_stored_view():
+    out = run_js(
+        '(function () { document.cookie = "model-compare-view=expert";'
+        " return consentGranted(); })()"
+    )
+    assert out is True
+
+
+def test_loader_retries_after_failure_on_a_flip():
+    row = dict(MODE_ROW, model="m/all")
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": [row]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " var calls = 0;"
+        " var realFetch = fetch;"
+        " fetch = function () { calls += 1; return Promise.reject(new Error('x')); };"
+        ' nonZdrState = "failed"; nonZdrPromise = null;'
+        ' setMode("all");'
+        " fetch = realFetch;"
+        " return calls;"
+        "})()"
+    )
+    assert out == 1
+
+
+def test_rows_for_tolerates_v3_data_json():
+    data_fix = {
+        "priorities": {"balanced": [dict(MODE_ROW, model="m/zdr")]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        ' mode = "all"; render();'
+        " return {mode: mode, rows: els.tbody.children.length,"
+        '   hidden: document.getElementById("mode-switch").hidden};'
+        "})()"
+    )
+    assert out == {"mode": "zdr", "rows": 1, "hidden": True}
+
+
+def test_render_zdr_view_badges_sr_only():
+    rows = [
+        dict(MODE_ROW, model="m/strict"),
+        dict(MODE_ROW, model="m/sr", zdr_status="safety-retention"),
+    ]
+    data_fix = {"priorities": {"balanced": rows}, "schedules": []}
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        ' mode = "zdr"; render();'
+        " function badge(tr) {"
+        "   var td = tr.children[2];"
+        "   for (var i = 0; i < td.children.length; i++) {"
+        '     if (td.children[i].className === "zdr-badge") {'
+        "       return td.children[i].textContent;"
+        "     }"
+        "   }"
+        "   return null;"
+        " }"
+        " return els.tbody.children.map(badge);"
+        "})()"
+    )
+    assert out == [None, "SR"]
+
+
+def test_prec_tooltip_passes_the_off_list_sentence():
+    out = run_js(
+        'fmtQuantTooltip({quant_note: "Off-list cheapest: 2.0x cheaper"})'
+    )
+    assert out == "Off-list cheapest: 2.0x cheaper"
+
+
+def test_reject_without_consent_writes_nothing():
+    out = run_js(
+        "(function () {"
+        ' document.cookie = ""; consentRejected = false; pendingMode = null;'
+        " var simple = document.getElementById('view-simple');"
+        " var reject = document.getElementById('cookie-reject');"
+        " simple.dispatchEvent('click');"
+        " var asked = document.getElementById('cookie-dialog').hidden;"
+        " reject.dispatchEvent('click');"
+        " return { asked: asked, cookie: readCookie('model-compare-view') };"
+        "})()"
+    )
+    assert out == {"asked": False, "cookie": None}
+
+
+def test_first_all_row_click_starts_load_and_expands():
+    row = dict(MODE_ROW, model="m/all")
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": [row]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " mode = 'all'; nonZdrState = 'idle'; nonZdrPromise = null; render();"
+        " els.tbody.children[0].dispatchEvent('click');"
+        " return {expanded: endpointExpanded['m/all'], state: nonZdrState};"
+        "})()"
+    )
+    assert out["expanded"] is True
+    assert out["state"] == "loading"
+
+
+def test_failed_all_row_click_retries_the_load():
+    row = dict(MODE_ROW, model="m/all")
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": [row]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " mode = 'all'; nonZdrState = 'failed'; nonZdrPromise = null;"
+        " var calls = 0; var realFetch = fetch;"
+        " fetch = function () { calls += 1; return Promise.reject(new Error('x')); };"
+        " render(); els.tbody.children[0].dispatchEvent('click');"
+        " fetch = realFetch;"
+        " return {calls: calls, state: nonZdrState, expanded: endpointExpanded['m/all']};"
+        "})()"
+    )
+    assert out == {"calls": 1, "state": "loading", "expanded": True}
+
+
+def test_loading_all_row_click_expands_without_refetch():
+    row = dict(MODE_ROW, model="m/all")
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": [row]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " mode = 'all'; nonZdrState = 'loading'; nonZdrPromise = {};"
+        " var calls = 0; var realFetch = fetch;"
+        " fetch = function () { calls += 1; return Promise.reject(new Error('x')); };"
+        " render(); els.tbody.children[0].dispatchEvent('click');"
+        " fetch = realFetch;"
+        " return {expanded: endpointExpanded['m/all'], calls: calls};"
+        "})()"
+    )
+    assert out == {"expanded": True, "calls": 0}
+
+
+def test_space_on_loading_all_row_expands_and_prevents_scroll():
+    row = dict(MODE_ROW, model="m/all")
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": [row]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " mode = 'all'; nonZdrState = 'loading'; nonZdrPromise = {};"
+        " var prevented = false; render();"
+        " els.tbody.children[0].dispatchEvent('keydown', {key: ' ',"
+        "   preventDefault: function () { prevented = true; }});"
+        " return {expanded: endpointExpanded['m/all'], prevented: prevented};"
+        "})()"
+    )
+    assert out == {"expanded": True, "prevented": True}
+
+
+def test_nonzdr_failure_surfaces_in_status_and_success_clears_it():
+    out = run_js(
+        "(function () {"
+        " nonZdrState = 'failed'; renderStatus();"
+        " var failed = {hidden: els.status.hidden, text: els.status.textContent};"
+        " nonZdrState = 'ready'; renderStatus();"
+        " return {failed: failed, hidden: els.status.hidden, text: els.status.textContent};"
+        "})()"
+    )
+    assert out["failed"]["hidden"] is False
+    assert "catalog-nonzdr" in out["failed"]["text"]
+    assert out["hidden"] is True
+    assert out["text"] == ""
+
+
+def test_render_never_starts_the_nonzdr_fetch():
+    row = dict(MODE_ROW, model="m/zdr")
+    data_fix = {"priorities": {"balanced": [row]}, "schedules": []}
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " var calls = 0;"
+        " var realFetch = fetch;"
+        " fetch = function () { calls += 1; return Promise.reject(new Error('x')); };"
+        ' mode = "zdr"; render();'
+        " fetch = realFetch;"
+        " return calls;"
+        "})()"
+    )
+    assert out == 0
+
+
+def test_mode_switch_checkbox_toggles_mode():
+    row = dict(MODE_ROW, model="m/all")
+    data_fix = {
+        "priorities": {"balanced": []},
+        "priorities_nonzdr": {"balanced": [row]},
+        "schedules": [],
+    }
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " var input = document.getElementById('mode-all-input');"
+        " input.checked = true; input.dispatchEvent('change');"
+        " var on = mode;"
+        " input.checked = false; input.dispatchEvent('change');"
+        " return { on: on, off: mode, checked: input.checked };"
+        "})()"
+    )
+    assert out == {"on": "all", "off": "zdr", "checked": False}
+
+
+def test_site_css_badge_hover_and_expanded_sizes():
+    css = SITE_CSS.read_text()
+    badge = re.search(r"\.zdr-badge\s*\{([^}]*)\}", css).group(1)
+    assert "font-size: 0.62em" in badge
+    assert "border-radius: 0.4em" in badge
+    assert "vertical-align" not in badge
+    assert ".tabs button:hover" in css
+    expanded = re.search(
+        r"#table tr\.endpoint-row > td\s*\{([^}]*)\}", css
+    ).group(1)
+    assert "font-size: 0.8rem" in expanded
+    nested = re.search(
+        r"#table tr\.endpoint-row table th,\s*"
+        r"#table tr\.endpoint-row table td\s*\{([^}]*)\}",
+        css,
+    ).group(1)
+    assert "font-size: 0.72rem" in nested
+
+
+def test_faq_and_how_to_use_have_a_responsive_sticky_toc():
+    css = SITE_CSS.read_text()
+    page = re.search(r"\.page-with-toc\s*\{([^}]*)\}", css).group(1)
+    assert "display: grid" in page
+    assert "minmax(450px, 56rem) minmax(15rem, 500px)" in page
+    assert "justify-content: start" in page
+    toc = re.search(r"\.page-with-toc \.toc\s*\{([^}]*)\}", css).group(1)
+    assert "position: sticky" in toc
+    assert "top: 1rem" in toc
+    assert "max-height: calc(100vh - 2rem)" in toc
+    stacked = css[css.index("@media (max-width: 52rem)") :]
+    assert "grid-template-columns: minmax(0, 1fr);" in stacked
+    assert "position: static" in stacked
+    assert "order: -1" in stacked
+
+    for name in ("faq.html", "how-to-use.html"):
+        html = (SITE_DIR / name).read_text()
+        assert html.count('class="page-with-toc"') == 1, name
+        assert '<nav class="toc" aria-label="On this page">' in html, name
+        assert html.index('class="page-with-toc"') < html.index('<nav class="toc"')
+        assert html.index('<nav class="toc"') < html.index("<footer>"), name
+        toc_html = html[html.index('<nav class="toc"') :]
+        toc_html = toc_html[: toc_html.index("</nav>")]
+        ids = re.findall(r'<h3 id="([^"]+)"', html)
+        refs = re.findall(r'<a href="#([^"]+)"', toc_html)
+        assert ids, name
+        assert refs == ids, name
+
+
+def test_deals_zdr_note_is_inline_in_the_table_description():
+    html = SITE_HTML.read_text()
+    intro = re.search(
+        r'<p class="hint" id="deals-intro"[^>]*>(.*?)</p>', html, re.S
+    ).group(1)
+    assert "Models with scheduled discount windows" in intro
+    assert (
+        'discount<span class="mode-zdr-note" hidden> (ZDR view only)</span>.'
+        in intro
+    )
+    deals = html[html.index('id="deals-section"') : html.index('id="highlights"')]
+    assert '<p class="hint mode-zdr-note" hidden>ZDR view only.</p>' not in deals
+
+
+def test_highlights_zdr_note_sits_in_the_heading():
+    html = SITE_HTML.read_text()
+    assert (
+        '<h2>\n'
+        '        Weekly highlights<span class="mode-zdr-note heading-note" hidden>\n'
+        '          (ZDR view only)</span\n'
+        '        >\n'
+        "      </h2>" in html
+    )
+    highlights = html[html.index('id="highlights"') : html.index("<footer>")]
+    assert '<p class="hint mode-zdr-note" hidden>ZDR view only.</p>' not in highlights
+    css = SITE_CSS.read_text()
+    note = re.search(r"\.heading-note\s*\{([^}]*)\}", css).group(1)
+    assert "font-size: 0.85rem" in note
+    assert "font-weight: 400" in note
+    assert "color: var(--muted)" in note
