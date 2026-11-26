@@ -857,7 +857,7 @@ def test_v1_history_treated_as_absent():
 
 
 def test_v5_history_treated_as_absent():
-    # HISTORY_SCHEMA_VERSION is 6: a v5 document predates the Flex
+    # HISTORY_SCHEMA_VERSION is 7: a v5 document predates the Flex
     # service-tier price correction and must not seed the weekly diff.
     history = make_diff_history()
     history["schema_version"] = 5

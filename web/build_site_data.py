@@ -592,8 +592,8 @@ def _validate_catalog_reasoning(reasoning, label) -> None:
         missing = [key for key in CATALOG_UNLABELED_KEYS if key not in unlabeled]
         if missing:
             raise ValueError(f"{sub} is missing keys: " + ", ".join(missing))
-        if not _is_number(unlabeled["index"]):
-            raise ValueError(f"{sub} index must be a finite number")
+        if not _is_aa_value(unlabeled["index"]):
+            raise ValueError(f"{sub} index must be a number in 0..100")
         cost = unlabeled["cost_per_task_usd"]
         if cost is not None and not _is_number(cost):
             raise ValueError(f"{sub} cost_per_task_usd must be a finite number or null")
@@ -721,6 +721,10 @@ def _validate_catalog_quality_fields(entry: dict, label: str) -> None:
         and entry["quality_match"] not in CATALOG_QUALITY_MATCH_VALUES
     ):
         raise ValueError(f"{label} has unknown quality_match")
+    if (entry["quality"] is None) != (entry["quality_match"] is None):
+        raise ValueError(
+            f"{label} quality and quality_match must both be null or both be set"
+        )
     # Schema v4 provenance: presence-checked by the caller,
     # value types pinned here -- the stamp is a string or null, the
     # drift verdict a boolean or null.
@@ -740,6 +744,8 @@ def _validate_catalog_quality_fields(entry: dict, label: str) -> None:
         not isinstance(quality_effort, str) or not quality_effort
     ):
         raise ValueError(f"{label} quality_effort must be a non-empty string or null")
+    if entry["quality_match"] == "openrouter" and quality_effort != "none":
+        raise ValueError(f"{label} openrouter quality requires quality_effort 'none'")
     _validate_catalog_reasoning(entry["reasoning"], f"{label} reasoning")
 
 
@@ -1105,11 +1111,6 @@ def validate_catalog(document) -> None:
                     f"missing {', '.join(missing)}"
                 )
             _validate_catalog_quality_fields(entry, f"filtered[{i}]")
-            if (entry["quality"] is None) != (entry["quality_match"] is None):
-                raise ValueError(
-                    f"filtered[{i}] quality and quality_match must both be null "
-                    "or non-null"
-                )
         filtered_ids.append(entry["id"])
     if len(set(filtered_ids)) != len(filtered_ids):
         raise ValueError("catalog filtered contains duplicate ids")
@@ -1171,6 +1172,15 @@ def validate_catalog(document) -> None:
             raise ValueError(
                 f"schedules[{i}] quality_effort must be a non-empty string or null"
             )
+        if (entry["quality"] is None) != (entry["quality_source"] is None):
+            raise ValueError(
+                f"schedules[{i}] quality and quality_source must both be null "
+                "or both be set"
+            )
+        if entry["quality_source"] == "openrouter" and quality_effort != "none":
+            raise ValueError(
+                f"schedules[{i}] openrouter quality requires quality_effort 'none'"
+            )
         if entry["score"] is not None and not _is_score(entry["score"]):
             raise ValueError(f"schedules[{i}] score must be a score in [0, 1] or null")
         if entry["sched_detail"] is not None and not isinstance(
@@ -1189,7 +1199,7 @@ def validate_catalog(document) -> None:
         _validate_catalog_session_cost(document["session_cost"])
 
 
-HISTORY_SCHEMA_VERSION = 6
+HISTORY_SCHEMA_VERSION = 7
 HISTORY_RETENTION = 10
 HISTORY_TOP_N = 20
 

@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="style.css?v=0.8.0-9" />
+    <link rel="stylesheet" href="style.css?v=0.8.0-10" />
   </head>
   <body>
     <h1>model-compare</h1>
@@ -204,17 +204,20 @@
         </div>
 
         <div class="faq-item">
-          <h3 id="qual-blank">Why is QUAL sometimes blank?</h3>
+          <h3 id="qual-blank">Why is QUAL sometimes blank or marked unknown?</h3>
           <p>
             Artificial Analysis sometimes publishes a score without saying which
-            reasoning effort it was measured at. That score is useful as a
-            reference, but it may not be the quality you get at any depth
-            OpenRouter lets you select. So <code>QUAL</code> stays blank,
-            <code>DEPTH</code> shows <code>unknown</code>, and the number appears
-            only in the expanded depth table. It does not affect the ranking.
+            reasoning effort it was measured at. The tool still uses that score in
+            a default run — it is a real measurement — but it cannot tell you
+            which effort produced it. So <code>QUAL</code> shows the number (with
+            <code>· unknown</code> in the Simple view), <code>DEPTH</code> shows
+            <code>unknown</code>, and the expanded depth table marks the row as
+            not selectable. If you pin an effort with
+            <code>--reasoning-effort</code>, the unlabeled score is not used and
+            <code>QUAL</code> stays blank.
           </p>
           <p>
-            A model with no usable quality record scores zero on quality as long
+            A model with no quality record at all scores zero on quality as long
             as at least one other model in the table has a score; it can still
             rank on price, context, and age. If no model has any quality score,
             quality is left out of the ranking weights altogether, so the
@@ -461,7 +464,7 @@
           <li><a href="#prec-na">Why PREC says n/a</a></li>
           <li><a href="#price-differs">Why the price differs</a></li>
           <li><a href="#reasoning-depths">Reasoning depths and variants</a></li>
-          <li><a href="#qual-blank">Why QUAL is blank</a></li>
+          <li><a href="#qual-blank">Why QUAL is blank or marked unknown</a></li>
           <li><a href="#popular-models-missing">Why popular models are missing</a></li>
           <li><a href="#checked-but-missing">Why a checked model is missing</a></li>
           <li><a href="#zero-retention">Is it actually zero-retention?</a></li>

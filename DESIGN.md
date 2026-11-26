@@ -64,8 +64,10 @@ with priority-dependent weights:
   highest index among measured efforts the model can run; ties prefer the
   deeper effort. Missing metadata considers all measured efforts; an empty
   list is a single-state model and admits only the internal `reasoning` row
-  (plus `none` when reasoning is not mandatory). An explicit
-  `--reasoning-effort` selects exactly that effort.
+  (plus `none` when reasoning is not mandatory). If no measured depth
+  resolves, a finite unlabeled AA measurement fills it in a default run
+  (`quality_effort: null`). An explicit `--reasoning-effort` selects exactly
+  that effort and never uses the unlabeled row.
 - **context score** — logarithmic ramp from `--min-context` up to 4× that
   threshold: headroom helps, but with diminishing returns.
 - **age score** — exponential decay with a `--recency-half-life` of 120 days:
@@ -83,7 +85,9 @@ efforts; an empty list is a single-state model, so only `reasoning` (and
 explicit effort selects exactly that effort and drops models that cannot run
 it (`reasoning effort`); another effort is never substituted. If no quality
 record is available at the selected effort after the known non-reasoning
-`none` OpenRouter fallback, `QUAL` is `-` and quality scores 0.
+`none` OpenRouter fallback, a default run may use a finite unlabeled AA
+measurement as the last tier; it fills `quality` with `quality_effort: null`.
+An explicit effort never uses that tier: `QUAL` is `-` and quality scores 0.
 `cand["quality"]` remains the float index; only which effort's record fills it
 changes.
 
@@ -205,8 +209,11 @@ Per-source matching and `as_of` semantics:
    works, free is enough; responses paginate at 200 models per page and are
    followed). Each row is one measured effort variant; the effort is parsed
    from the trailing parenthetical in `name` first and the `slug` suffix
-   second. A row whose effort cannot be parsed is display-only — never
-   guessed from the model's default — and an ambiguous parenthetical (two
+   second. A row with no effort label at all is the unlabeled measurement: a
+   default run may use it as the last tier with `quality_effort: null`. A row
+   whose trailing parenthetical is not a recognized effort (and not an
+   ambiguity) is display-only — never promoted, never guessed from the
+   model's default — and an ambiguous parenthetical (two
    effort tokens, or `non-reasoning` plus an effort) is not used for a
    discrete-depth match. The lookup is `base key → effort → record`;
    duplicate `(base, effort)` records from different rows are dropped as
@@ -268,17 +275,20 @@ Per-source matching and `as_of` semantics:
    only for a known non-reasoning model (`quality_effort: "none"`); for a
    reasoning model it is a reference only.
 
-AA also returns some rows with no effort label at all (no name
-parenthetical, no slug suffix — "GLM-5.3-Flash"). Such a row is not a depth
-record: the index cannot be tied to a selectable effort, so it never fills
-`QUAL` and never enters the weighted score (`quality` and `quality_effort` stay
-null). It is carried as `reasoning.aa_unlabeled` (`index`,
-`cost_per_task_usd`, `source`, `as_of`). In presentation, `DEPTH` displays
-`unknown`, the Simple view and website deals `QUALITY`/`QUAL` cells display
-`- · unknown`, and both CLI `--depths` and the site's depth detail table
-append a trailing `unknown` row (not selectable, `vs default` `-`) with a caveat
-below the table that a selectable effort may score differently. `QUAL` itself
-stays `-`.
+AA also returns some rows with no effort label at all (no name parenthetical,
+no slug suffix — "GLM-5.3-Flash"). The index cannot be tied to a selectable
+effort, but it is a real measurement: in a default run it fills `QUAL` as the
+last tier, with `quality_effort: null`, after every known-effort depth and the
+known non-reasoning OpenRouter trio. `reasoning.aa_unlabeled` carries the
+record (`index`, `cost_per_task_usd`, `source`, `as_of`) whether or not it
+supplied the main score. `DEPTH` displays `unknown`, the Simple view and the
+website display `NN.N · unknown`, and both CLI `--depths` and the site's depth
+detail table append a trailing `unknown` row (not selectable, `vs default` `-`)
+with a caveat that a selectable effort may score differently. An explicit
+`--reasoning-effort` never uses it: `QUAL` stays `-` and the reference stays
+display-only. A trailing parenthetical that names no recognized effort (for
+example "(Novel Shape)") is not treated as unlabeled: it is display-only and
+never promoted.
 
 Drift is always winner-vs-OR, and only like-for-like: the comparison is
 valid only when both sides are non-reasoning. When the winner is `aa` or
@@ -331,9 +341,10 @@ with `as_of`), `published-catalog-v2` (the hydration envelope, including enriche
 `filtered` entries). Payloads cached under earlier keys predate those fields and
 are never read. The source label `api` was renamed `aa` with the reconciliation; consumers
 (`web/build_site_data.py`) accept exactly `aa`/`catalog`/`openrouter`.
-Models without a resolved record stay quality-blind and rank on
-price/context/age only; `--quality-ref` controls how generous the quality
-normalization is.
+Models with no quality record at all score 0 on the quality criterion when
+another model has one; if no model has any quality record, the quality weight
+is dropped and the remaining weights renormalize. `--quality-ref` controls
+how generous the quality normalization is.
 
 ## Caching
 
@@ -555,7 +566,9 @@ carry both `model` (bare catalog id) and `opencode_model` (provider-qualified
 id), `discount_pct` (the `DISC` column's display string, e.g., `25%` or `--`),
 the quality provenance fields (`quality_source`, `quality_as_of`,
 `quality_drift`, `quality_or_index`, `quality_or_as_of`, `quality_effort`,
-`default_effort`), `quant_note` (cheapest non-baseline endpoint and price
+`default_effort`; `quality_effort: null` means a measured-but-unlabeled record,
+identified by `reasoning.aa_unlabeled`, or a legacy/unmatched record),
+`quant_note` (cheapest non-baseline endpoint and price
 spread), `steering`, and the tiered/schedule fields
 (`pricing_tier_prompt_tokens`, `base_input_usd_per_m`,
 `base_output_usd_per_m`, `tier_note`, `sched_note`, `sched_detail`, and
@@ -619,7 +632,11 @@ provenance fields and reshaped `sources.aa`; v5 added `quality_effort` and the
 per-model `reasoning` block; v6 changed the default meaning of `quality` to
 the best measured selectable-effort score — see "Quality sources and
 reconciliation"): fields may be added without notice, but renaming,
-removing, **or changing the meaning of** one bumps the version.
+removing, **or changing the meaning of** one bumps the version. The
+unlabeled-quality promotion keeps the catalog at v6: the field shape did not
+change, `quality_effort: null` already meant "unknown" in v6, and the existing
+readers (including the deployed plugin) accept the combination. A bump would
+break the plugin's v6 reader for no shape change.
 
 Top level: `schema_version`, `tool`, `generated_at`, `parameters` (all knobs,
 including the requested `reasoning_effort`, `allow_safety_retention` — the
@@ -666,7 +683,8 @@ the deeper effort on ties; missing support metadata considers all measured
 efforts, while an empty list selects only the single-state `reasoning`/`none`
 row; a known non-reasoning model may use the
 OpenRouter trio with `quality_effort: "none"`, but a reasoning model never
-uses the trio), `quality_effort`/`quality_as_of`/`quality_source` (the winning
+uses the trio; a default run may instead use a finite unlabeled AA
+measurement, copying `quality_effort: null`), `quality_effort`/`quality_as_of`/`quality_source` (the winning
 record's provenance, hydrated verbatim on unkeyed runs), `score` (the balanced
 overall for candidates, else `null`), `max_discount` (4-decimal-rounded), `sched_note`,
 `sched_detail`, `peak`/`offpeak` price blocks (per-1M; `offpeak` is the
@@ -712,13 +730,15 @@ unknown-status endpoints, admitted by `all`, is `false`; `null` under
 `--no-zdr`),
 `discount`, `expired`,
 `quality` (the AA intelligence index at the scored effort — best measured
-selectable by default, or the exact explicit effort — or `null`), `aa` (the
-OpenRouter-published
+selectable by default, or the exact explicit effort; a default run may instead
+use an unlabeled AA measurement with `quality_effort: null` — or `null`), `aa`
+(the OpenRouter-published
 trio `intelligence_index`/`coding_index`/`agentic_index`, each possibly
 `null`), `quality_match` (`aa`/`catalog`/`openrouter` — the winning
 source's label — or `null`) with the v4 additive `quality_as_of` and
 `quality_drift` (the record's fields verbatim; `null` when unmatched), the
-v5 additive `quality_effort` (the effort behind `quality`) and `reasoning`
+v5 additive `quality_effort` (the effort behind `quality`; `null` = unknown,
+including a promoted unlabeled measurement) and `reasoning`
 block, `scores` —
 the four component scores plus
 `overall` for all three priorities, so downstream consumers never re-run
@@ -733,9 +753,11 @@ effective default, not the raw pre-select value),
 `null`; an omitted field stays empty), `default_enabled`, `mandatory`,
 `supports_max_tokens` (the raw flags, for provenance), `depths` (the
 per-depth records above; empty only when no source measured an effort) and
-`aa_unlabeled` (an optional display-only reference: the AA index and AA
+`aa_unlabeled` (the unlabeled AA measurement record: the AA index and AA
 `$/task` measured without an effort label, with its source and `as_of`; null
-when AA measured every row at a known effort). A non-reasoning model with an
+when AA measured every row at a known effort. A default run may use it for
+`quality`, in which case the main record's `quality_effort` is `null`). A
+non-reasoning model with an
 AA or OpenRouter record carries exactly one `none` record. `--json` emits the
 same block, with its own top-level `default_effort` duplicated so `data.json`
 rows keep it after the nested block is dropped.
@@ -857,7 +879,9 @@ quality/reasoning block carried by `models` entries (`aa`, `quality`,
 `reasoning`). Router aliases (`~` ids) and entries with zero AA data stay bare
 stubs without the block; non-default `--reasoning-effort` gates
 `filtered[].quality`/`quality_effort` to null when unsupported while still
-publishing all measured `reasoning.depths`, and `sources.aa` counts remain
+publishing all measured `reasoning.depths`; a default run promotes a finite
+unlabeled AA measurement the same way as a candidate, and an explicit effort
+leaves the pair null. `sources.aa` counts remain
 strictly candidate-scoped (`models` only). The reason keys are the same strings
 the tool counts internally:
 
@@ -889,7 +913,7 @@ pool-accounting invariant (`sum(dropped) + candidates == listed`, enforced by
 `pool.dropped`, break if a reason is produced but not registered.
 
 Version gates: catalog `schema_version` 6, `data.json` 4, and
-`history.json` 6 — each a strict identity check accepting exactly that value
+`history.json` 7 — each a strict identity check accepting exactly that value
 and rejecting anything else. The catalog producer in `model_compare.py` and
 its reader gate (`CATALOG_QUALITY_SCHEMA_VERSION`, derived from the producer)
 use v6; the web catalog validator in `web/build_site_data.py` also requires
@@ -911,7 +935,10 @@ history moves from v4 to v5 and starts fresh. The history v6 cutover follows
 the Flex service-tier correction: 35 models' quoted prices moved from the
 opt-in Flex tier to the standard tier, a definitional change rather than a
 market move, so the diff starts clean instead of reporting ~35 false price
-rises. For backward compatibility,
+rises. The history v7 cutover follows the unlabeled-quality promotion: models
+that previously had no quality record now carry an AA index, so their scores
+and ranks change; the catalog stays 6 and `data.json` stays 4 because neither
+shape changed. For backward compatibility,
 `merge_history` treats a prior document without `schema_version` as current;
 only an explicit version mismatch triggers the reset. `web/build_site_data.py` hosts
 the catalog, `data.json` and history gates; `web/publish.py` pins
@@ -932,7 +959,10 @@ no continuity bridge is built. The v4 cutover reset it again: old snapshots
 carried max-effort quality scores that are not diffable against the
 then-default-effort scores. The v5 cutover resets it once more because old
 snapshots carry quality and ranks based on the OpenRouter default effort,
-which are not comparable with best-selectable-depth quality and ranks. Each
+which are not comparable with best-selectable-depth quality and ranks. The
+v7 cutover resets it for the unlabeled-quality promotion: a promoted row's
+quality moves from null to a real index, so its score and rank are not
+comparable with v6 snapshots. Each
 reset leaves the site's 7-day movement arrows and the weekly highlights diff
 in their no-baseline state until fresh history covers the full week: both look
 up the snapshot dated exactly seven days before today, and history snapshots

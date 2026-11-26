@@ -1022,7 +1022,7 @@ def test_faq_page_is_linked_from_the_index_footer_and_answers_routing():
     assert 'href="faq.html"' in index[nav_at : index.index("</nav>", nav_at)]
     assert 'href="how-to-use.html"' in index[nav_at : index.index("</nav>", nav_at)]
     # Same shell as the index page: shared stylesheet, same CSP posture.
-    assert 'href="style.css?v=0.8.0-9"' in faq
+    assert 'href="style.css?v=0.8.0-10"' in faq
     assert "Content-Security-Policy" in faq
     assert "default-src 'none'" in faq
     # Conceptual table questions are on FAQ (without unexplained CLI flags);
@@ -1559,3 +1559,13 @@ def test_faq_explains_the_retention_view_and_free_listings():
         assert needle in faq, needle
     how_to = (site / "how-to-use.html").read_text(encoding="utf-8")
     assert "ZDR view" in how_to
+
+
+def test_preview_fallback_quality_effort_is_known():
+    # The offline preview's synthetic rows must satisfy the catalog contract:
+    # an OpenRouter-sourced quality is always measured at "none".
+    script = (Path(__file__).resolve().parent / "preview.sh").read_text(
+        encoding="utf-8"
+    )
+    assert '"quality_source": "openrouter"' in script
+    assert '"quality_effort": "none"' in script

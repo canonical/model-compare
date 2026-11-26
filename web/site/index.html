@@ -12,7 +12,7 @@
     <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="style.css?v=0.8.0-9" />
+    <link rel="stylesheet" href="style.css?v=0.8.0-10" />
   </head>
   <body>
     <h1>model-compare</h1>
@@ -101,12 +101,12 @@
           <th title="Provider-qualified model id">MODEL</th>
           <th
             class="hide-simple"
-            title="Reasoning effort the QUAL score was measured at; * = OpenRouter's default. - = no AA measurement at any selectable effort; unknown = AA measured without an effort label (expand row for reference score). Append #effort to the OpenCode model id to pin a depth."
+            title="Reasoning effort the QUAL score was measured at; * = OpenRouter's default. - = no AA measurement at any selectable effort; unknown = AA measured without an effort label (used for QUAL in a default run; expand row for the depth detail). Append #effort to the OpenCode model id to pin a depth."
           >
             DEPTH
           </th>
           <th
-            title="AA intelligence index at the model's best measured selectable depth — hover a cell for its source, as-of date, and drift notes. - = not measured; - · unknown (Simple view) = AA measured without an effort label (not scored)."
+            title="AA intelligence index at the model's best measured selectable depth — hover a cell for its source, as-of date, and drift notes. - = not measured; a value marked unknown = AA measured without an effort label (used in a default run; a selectable effort may score differently)."
           >
             <span class="lbl-expert">QUAL</span>
             <span class="lbl-simple">QUALITY</span>
@@ -177,7 +177,7 @@
               SCHEDULE
             </th>
             <th
-              title="AA intelligence index — hover a cell for its source and as-of date. Shown at the reasoning effort noted after the value. - · unknown = AA measured without an effort label (not scored)."
+              title="AA intelligence index — hover a cell for its source and as-of date. Shown at the reasoning effort noted after the value; unknown = AA measured without an effort label (used in a default run)."
             >
               QUAL
             </th>
@@ -247,6 +247,6 @@
       </div>
     </div>
 
-    <script src="app.js?v=0.8.0-9" defer></script>
+    <script src="app.js?v=0.8.0-10" defer></script>
   </body>
 </html>

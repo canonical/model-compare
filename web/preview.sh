@@ -150,7 +150,7 @@ def row(model, q, inp, outp, disc, ctx, age, score):
         "quality_drift": None,
         "quality_or_index": None,
         "quality_or_as_of": None,
-        "quality_effort": None,
+        "quality_effort": "none",
         "default_effort": None,
         "zdr_status": "strict",
     }

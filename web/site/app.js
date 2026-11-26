@@ -365,6 +365,10 @@
           };
         });
         var unlabeled = unlabeledRecord(row);
+        var hasScore =
+          finiteNumber(
+            row.quality !== undefined ? row.quality : row.quality_index,
+          ) !== null;
         if (unlabeled) {
           rows.push({
             effort: "unknown",
@@ -372,7 +376,7 @@
             cost: unlabeled.cost,
             ratio: null,
             selectable: false,
-            selected: false,
+            selected: hasScore && !row.quality_effort,
             default: false,
             unlabeled: true,
           });
@@ -559,7 +563,10 @@
       function fmtEffort(row) {
         if (!row) return "-";
         if (!row.quality_effort) {
-          return unlabeledRecord(row) ? "unknown" : "-";
+          var score = finiteNumber(
+            row.quality_index !== undefined ? row.quality_index : row.quality,
+          );
+          return score !== null || unlabeledRecord(row) ? "unknown" : "-";
         }
         var reasoning = row.reasoning || {};
         var defaultEffort = row.default_effort || reasoning.default_effort;
@@ -576,8 +583,18 @@
       function depthTooltip(row) {
         if (!row) return null;
         if (!row.quality_effort) {
+          var score = finiteNumber(
+            row.quality_index !== undefined ? row.quality_index : row.quality,
+          );
+          if (score !== null) {
+            return (
+              "This model's quality was measured without a reasoning-effort " +
+              "label, so QUAL uses that score in a default run; no selectable " +
+              "effort can be pinned to it."
+            );
+          }
           return unlabeledRecord(row)
-            ? "AA measured this model without a reasoning-effort label, so QUAL stays blank; expand the row for the reference score."
+            ? "AA measured this model without a reasoning-effort label; this run pins an effort, so QUAL stays blank. Expand the row for the reference."
             : null;
         }
         var reasoning = row.reasoning || {};
@@ -590,12 +607,12 @@
       }
 
       // Caveat shown below the Depth table when an unknown (unlabeled AA)
-      // row is present: the table already shows the numbers, so the note
-      // explains why QUAL stays blank.
+      // row is present: the measurement may supply QUAL in a default run but
+      // cannot be pinned to a selectable effort.
       function unlabeledCaveat(record) {
         var index = finiteNumber(record && record.index);
         if (index === null) return null;
-        return "unknown = measured without a reasoning-effort label; reference only, may not be the quality you get at a selectable effort.";
+        return "AA measured this model without a reasoning-effort label; the score fills QUAL in a default run but is not selectable, so a selectable effort may score differently.";
       }
 
       // QUAL cell tooltip: where the quality number came from (the source
@@ -634,8 +651,8 @@
             "AA measures this model at " +
             pyFixed(unlabeledIndex, 1) +
             (checked === null ? "" : ", checked " + checked) +
-            ", without a reasoning-effort label, so QUAL stays blank; " +
-            "it may not be the quality you get at a selectable effort."
+            ", without a reasoning-effort label; this run pins an effort, so " +
+            "QUAL stays blank. Expand the row for the reference."
           );
         }
         var text = "AA intelligence index - source: " + String(source);
@@ -650,11 +667,19 @@
           if (row.quality_effort === defaultEffort) {
             text += " (OpenRouter's effective default)";
           }
+        } else if (source === "aa" || source === "catalog") {
+          // A promoted unlabeled measurement: the number is real, but the
+          // effort behind it is not known. OpenRouter rows are excluded:
+          // their snapshot never reports an effort, which is a different
+          // fact and not an AA unlabeled measurement.
+          text +=
+            "; measured without an effort label; a selectable effort may " +
+            "score differently";
         }
         if (row.quality_drift === true && Number.isFinite(row.quality_or_index)) {
           var orDate = qualityAsOf("openrouter", row.quality_or_as_of);
           text +=
-            " differs from OpenRouter snapshot (" +
+            "; differs from OpenRouter snapshot (" +
             row.quality_or_index.toFixed(1) +
             (orDate === null ? "" : ", " + orDate) +
             ")";
@@ -1075,6 +1100,7 @@
         var reasoning = entry && entry.reasoning;
         if (!reasoning) return null;
         var rows = depthRows({
+          quality: entry.quality,
           quality_effort: entry.quality_effort,
           default_effort: reasoning.default_effort,
           supported_efforts: reasoning.supported_efforts,
@@ -1253,16 +1279,17 @@
             entry && entry.reasoning ? { reasoning: entry.reasoning } : {},
           );
           var hasUnlabeled =
-            row.quality_index === null && unlabeledRecord(depthRow) !== null;
+            finiteNumber(row.quality_index) === null &&
+            unlabeledRecord(depthRow) !== null;
           var precTooltip = fmtQuantTooltip(row);
           var ctxCaveat = fmtCtxCaveat(entry, row);
           var qualityTip = qualityTooltip(depthRow);
           var depthTip = depthTooltip(depthRow);
-          var qualityScore =
-            row.quality_index === null ? "-" : row.quality_index.toFixed(1);
+          var score = finiteNumber(row.quality_index);
+          var qualityScore = score === null ? "-" : score.toFixed(1);
           var simpleQuality = qualityScore;
-          if (row.quality_index !== null && depthRow.quality_effort) {
-            simpleQuality += " · " + depthRow.quality_effort;
+          if (score !== null) {
+            simpleQuality += " · " + (depthRow.quality_effort || "unknown");
           } else if (hasUnlabeled) {
             simpleQuality = "- · unknown";
           }
@@ -1450,13 +1477,10 @@
               ? "-"
               : deal.quality.toFixed(1);
           // Same effort tag as the main table's simple QUAL cell: the
-          // schedule entry carries the depth its recorded quality used.
-          if (
-            deal.quality !== null &&
-            deal.quality !== undefined &&
-            deal.quality_effort
-          ) {
-            qualityText += " · " + deal.quality_effort;
+          // schedule entry carries the depth its recorded quality used, or
+          // "unknown" for a promoted unlabeled measurement.
+          if (deal.quality !== null && deal.quality !== undefined) {
+            qualityText += " · " + (deal.quality_effort || "unknown");
           } else if (hasUnlabeled) {
             qualityText = "- · unknown";
           }

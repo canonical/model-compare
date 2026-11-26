@@ -12,8 +12,10 @@ the most capability per dollar today. Data sources:
     same depth records from the published model-compare.dev/catalog.json
     (so the terminal matches the site), then fall back to OpenRouter's
     republished AA benchmarks for non-reasoning models, then to nothing.
-    Unmatched models rank on price/context/age with quality_score 0;
-    --require-quality drops them instead.
+    A default run also uses a finite AA index measured without an effort
+    label as the last tier (quality_effort: null); an explicit effort never
+    does. Models with no quality record at all rank on price/context/age
+    with quality_score 0; --require-quality drops them instead.
 
 Ranking: every criterion is normalized to [0, 1] and combined with
 priority-dependent weights:
@@ -2127,7 +2129,7 @@ def fetch_session_cost(args, models=None) -> dict | None:
 # `quality` means the best-selectable-depth index.
 CATALOG_QUALITY_SCHEMA_VERSION = CATALOG_SCHEMA_VERSION
 
-# One display-only unlabeled AA reference: the intelligence index and AA's
+# One unlabeled AA measurement record: the intelligence index and AA's
 # benchmark cost, both measured without a reasoning-effort label, plus the
 # source label and its as_of. The record deliberately has no `effort` key.
 CATALOG_UNLABELED_KEYS = ("index", "cost_per_task_usd", "source", "as_of")
@@ -2135,6 +2137,19 @@ CATALOG_UNLABELED_KEYS = ("index", "cost_per_task_usd", "source", "as_of")
 
 def _catalog_index(value) -> float | None:
     """A finite in-range catalog index, or None for poisoned/absent input."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        index = float(value)  # huge ints raise OverflowError
+    except OverflowError:
+        return None
+    if not math.isfinite(index) or not 0.0 <= index <= 100.0:
+        return None
+    return index
+
+
+def _unlabeled_index(value) -> float | None:
+    """A finite in-range unlabeled AA index, or None for poisoned input."""
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
     try:
@@ -2280,8 +2295,9 @@ def _parse_catalog_v6(doc) -> tuple[dict, dict]:
     selectable depth). ``depths_by_id`` maps id -> {"default_effort",
     "depths": {effort: record}, "unlabeled": record-or-None} for the model's
     full measured depth list and, when AA measured it without an effort label,
-    the display-only reference; resolve_quality re-selects from it using the
-    best-selectable-depth rules and the unkeyed run's support data.
+    the unlabeled measurement record; resolve_quality may promote it in a
+    default run and re-selects depths using the best-selectable-depth rules and
+    the unkeyed run's support data.
 
     Gates (design: failure modes):
     - schema_version must be an int == 6. Earlier catalogs predate the
@@ -3692,13 +3708,16 @@ def _classify_aa_effort_tokens(raw: str) -> tuple[str | None, bool]:
 
 
 def _warn_unknown_aa_shape(parenthetical: str | None) -> None:
-    """Warn once per distinct unrecognized effort shape (spec §6.1)."""
-    if parenthetical is not None:
-        detail = f"parenthetical {parenthetical!r}"
-        shape = "parenthetical:" + norm_key(parenthetical)
-    else:
-        detail = "no effort label"
-        shape = "no-effort-label"
+    """Warn once per distinct unrecognized effort shape (spec §6.1).
+
+    A row with no trailing parenthetical at all is the ordinary unlabeled
+    shape, not a surprise: it is the row the promotion accepts in a default
+    run. Only an unrecognized parenthetical is worth a warning.
+    """
+    if parenthetical is None:
+        return
+    detail = f"parenthetical {parenthetical!r}"
+    shape = "parenthetical:" + norm_key(parenthetical)
     if shape in _AA_WARNED_UNKNOWN_SHAPES:
         return
     _AA_WARNED_UNKNOWN_SHAPES.add(shape)
@@ -3737,14 +3756,19 @@ def parse_aa_effort(name: str, slug: str) -> dict:
     if effort is None and not ambiguous:
         effort = slug_effort
 
-    if effort is None and not ambiguous:
-        _warn_unknown_aa_shape(name_match.group(1) if name_match is not None else None)
+    # A trailing parenthetical that names no effort is not the same as a
+    # bare unlabeled row: the model carries a qualifier this parser does
+    # not understand, so the promotion must not treat it as unlabeled.
+    unrecognized = bool(name_match) and effort is None and not ambiguous
+    if unrecognized:
+        _warn_unknown_aa_shape(name_match.group(1))
 
     return {
         "base_name": base_name,
         "base_slug": base_slug,
         "effort": effort,
         "ambiguous": ambiguous,
+        "unrecognized": unrecognized,
     }
 
 
@@ -4077,14 +4101,16 @@ def build_aa_depth_lookup(entries):
 
 
 def build_aa_unlabeled_lookup(entries):
-    """Index display-only AA rows that carry no reasoning-effort label.
+    """Index AA rows that carry no reasoning-effort label.
 
     AA sometimes ranks a model once, with no effort parenthetical and no
-    effort-suffixed slug ("GLM-5.3-Flash"). Such a row cannot fill QUAL:
-    the index is not tied to a selectable effort, so it may not be the
-    quality the user gets. It is still useful as a reference, so it is
-    indexed here, separately from build_aa_depth_lookup's effort-keyed
-    groups (which skip these rows entirely).
+    effort-suffixed slug ("GLM-5.3-Flash"). The index is not tied to a
+    selectable effort, so it is indexed separately from
+    build_aa_depth_lookup's effort-keyed groups (which skip these rows
+    entirely). A default run may promote it as the last tier, with
+    ``quality_effort: null``; an explicit ``--reasoning-effort`` run keeps it
+    as a display-only reference. A trailing parenthetical that is not a
+    recognized effort is excluded: it is display-only, never unlabeled.
 
     Each record is {"index", "cost_per_task_usd", "source": "aa", "as_of"}.
     Rows with an effort label, an ambiguous label, a non-finite index or no
@@ -4107,7 +4133,7 @@ def build_aa_unlabeled_lookup(entries):
         if dedupe_key in seen:
             continue
         parsed = parse_aa_effort(entry.get("name") or "", entry.get("slug") or "")
-        if parsed["effort"] or parsed["ambiguous"]:
+        if parsed["effort"] or parsed["ambiguous"] or parsed["unrecognized"]:
             continue
         raw_index = entry.get("index")
         if not isinstance(raw_index, (int, float)) or isinstance(raw_index, bool):
@@ -4116,7 +4142,7 @@ def build_aa_unlabeled_lookup(entries):
             index = float(raw_index)  # huge ints raise OverflowError
         except OverflowError:
             continue
-        if not math.isfinite(index):
+        if not math.isfinite(index) or not 0.0 <= index <= 100.0:
             continue
         seen.add(dedupe_key)
         record = {
@@ -4151,6 +4177,35 @@ def build_aa_unlabeled_lookup(entries):
     return lookup
 
 
+def _lookup_group(model, lookup):
+    """Return (found, value) for the first present key in the tier walk.
+
+    The key order is the legacy one: full id, base id, display name, display
+    name sans parentheticals; at each tier the creator-qualified key is tried
+    before the unqualified key. A present key whose value is None is reported
+    as found, so an ambiguous AA unlabeled key can block a catalog fallback.
+    """
+    if not isinstance(lookup, dict):
+        return False, None
+    model_id = model.get("id") or ""
+    name = model.get("name") or ""
+    display = PROVIDER_PREFIX_RE.sub("", name).strip()
+    without_variant = model_id.split(":", 1)[0]
+    _, _, base = without_variant.partition("/")
+    creator = normalize_provider(without_variant.partition("/")[0])
+    for raw in (model_id, base, display, PAREN_RE.sub(" ", display)):
+        normalized = norm_key(raw)
+        if not normalized:
+            continue
+        if creator:
+            qualified_key = f"{creator}:{normalized}"
+            if qualified_key in lookup:
+                return True, lookup[qualified_key]
+        if normalized in lookup:
+            return True, lookup[normalized]
+    return False, None
+
+
 def _depth_group(model, lookup):
     """The candidate's matching lookup value, or None.
 
@@ -4170,25 +4225,7 @@ def _depth_group(model, lookup):
     means one tier cannot otherwise resolve to multiple base groups. The
     fuzzy pass is never used here -- it is the #17 conflation bug.
     """
-    if not isinstance(lookup, dict):
-        return None
-    model_id = model.get("id") or ""
-    name = model.get("name") or ""
-    display = PROVIDER_PREFIX_RE.sub("", name).strip()
-    without_variant = model_id.split(":", 1)[0]
-    _, _, base = without_variant.partition("/")
-    creator = normalize_provider(without_variant.partition("/")[0])
-    for raw in (model_id, base, display, PAREN_RE.sub(" ", display)):
-        normalized = norm_key(raw)
-        if not normalized:
-            continue
-        if creator:
-            qualified_key = f"{creator}:{normalized}"
-            if qualified_key in lookup:
-                return lookup[qualified_key]
-        if normalized in lookup:
-            return lookup[normalized]
-    return None
+    return _lookup_group(model, lookup)[1]
 
 
 def match_depth_quality(model, lookup, effort):
@@ -4795,7 +4832,7 @@ def resolve_quality(
 ):
     """Per-candidate quality records: AA API primary, catalog next, OR last.
 
-    Depth-aware mode (either new input is not None; run() always passes the
+    Depth-aware mode (any lookup input is not None; run() always passes the
     AA depth lookup) selects the highest-scoring selectable record when
     requested_effort is "default". An explicit --reasoning-effort selects
     exactly that effort. Resolution order per candidate:
@@ -4809,26 +4846,32 @@ def resolve_quality(
          non-reasoning (is_reasoning False) at effort "none". The trio has
          no effort label, so a reasoning model never uses it as its main
          score; unknown reasoning is not non-reasoning.
-      4. No record -- the candidate stays quality-blind.
+      4. The unlabeled AA row -- a finite reference from
+         ``unlabeled_lookup`` (keyed runs) or the catalog depth map's
+         ``unlabeled`` record (unkeyed runs). A default run fills the main
+         record with ``effort: None``; an explicit effort keeps it
+         display-only. A present-but-None lookup key is an ambiguity and
+         blocks the catalog fallback.
+      5. No record -- the candidate stays quality-blind.
 
-    A quality-blind candidate may still carry a display-only AA reference:
-    rows AA measures without an effort label cannot fill QUAL, so
-    ``unlabeled_lookup`` (keyed runs) or the catalog depth map's
-    ``unlabeled`` record (unkeyed runs) is attached as
-    ``cand["quality_unlabeled"]`` when no main record resolved. It never
-    enters quality_by_id and never changes the score.
+    The unlabeled reference is also attached as
+    ``cand["quality_unlabeled"]`` whenever no known-effort record resolved
+    (it carries AA's $/task); it is the same measurement, not a second one.
+    A promoted record's source is "aa" for the keyed lookup and "catalog"
+    for the hydrated depth map.
 
     Default selection considers only finite records whose efforts are
     selectable when support metadata is non-empty; ties prefer the deeper
     effort. Explicit selection remains strict: another effort is never
     substituted. A reasoning model never falls through to the OR trio.
 
-    The legacy path (both new inputs None) keeps the pre-depth behavior:
+    The legacy path (all lookup inputs None) keeps the pre-depth behavior:
     match_quality's exact tiers, then the hydrated catalog_quality by id,
     then the OR trio for any model.
 
     Every depth-mode record is {"index", "source", "as_of", "effort",
-    "drift", "or_index", "or_as_of"}; legacy records omit "effort".
+    "drift", "or_index", "or_as_of"}; legacy AA/catalog records may omit
+    "effort", and the legacy OR trio carries "none".
     Drift is computed only when the winner is not OpenRouter and only
     like-for-like: the old |index - or_index| >= 3.0 rule applies at effort
     "none"; any other effort keeps the OR reference but sets drift None.
@@ -4839,7 +4882,11 @@ def resolve_quality(
     """
     quality_by_id = {}
     source_by_id = {}
-    depth_mode = depth_lookup is not None or catalog_depths is not None
+    depth_mode = (
+        depth_lookup is not None
+        or catalog_depths is not None
+        or unlabeled_lookup is not None
+    )
     for cand in candidates:
         # A previous pass may have attached a display-only reference; a
         # resolved record makes it stale, so never let it survive.
@@ -4971,35 +5018,53 @@ def resolve_quality(
                         "index": intelligence,
                         "source": "openrouter",
                         "as_of": bench.get("as_of"),
+                        # The OR trio is a single snapshot at the model's
+                        # non-reasoning state; the catalog contract labels
+                        # it "none".
+                        "effort": "none",
                     }
         if record is None:
-            # No effort-attributable record: surface an unlabeled AA
-            # measurement as a display-only reference. It never fills
-            # QUAL, and a resolved record makes it redundant.
-            reference = (
-                _depth_group(cand, unlabeled_lookup) if unlabeled_lookup else None
-            )
-            if reference is None and catalog_depths is not None:
+            # No effort-attributable record. The unlabeled AA row is the
+            # last tier: a default run uses its index (a real measurement
+            # with no effort label); an explicit run keeps it as a
+            # display-only reference. A present-but-None lookup key is an
+            # ambiguity and must not fall through to the catalog.
+            reference = None
+            from_lookup = False
+            if unlabeled_lookup:
+                found, candidate_reference = _lookup_group(cand, unlabeled_lookup)
+                if found:
+                    from_lookup = True
+                    reference = (
+                        candidate_reference
+                        if isinstance(candidate_reference, dict)
+                        else None
+                    )
+            if not from_lookup and catalog_depths is not None:
                 catalog_entry = catalog_depths.get(cand["id"])
                 if isinstance(catalog_entry, dict):
                     candidate_reference = catalog_entry.get("unlabeled")
                     if isinstance(candidate_reference, dict):
                         reference = candidate_reference
-            reference_index = (
+            reference_index = _unlabeled_index(
                 reference.get("index") if isinstance(reference, dict) else None
             )
-            if (
-                isinstance(reference_index, (int, float))
-                and not isinstance(reference_index, bool)
-                and math.isfinite(reference_index)
-            ):
+            if reference_index is not None:
                 cand["quality_unlabeled"] = {
-                    "index": float(reference_index),
+                    "index": reference_index,
                     "cost_per_task_usd": reference.get("cost_per_task_usd"),
                     "source": reference.get("source") or "aa",
                     "as_of": reference.get("as_of"),
                 }
-            continue
+                if requested_effort == "default":
+                    record = {
+                        "index": reference_index,
+                        "source": "aa" if from_lookup else "catalog",
+                        "as_of": reference.get("as_of"),
+                        "effort": None,
+                    }
+            if record is None:
+                continue
 
         # Drift: only meaningful when the winner is not OpenRouter itself.
         bench = aa_by_id.get(base_model_id(cand["id"])) or {}
@@ -5065,6 +5130,7 @@ def build_schedules(
     catalog_quality=None,
     *,
     depth_lookup=None,
+    unlabeled_lookup=None,
     catalog_depths=None,
     reasoning_by_id=None,
     requested_effort="default",
@@ -5078,40 +5144,47 @@ def build_schedules(
     (~ids) and malformed ids are excluded; :batch variants are included as
     distinct deals. Sorted by id.
 
-    Depth-aware mode (run() always supplies the AA depth lookup; an unkeyed
-    run supplies the catalog depth map and the published schedule entries)
-    follows spec 6.5:
+    Depth-aware mode (any lookup input or ``schedule_entries`` is not None;
+    run() always supplies the AA depth lookups) follows spec 6.5:
       0. ``schedule_entries`` (unkeyed runs): the published catalog's v6
-         schedules array is the source of truth for Deals. Whenever an
-         entry exists with a non-null quality AND a non-empty
-         ``quality_effort``, its quality and all three provenance fields
-         are copied VERBATIM (no run-level relabeling); requested_effort is
-         ignored because there is no depth list to re-select from. An entry
-         with no effort label is legacy/unknown (spec 6.5): its quality is
-         null and the lower tiers are skipped. A null-quality or absent
-         entry falls through to the tiers below.
+         schedules array is the source of truth for Deals. A default run
+         copies a non-null quality and its provenance verbatim, including a
+         null ``quality_effort`` (a promoted unlabeled measurement); an
+         explicit run copies only an entry with a known effort, otherwise it
+         falls through to the depth tiers. A known-effort entry ignores
+         ``requested_effort`` because there is no depth list to re-select
+         from.
       1. AA depth lookup at the highest-scoring selectable effort for a
          default run, or exactly ``requested_effort`` -- keyed runs only.
       2. Catalog depth map by the same selection rule when AA has no record;
          unkeyed runs use that source without merging its records with AA.
       3. Catalog main-quality map, only when the record carries an effort
-         (a record without one is legacy/unknown: quality stays null).
+         (a null-effort record is handled by tier 5).
       4. OpenRouter's benchmark trio, only for a model known to be
          non-reasoning (``is_reasoning`` False) at effort "none", when the
          run requests ``default`` (whose effective default is ``none``) or
          explicitly requests ``none``. An explicit request for another
          effort never borrows the unscoped trio. Reasoning models never fall
          through because the trio has no effort label for the measurement.
+      5. The unlabeled AA row (default runs only): ``unlabeled_lookup``
+         (keyed) or ``catalog_depths[id]["unlabeled"]`` (unkeyed), after the
+         OR trio so a known-effort trio always wins. A present-but-None
+         lookup key is an ambiguity and blocks the catalog fallback.
     Default selection at tiers 1-2 considers finite records supported by
     the live reasoning metadata; equal scores prefer deeper effort. Explicit
     selection remains strict, and another effort is never substituted.
 
-    The legacy path (both new inputs None) keeps the pre-depth fallback
+    The legacy path (all lookup inputs None) keeps the pre-depth fallback
     chain: candidate record, hydrated catalog, then the OR trio. Every row
     carries ``quality_effort`` (string or null) alongside the winning
     record's provenance (quality_source/quality_as_of).
     """
-    depth_mode = depth_lookup is not None or catalog_depths is not None
+    depth_mode = (
+        depth_lookup is not None
+        or catalog_depths is not None
+        or unlabeled_lookup is not None
+        or schedule_entries is not None
+    )
     entries = []
     for model in models:
         model_id = model.get("id") or ""
@@ -5146,17 +5219,18 @@ def build_schedules(
         if (
             isinstance(schedule_entry, dict)
             and schedule_entry.get("quality") is not None
+            and (
+                schedule_entry.get("quality_effort")
+                or requested_effort == "default"
+            )
         ):
-            effort_label = schedule_entry.get("quality_effort")
-            if isinstance(effort_label, str) and effort_label:
-                # Unkeyed source of truth: recorded provenance verbatim.
-                quality = schedule_entry.get("quality")
-                quality_source = schedule_entry.get("quality_source")
-                quality_as_of = schedule_entry.get("quality_as_of")
-                quality_effort = effort_label
-            # else: a recorded entry with no effort label is legacy/unknown
-            # (spec 6.5): its quality is null, and the lower tiers are
-            # skipped rather than guessing from an unscoped OR snapshot.
+            # Unkeyed source of truth: recorded provenance verbatim. A null
+            # quality_effort is a promoted unlabeled measurement and is
+            # copied only in a default run.
+            quality = schedule_entry.get("quality")
+            quality_source = schedule_entry.get("quality_source")
+            quality_as_of = schedule_entry.get("quality_as_of")
+            quality_effort = schedule_entry.get("quality_effort") or None
         elif depth_mode:
             reasoning = (reasoning_by_id or {}).get(model_id)
             if not isinstance(reasoning, dict):
@@ -5204,7 +5278,7 @@ def build_schedules(
                             quality_as_of = record.get("as_of")
                             quality_effort = record.get("effort") or selected_effort
             # Tier 3: catalog main-quality map (unkeyed runs). A record with
-            # no quality_effort is legacy/unknown: null, never a guess.
+            # no quality_effort is handled by tier 5, never guessed here.
             if quality is None and catalog_quality is not None:
                 catalog_record = catalog_quality.get(model_id)
                 if isinstance(catalog_record, dict) and catalog_record.get("effort"):
@@ -5229,6 +5303,37 @@ def build_schedules(
                     quality_source = "openrouter"
                     quality_as_of = benchmark.get("as_of")
                     quality_effort = "none"
+            # Tier 5: unlabeled AA, default runs only, after the OR trio so a
+            # known-effort trio always wins. A present-but-None lookup key is
+            # an ambiguity and blocks the catalog fallback.
+            if quality is None and requested_effort == "default":
+                reference = None
+                from_lookup = False
+                if unlabeled_lookup:
+                    found, candidate_reference = _lookup_group(
+                        model, unlabeled_lookup
+                    )
+                    if found:
+                        from_lookup = True
+                        reference = (
+                            candidate_reference
+                            if isinstance(candidate_reference, dict)
+                            else None
+                        )
+                if not from_lookup and catalog_depths is not None:
+                    catalog_entry = catalog_depths.get(model_id)
+                    if isinstance(catalog_entry, dict):
+                        candidate_reference = catalog_entry.get("unlabeled")
+                        if isinstance(candidate_reference, dict):
+                            reference = candidate_reference
+                reference_index = _unlabeled_index(
+                    reference.get("index") if isinstance(reference, dict) else None
+                )
+                if reference_index is not None:
+                    quality = reference_index
+                    quality_source = "aa" if from_lookup else "catalog"
+                    quality_as_of = reference.get("as_of")
+                    quality_effort = None
         else:
             # Legacy path: candidate record, hydrated catalog, OR trio.
             record = quality_by_id.get(model_id)
@@ -5818,11 +5923,14 @@ def _display_default_effort(cand):
 
 
 def _published_unlabeled_record(cand):
-    """The display-only unlabeled AA reference, normalized for publication.
+    """The unlabeled AA measurement, normalized for publication.
 
     None when the candidate has no such reference. The record keeps the
     depth record's shape minus ``effort``: it was measured without one, so
-    publishing an effort label here would be a lie.
+    publishing an effort label here would be a lie. It is the measurement
+    record and the only carrier of AA's $/task; when it supplies ``quality``,
+    the main record carries ``effort: None`` and this block remains the
+    reference.
     """
     record = cand.get("quality_unlabeled")
     if not isinstance(record, dict):
@@ -5839,9 +5947,10 @@ def _published_reasoning_block(cand):
     """The six published reasoning keys plus the measured depth records.
 
     ``is_reasoning`` is an internal flag: neither catalog v6 nor spec §8.4
-    publishes it, so it never appears here. ``aa_unlabeled`` is the
-    display-only AA reference (index with no effort label); it is null
-    when AA measured every row at a known effort.
+    publishes it, so it never appears here. ``aa_unlabeled`` is the unlabeled
+    AA measurement (index with no effort label) and the row's AA $/task; it
+    is null when AA measured every row at a known effort. It is present
+    whether or not it supplied ``quality``.
     """
     reasoning = cand.get("reasoning") or {}
     return {
@@ -5871,10 +5980,15 @@ def _has_unlabeled_aa(cand) -> bool:
 
 def fmt_depth(cand) -> str:
     """DEPTH cell: the effort QUAL was measured at; ``*`` is informational."""
-    effort = (cand.get("quality_record") or {}).get("effort")
-    if not effort:
-        return "unknown" if _has_unlabeled_aa(cand) else "-"
-    return f"{effort}*" if effort == _display_default_effort(cand) else effort
+    record = cand.get("quality_record") or {}
+    if "effort" in record:
+        effort = record["effort"]
+        if not effort:
+            return "unknown"
+        return f"{effort}*" if effort == _display_default_effort(cand) else effort
+    # Explicit run: the unlabeled measurement is a display-only reference,
+    # so DEPTH still says unknown even though QUAL stays blank.
+    return "unknown" if _has_unlabeled_aa(cand) else "-"
 
 
 def fmt_prec(cand) -> str:
@@ -6111,6 +6225,7 @@ LEGENDS = {
             "QUALITY",
             [
                 "AA intelligence index at the model's best measured selectable depth",
+                "(or an AA measurement with no effort label, used in a default run);",
                 '({d:default}; {c:--reasoning-effort} overrides); {d:"-"} = no AA measurement at all, scores 0',
             ],
         ),
@@ -6119,7 +6234,8 @@ LEGENDS = {
             [
                 'reasoning effort QUAL was measured at; {y:"*"} = OpenRouter\'s default (informational)',
                 '{d:"-"} = no AA measurement at all; {c:--depths} shows the depth detail',
-                "{d:unknown} = AA measured without an effort label (reference only; see {c:--depths})",
+                "{d:unknown} = AA measured without an effort label; it fills QUAL in a",
+                "default run but is not selectable",
             ],
         ),
         (
@@ -6157,11 +6273,12 @@ LEGENDS = {
             "QUALITY",
             [
                 "AA intelligence index at the model's best measured selectable depth",
+                "(or an AA measurement with no effort label, used in a default run);",
                 '{d:"-"} = no AA measurement at all, scores 0',
-                "{d:- · unknown} = AA measured without an effort label",
-                "(not scored; see {c:--depths})",
-                "suffix after · names the effort used for QUAL; this view has no",
-                'DEPTH column or {y:"*"} marker',
+                "{d:NN.N · unknown} = QUAL measured without an effort label",
+                "(a selectable effort may score differently; see {c:--depths})",
+                "suffix after · names the effort used for QUAL (or {d:unknown});",
+                'this view has no DEPTH column or {y:"*"} marker',
             ],
         ),
         (
@@ -6195,12 +6312,16 @@ def display_text(value) -> str:
 
 
 def table_cells(cand, rank):
-    effort = (cand.get("quality_record") or {}).get("effort")
+    record = cand.get("quality_record") or {}
+    effort = record.get("effort")
     quality_cell = fmt_quality(cand["quality"])
-    if effort and cand["quality"] is not None:
-        # Simple view has no DEPTH column; the effort rides on QUALITY.
-        quality_cell += f" · {effort}"
-    elif cand["quality"] is None and _has_unlabeled_aa(cand):
+    if cand["quality"] is not None:
+        if effort:
+            # Simple view has no DEPTH column; the effort rides on QUALITY.
+            quality_cell += f" · {effort}"
+        elif "effort" in record:
+            quality_cell += " · unknown"
+    elif _has_unlabeled_aa(cand):
         quality_cell = "- · unknown"
     return {
         "RANK": str(rank),
@@ -6354,7 +6475,14 @@ def print_deals(rows, style=None, bare=False):
             "MODEL": display_text(row["id"]),
             "OFF-PEAK": row["sched_note"],
             "SCHEDULE": row["sched_detail"] or "--",
-            "QUAL": fmt_quality(row["quality"]),
+            "QUAL": (
+                fmt_quality(row["quality"])
+                + (
+                    " · unknown"
+                    if row["quality"] is not None and not row.get("quality_effort")
+                    else ""
+                )
+            ),
             "$IN/M": fmt_price(row["offpeak"]["input_per_1m"]),
             "$OUT/M": fmt_price(row["offpeak"]["output_per_1m"]),
             "CTX": fmt_context(row["context"]),
@@ -6434,7 +6562,7 @@ DEPTH_LEGEND = (
     (
         "unknown",
         [
-            "AA index measured without an effort label; reference only, never fills QUAL",
+            "AA index measured without an effort label; fills QUAL in a default run, not selectable",
         ],
     ),
 )
@@ -6621,8 +6749,8 @@ def print_depth_detail(top, style=None):
             print(
                 "   "
                 + style.dim(
-                    "unknown = measured without an effort label; reference only, "
-                    "may not match a selectable effort."
+                    "unknown = measured without an effort label; it fills QUAL in a default run, "
+                    "but may not match a selectable effort."
                 )
             )
 
@@ -6672,9 +6800,10 @@ def print_json(top):
             "quality_drift": (cand.get("quality_record") or {}).get("drift"),
             "quality_or_index": (cand.get("quality_record") or {}).get("or_index"),
             "quality_or_as_of": (cand.get("quality_record") or {}).get("or_as_of"),
-            # The effort the quality record was measured at. Legacy records
-            # (pre-depth paths) carry no "effort" key, so this degrades to
-            # None exactly like a missing record.
+            # The effort the quality record was measured at. A null value
+            # means either a measured-but-unlabeled record (identified by
+            # reasoning.aa_unlabeled) or a pre-depth legacy record; it is no
+            # longer always "no record".
             "quality_effort": (cand.get("quality_record") or {}).get("effort"),
             # The model's effective default effort, duplicated at top level:
             # data.json rows must keep it after the nested reasoning block is
@@ -7136,6 +7265,7 @@ def build_catalog(
             balanced_by_id,
             catalog_quality,
             depth_lookup=depth_lookup,
+            unlabeled_lookup=unlabeled_lookup,
             catalog_depths=catalog_depths,
             reasoning_by_id=reasoning_by_id,
             requested_effort=requested_effort,
@@ -7766,7 +7896,9 @@ def parse_args(argv=None):
         help=(
             "reasoning effort used for quality and filtering: a specific "
             "effort drops models that cannot run it (default scores each model "
-            "at its best measured selectable depth)"
+            "at its best measured selectable depth, or an unlabeled AA "
+            "measurement as the last tier; an explicit effort never uses the "
+            "unlabeled row)"
         ),
     )
     sources.add_argument(
@@ -7802,7 +7934,8 @@ def parse_args(argv=None):
     filters.add_argument(
         "--require-quality",
         action="store_true",
-        help="only rank models with a measured quality score (drops QUAL=- models)",
+        help="only rank models with an AA quality record (an unlabeled "
+        "measurement counts in a default run; drops QUAL=- models)",
     )
     filters.add_argument(
         "--no-zdr",
@@ -8213,6 +8346,7 @@ def run(args, models, or_cached) -> int:
                         balanced,
                         catalog_quality,
                         depth_lookup=depth_lookup,
+                        unlabeled_lookup=unlabeled_lookup,
                         catalog_depths=catalog_depths,
                         reasoning_by_id=reasoning_by_id,
                         requested_effort=args.reasoning_effort,

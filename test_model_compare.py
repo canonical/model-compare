@@ -6816,12 +6816,14 @@ def test_parse_aa_effort_reads_name_then_slug():
         "base_slug": "claude-sonnet-5-5",
         "effort": "high",
         "ambiguous": False,
+        "unrecognized": False,
     }
     assert mc.parse_aa_effort("GLM-5.3-Flash (Max)", "glm-5-3-flash") == {
         "base_name": "GLM-5.3-Flash",
         "base_slug": "glm-5-3-flash",
         "effort": "max",
         "ambiguous": False,
+        "unrecognized": False,
     }
 
 
@@ -6864,6 +6866,23 @@ def test_parse_aa_effort_warns_once_per_unknown_shape(monkeypatch, capsys):
     # A legitimately labeled row produces no warning.
     mc.parse_aa_effort("Model C (High)", "model-c-high")
     assert capsys.readouterr().err == ""
+
+
+def test_parse_aa_effort_marks_unrecognized_parenthetical():
+    assert mc.parse_aa_effort("Model A", "model-a")["unrecognized"] is False
+    assert mc.parse_aa_effort("Model A (High)", "model-a-high")["unrecognized"] is False
+    novel = mc.parse_aa_effort("Model A (Novel Shape)", "model-a")
+    assert novel["effort"] is None
+    assert novel["ambiguous"] is False
+    assert novel["unrecognized"] is True
+
+
+def test_parse_aa_effort_does_not_warn_for_plain_unlabeled_row(capsys):
+    mc._AA_WARNED_UNKNOWN_SHAPES.clear()
+    mc.parse_aa_effort("Model A", "model-a")
+    assert "unrecognized effort shape" not in capsys.readouterr().err
+    mc.parse_aa_effort("Model A (Novel Shape)", "model-a")
+    assert "unrecognized effort shape" in capsys.readouterr().err
 
 
 def test_build_aa_depth_lookup_groups_variants_and_drops_conflicts():
@@ -7013,6 +7032,32 @@ def test_build_aa_unlabeled_lookup_skips_overflowing_index():
     # huge ints overflow float(); the row is skipped and the lookup stays
     # empty for its base key
     assert lookup == {}
+
+
+def test_build_aa_unlabeled_lookup_skips_out_of_range_index():
+    lookup = mc.build_aa_unlabeled_lookup(
+        [
+            {"id": "1", "name": "Model A", "slug": "model-a", "index": 150.0},
+            {"id": "2", "name": "Model B", "slug": "model-b", "index": -1.0},
+        ]
+    )
+    assert lookup == {}
+
+
+def test_build_aa_unlabeled_lookup_skips_unrecognized_parenthetical():
+    lookup = mc.build_aa_unlabeled_lookup(
+        [
+            {
+                "id": "1",
+                "name": "Model A (Novel Shape)",
+                "slug": "model-a",
+                "index": 30.0,
+            },
+            {"id": "2", "name": "Model A", "slug": "model-a", "index": 31.0},
+        ]
+    )
+    # The novel-parenthetical row must not make the plain row ambiguous.
+    assert lookup["model a"]["index"] == 31.0
 
 
 def test_legacy_aa_entries_dedupe_by_key_first_wins():
@@ -8529,6 +8574,7 @@ def test_resolve_quality_or_tier_labeled_openrouter_with_permaslug_as_of():
         "index": 57.5,
         "source": "openrouter",
         "as_of": "20260915",
+        "effort": "none",
         "drift": None,
         "or_index": None,
         "or_as_of": None,
@@ -8617,6 +8663,7 @@ def test_resolve_quality_variant_inherits_base_trio():
         "index": 57.5,
         "source": "openrouter",
         "as_of": "20260915",
+        "effort": "none",
         "drift": None,
         "or_index": None,
         "or_as_of": None,
@@ -8911,7 +8958,7 @@ def test_resolve_quality_depth_catalog_best_selectable():
     assert source == {"acme/model-a": "catalog"}
 
 
-def test_resolve_quality_attaches_unlabeled_aa_reference():
+def test_resolve_quality_promotes_unlabeled_aa_in_default_run():
     cand = {
         "id": "z-ai/glm-5.3-flash",
         "name": "Z.AI: GLM 5.3 Flash",
@@ -8935,9 +8982,17 @@ def test_resolve_quality_attaches_unlabeled_aa_reference():
     quality, source = mc.resolve_quality(
         [cand], {}, {}, {}, "AA API v2", depth_lookup={}, unlabeled_lookup=lookup
     )
-    # QUAL stays blank: the reference never fills the main record.
-    assert quality == {}
-    assert source == {}
+    # A default run uses the unlabeled measurement: a real index, no effort.
+    assert quality["z-ai/glm-5.3-flash"] == {
+        "index": 27.8,
+        "source": "aa",
+        "as_of": "t1",
+        "effort": None,
+        "drift": None,
+        "or_index": None,
+        "or_as_of": None,
+    }
+    assert source == {"z-ai/glm-5.3-flash": "aa"}
     assert cand["quality_unlabeled"] == {
         "index": 27.8,
         "cost_per_task_usd": 0.58,
@@ -9041,7 +9096,7 @@ def test_resolve_quality_clears_stale_unlabeled_reference():
     assert "quality_unlabeled" not in cand
 
 
-def test_resolve_quality_hydrates_unlabeled_reference_from_catalog():
+def test_resolve_quality_promotes_catalog_unlabeled_with_catalog_source():
     cand = {
         "id": "acme/model-a",
         "name": "Acme: Model A",
@@ -9063,9 +9118,177 @@ def test_resolve_quality_hydrates_unlabeled_reference_from_catalog():
     quality, source = mc.resolve_quality(
         [cand], {}, {}, {}, None, catalog_depths=catalog_depths
     )
-    assert quality == {}
+    assert quality["acme/model-a"] == {
+        "index": 27.8,
+        "source": "catalog",
+        "as_of": "t1",
+        "effort": None,
+        "drift": None,
+        "or_index": None,
+        "or_as_of": None,
+    }
+    assert source == {"acme/model-a": "catalog"}
     assert cand["quality_unlabeled"]["index"] == 27.8
     assert cand["quality_unlabeled"]["as_of"] == "t1"
+
+
+def test_resolve_quality_unlabeled_stays_display_only_for_explicit_effort():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "high",
+        "supported_efforts": ["low", "high"],
+        "reasoning": {"is_reasoning": True},
+    }
+    lookup = mc.build_aa_unlabeled_lookup(
+        [{"id": "1", "name": "Model A", "slug": "model-a", "index": 27.8}]
+    )
+    quality, source = mc.resolve_quality(
+        [cand],
+        {},
+        {},
+        {},
+        "AA API v2",
+        depth_lookup={},
+        unlabeled_lookup=lookup,
+        requested_effort="high",
+    )
+    assert quality == {}
+    assert source == {}
+    assert cand["quality_unlabeled"]["index"] == 27.8
+
+
+def test_resolve_quality_or_trio_beats_unlabeled():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "none",
+        "supported_efforts": [],
+        "reasoning": {"is_reasoning": False},
+    }
+    aa_by_id = {"acme/model-a": {"intelligence_index": 50.0, "as_of": "20260915"}}
+    lookup = mc.build_aa_unlabeled_lookup(
+        [{"id": "1", "name": "Model A", "slug": "model-a", "index": 27.8}]
+    )
+    quality, source = mc.resolve_quality(
+        [cand], aa_by_id, {}, {}, "AA API v2", depth_lookup={}, unlabeled_lookup=lookup
+    )
+    assert quality["acme/model-a"]["source"] == "openrouter"
+    assert source == {"acme/model-a": "openrouter"}
+    assert "quality_unlabeled" not in cand
+
+
+def test_resolve_quality_ambiguous_unlabeled_blocks_catalog_fallback():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "high",
+        "supported_efforts": ["high"],
+        "reasoning": {"is_reasoning": True},
+    }
+    catalog_depths = {
+        "acme/model-a": {
+            "default_effort": "high",
+            "depths": {},
+            "unlabeled": {"index": 27.8, "source": "aa"},
+        }
+    }
+    quality, _ = mc.resolve_quality(
+        [cand],
+        {},
+        {},
+        {},
+        "AA API v2",
+        depth_lookup={},
+        unlabeled_lookup={"model a": None},
+        catalog_depths=catalog_depths,
+    )
+    assert quality == {}
+    assert "quality_unlabeled" not in cand
+
+
+def test_resolve_quality_unlabeled_out_of_range_does_not_fill():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "high",
+        "supported_efforts": ["high"],
+        "reasoning": {"is_reasoning": True},
+    }
+    lookup = {"model a": {"index": 150.0, "source": "aa", "as_of": "t1"}}
+    quality, _ = mc.resolve_quality(
+        [cand], {}, {}, {}, "AA API v2", depth_lookup={}, unlabeled_lookup=lookup
+    )
+    assert quality == {}
+    assert "quality_unlabeled" not in cand
+
+
+def test_resolve_quality_unlabeled_huge_int_does_not_raise():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "high",
+        "supported_efforts": ["high"],
+        "reasoning": {"is_reasoning": True},
+    }
+    lookup = {"model a": {"index": 10**400, "source": "aa", "as_of": "t1"}}
+    quality, _ = mc.resolve_quality(
+        [cand], {}, {}, {}, "AA API v2", depth_lookup={}, unlabeled_lookup=lookup
+    )
+    assert quality == {}
+    assert "quality_unlabeled" not in cand
+
+
+def test_resolve_quality_unlabeled_lookup_alone_keeps_depth_mode():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "high",
+        "supported_efforts": ["high"],
+        "reasoning": {"is_reasoning": True},
+    }
+    lookup = mc.build_aa_unlabeled_lookup(
+        [{"id": "1", "name": "Model A", "slug": "model-a", "index": 27.8}]
+    )
+    quality, _ = mc.resolve_quality(
+        [cand], {}, {}, {}, "AA API v2", unlabeled_lookup=lookup
+    )
+    assert quality["acme/model-a"]["index"] == 27.8
+
+
+def test_resolve_quality_unlabeled_keeps_unsupported_depth_records():
+    cand = {
+        "id": "acme/model-a",
+        "name": "Acme: Model A",
+        "default_effort": "high",
+        "supported_efforts": ["high"],
+        "reasoning": {"is_reasoning": True},
+    }
+    depth_lookup = mc.build_aa_depth_lookup(
+        [
+            {
+                "id": "1",
+                "name": "Model A (Low)",
+                "slug": "model-a-low",
+                "index": 40.0,
+                "as_of": "t1",
+            }
+        ]
+    )
+    unlabeled = mc.build_aa_unlabeled_lookup(
+        [{"id": "2", "name": "Model A", "slug": "model-a", "index": 27.8}]
+    )
+    quality, _ = mc.resolve_quality(
+        [cand],
+        {},
+        {},
+        {},
+        "AA API v2",
+        depth_lookup=depth_lookup,
+        unlabeled_lookup=unlabeled,
+    )
+    assert quality["acme/model-a"]["index"] == 27.8
+    assert [record["effort"] for record in cand["reasoning_depths"]] == ["low"]
 
 
 def test_resolve_quality_single_state_reasoning_uses_reasoning_row():
@@ -9833,19 +10056,17 @@ def test_build_schedules_unkeyed_ignores_requested_effort_for_recorded_entry():
     assert entries[0]["quality_as_of"] == "t1"
 
 
-def test_build_schedules_recorded_entry_without_effort_nulls_quality():
-    # Spec 6.5: a recorded entry with no quality_effort is legacy/unknown,
-    # so its quality is null. Tier 0 must not fall through to the OR trio
-    # (which would republish a max-effort snapshot as the default).
+def test_build_schedules_recorded_entry_without_effort_promotes_in_default_run():
+    # A v6 catalog's schedule entry may carry a promoted unlabeled quality:
+    # quality non-null, quality_effort null. A default run copies it.
     model = make_model(
         id="acme/sched", pricing=deepseek_pricing(), context_length=500000
     )
-    aa_by_id = {"acme/sched": {"intelligence_index": 30.0, "as_of": "20261001"}}
     reasoning_by_id = {
         "acme/sched": {
-            "is_reasoning": False,
-            "default_effort": "none",
-            "supported_efforts": [],
+            "is_reasoning": True,
+            "default_effort": "high",
+            "supported_efforts": ["high"],
         }
     }
     for entry in (
@@ -9853,26 +10074,191 @@ def test_build_schedules_recorded_entry_without_effort_nulls_quality():
             "quality": 30.0,
             "quality_effort": None,
             "quality_as_of": "t1",
-            "quality_source": "openrouter",
+            "quality_source": "aa",
         },
         {  # quality_effort absent entirely
             "quality": 30.0,
             "quality_as_of": "t1",
-            "quality_source": "openrouter",
+            "quality_source": "aa",
         },
     ):
         entries = mc.build_schedules(
             [model],
             make_args(),
             {},
-            aa_by_id,
+            {},
             {},
             schedule_entries={"acme/sched": entry},
+            depth_lookup={},
             reasoning_by_id=reasoning_by_id,
         )
-        assert entries[0]["quality"] is None
+        assert entries[0]["quality"] == 30.0
         assert entries[0]["quality_effort"] is None
-        assert entries[0]["quality_source"] is None
+        assert entries[0]["quality_source"] == "aa"
+
+
+def test_build_schedules_explicit_ignores_null_effort_entry():
+    model = make_model(
+        id="acme/sched", pricing=deepseek_pricing(), context_length=500000
+    )
+    entries = mc.build_schedules(
+        [model],
+        make_args(reasoning_effort="max"),
+        {},
+        {},
+        {},
+        schedule_entries={
+            "acme/sched": {
+                "quality": 44.0,
+                "quality_effort": None,
+                "quality_as_of": "t1",
+                "quality_source": "aa",
+            }
+        },
+        depth_lookup={},
+        reasoning_by_id={
+            "acme/sched": {
+                "is_reasoning": True,
+                "default_effort": "high",
+                "supported_efforts": ["max", "high"],
+            }
+        },
+        requested_effort="max",
+    )
+    assert entries[0]["quality"] is None
+
+
+def test_build_schedules_schedule_entries_keep_depth_mode():
+    # A direct caller may pass schedule_entries without any lookup. The
+    # null-effort entry is skipped in an explicit run, and the legacy OR
+    # trio must not leak in as a substitute.
+    model = make_model(
+        id="acme/sched", pricing=deepseek_pricing(), context_length=500000
+    )
+    entries = mc.build_schedules(
+        [model],
+        make_args(),
+        {},
+        {"acme/sched": {"intelligence_index": 50.0, "as_of": "20261001"}},
+        {},
+        schedule_entries={
+            "acme/sched": {
+                "quality": 30.0,
+                "quality_effort": None,
+                "quality_as_of": "t1",
+                "quality_source": "aa",
+            }
+        },
+        requested_effort="max",
+    )
+    assert entries[0]["quality"] is None
+
+
+def test_build_schedules_unlabeled_lookup_promotes_default_only():
+    model = make_model(
+        id="acme/sched", pricing=deepseek_pricing(), context_length=500000
+    )
+    lookup = mc.build_aa_unlabeled_lookup(
+        [{"id": "1", "name": "Sched", "slug": "sched", "index": 33.0, "as_of": "t1"}]
+    )
+    default = mc.build_schedules(
+        [model],
+        make_args(),
+        {},
+        {},
+        {},
+        depth_lookup={},
+        unlabeled_lookup=lookup,
+    )
+    explicit = mc.build_schedules(
+        [model],
+        make_args(reasoning_effort="max"),
+        {},
+        {},
+        {},
+        depth_lookup={},
+        unlabeled_lookup=lookup,
+        requested_effort="max",
+    )
+    assert default[0]["quality"] == 33.0
+    assert default[0]["quality_effort"] is None
+    assert explicit[0]["quality"] is None
+
+
+def test_build_schedules_unlabeled_out_of_range_does_not_promote():
+    model = make_model(
+        id="acme/sched", pricing=deepseek_pricing(), context_length=500000
+    )
+    entries = mc.build_schedules(
+        [model],
+        make_args(),
+        {},
+        {},
+        {},
+        depth_lookup={},
+        unlabeled_lookup={
+            "sched": {"index": 150.0, "source": "aa", "as_of": "t1"}
+        },
+    )
+    assert entries[0]["quality"] is None
+
+
+def test_build_schedules_or_trio_beats_unlabeled():
+    model = make_model(
+        id="acme/sched", pricing=deepseek_pricing(), context_length=500000
+    )
+    lookup = mc.build_aa_unlabeled_lookup(
+        [{"id": "1", "name": "Sched", "slug": "sched", "index": 33.0}]
+    )
+    entries = mc.build_schedules(
+        [model],
+        make_args(),
+        {},
+        {"acme/sched": {"intelligence_index": 50.0, "as_of": "20261001"}},
+        {},
+        depth_lookup={},
+        unlabeled_lookup=lookup,
+        reasoning_by_id={
+            "acme/sched": {
+                "is_reasoning": False,
+                "default_effort": "none",
+                "supported_efforts": [],
+            }
+        },
+    )
+    assert entries[0]["quality"] == 50.0
+    assert entries[0]["quality_effort"] == "none"
+
+
+def test_build_schedules_ambiguous_unlabeled_blocks_catalog_fallback():
+    model = make_model(
+        id="acme/sched", pricing=deepseek_pricing(), context_length=500000
+    )
+    catalog_depths = {
+        "acme/sched": {
+            "default_effort": "high",
+            "depths": {},
+            "unlabeled": {"index": 33.0, "source": "aa", "as_of": "t1"},
+        }
+    }
+    entries = mc.build_schedules(
+        [model],
+        make_args(),
+        {},
+        {},
+        {},
+        depth_lookup={},
+        catalog_depths=catalog_depths,
+        unlabeled_lookup={"sched": None},
+        reasoning_by_id={
+            "acme/sched": {
+                "is_reasoning": True,
+                "default_effort": "high",
+                "supported_efforts": ["high"],
+            }
+        },
+    )
+    assert entries[0]["quality"] is None
 
 
 def test_print_json_rows_carry_quality_source_and_as_of(capsys):
@@ -11745,9 +12131,10 @@ def test_build_catalog_enriches_filtered_with_aa_and_unlabeled_sparsely():
     assert batch["aa"]["intelligence_index"] == 64.6
 
     unl = by_id["acme/unlabeled-ctx"]
-    assert unl["quality"] is None
-    assert unl["quality_match"] is None
+    assert unl["quality"] == 27.8
+    assert unl["quality_match"] == "aa"
     assert unl["quality_effort"] is None
+    assert unl["quality_as_of"] == "t-aa"
     assert unl["reasoning"]["aa_unlabeled"] == {
         "index": 27.8,
         "cost_per_task_usd": 0.58,
@@ -11920,8 +12307,95 @@ def test_build_catalog_unlabeled_only_provided_keeps_depth_mode():
         reasoning_by_id=reasoning_by_id,
     )
     entry = doc["filtered"][0]
-    assert entry["quality"] is None
+    assert entry["quality"] == 33.0
+    assert entry["quality_match"] == "aa"
+    assert entry["quality_effort"] is None
     assert entry["reasoning"]["aa_unlabeled"]["index"] == 33.0
+
+
+def test_build_catalog_counts_promoted_rows_but_not_depth_rows():
+    args = make_args()
+    record = {
+        "index": 33.0,
+        "source": "aa",
+        "as_of": "t",
+        "effort": None,
+        "drift": None,
+        "or_index": None,
+        "or_as_of": None,
+    }
+    cand = _cand("acme/cand", 50.0)
+    cand.update(created=0.0, tool_calling=True, zdr=True, expired=False)
+    mc.compute_scores([cand], args, {"acme/cand": record})
+    doc = mc.build_catalog(
+        args,
+        [make_model(id="acme/cand")],
+        [cand],
+        {},
+        [],
+        {},
+        {"acme/cand": record},
+        "AA API v2",
+        {},
+        {"acme/cand": "aa"},
+    )
+    aa = doc["sources"]["aa"]
+    assert aa["matched_default"] == aa["matched_aa"] + aa["matched_catalog"] + aa["matched_openrouter"]
+    assert aa["matched_default"] == 1
+    assert aa["depth_rows"] == 0
+
+
+def test_build_catalog_promotes_unlabeled_quality():
+    args = make_args()
+    cand = _cand("acme/model-a", 1.0)
+    cand.update(
+        created=0.0,
+        tool_calling=True,
+        zdr=True,
+        safety_retention=False,
+        expired=False,
+        default_effort="high",
+        supported_efforts=["high"],
+        reasoning={"is_reasoning": True},
+    )
+    lookup = mc.build_aa_unlabeled_lookup(
+        [
+            {
+                "id": "1",
+                "name": "Model A",
+                "slug": "model-a",
+                "index": 27.8,
+                "cost_per_task": 0.58,
+                "as_of": "t1",
+            }
+        ]
+    )
+    quality, source = mc.resolve_quality(
+        [cand], {}, {}, {}, "AA API v2", depth_lookup={}, unlabeled_lookup=lookup
+    )
+    mc.compute_scores([cand], args, quality)
+    doc = mc.build_catalog(
+        args,
+        [make_model(id="acme/model-a")],
+        [cand],
+        {},
+        [],
+        {},
+        quality,
+        "AA API v2",
+        {},
+        source,
+        depth_lookup={},
+        unlabeled_lookup=lookup,
+    )
+    entry = doc["models"][0]
+    assert entry["quality"] == 27.8
+    assert entry["quality_match"] == "aa"
+    assert entry["quality_as_of"] == "t1"
+    assert entry["quality_drift"] is None
+    assert entry["quality_effort"] is None
+    assert entry["reasoning"]["aa_unlabeled"]["index"] == 27.8
+    bsd.validate_catalog(doc)  # must not raise
 
 
 def inverting_pool():
@@ -11967,8 +12441,21 @@ def _inverting_catalog():
         models, args, {}, zdr, filtered, zdr_strict_ids=zdr
     )
     mc.compute_scores(candidates, args, quality_by_id)
+    quality_source_by_id = {
+        cid: (record.get("source") if isinstance(record, dict) else "aa")
+        for cid, record in quality_by_id.items()
+    }
     return mc.build_catalog(
-        args, models, candidates, dropped, filtered, {}, quality_by_id, None, {}, {}
+        args,
+        models,
+        candidates,
+        dropped,
+        filtered,
+        {},
+        quality_by_id,
+        None,
+        {},
+        quality_source_by_id,
     )
 
 
@@ -12121,6 +12608,7 @@ def test_catalog_document_passes_site_validator():
     quality_by_id, quality_source_by_id = mc.resolve_quality(
         candidates, aa_by_id, exact, fuzzy, "AA API v2"
     )
+    mc.compute_scores(candidates, args, quality_by_id)
     doc = mc.build_catalog(
         args,
         models,
@@ -14864,7 +15352,7 @@ def test_depth_detail_shows_unlabeled_aa_reference(capsys):
     caveat_line = next(
         line
         for line in lines
-        if "unknown = measured without an effort label; reference only" in line
+        if "unknown = measured without an effort label; it fills QUAL" in line
     )
     assert out.index(unknown_line) < out.index(caveat_line)
     assert "no AA depth data" not in out
@@ -14913,6 +15401,44 @@ def test_fmt_depth_and_table_cells_for_unlabeled_aa():
     assert plain_cells["QUALITY"] == "-"
 
 
+def test_fmt_depth_promoted_record_is_unknown():
+    cand = _cand("acme/model-a", 1.0)
+    cand["quality"] = 27.8
+    cand["quality_record"] = {
+        "index": 27.8,
+        "source": "aa",
+        "as_of": "t1",
+        "effort": None,
+    }
+    assert mc.fmt_depth(cand) == "unknown"
+    cells = mc.table_cells(cand, 1)
+    assert cells["DEPTH"] == "unknown"
+    assert cells["QUAL"] == "27.8"
+    assert cells["QUALITY"] == "27.8 · unknown"
+
+
+def test_fmt_depth_explicit_run_reference_only():
+    cand = _cand("acme/model-a", 1.0)
+    cand.update(
+        quality=None,
+        quality_record=None,
+        quality_unlabeled={
+            "index": 27.8,
+            "cost_per_task_usd": 0.58,
+            "source": "aa",
+            "as_of": "t1",
+        },
+    )
+    assert mc.fmt_depth(cand) == "unknown"
+    cells = mc.table_cells(cand, 1)
+    assert cells["QUAL"] == "-"
+    assert cells["QUALITY"] == "- · unknown"
+    weights = mc.compute_scores([cand], make_args(reasoning_effort="high"), {})
+    assert "quality" not in weights
+    assert cand["quality"] is None
+    assert cand["quality_score"] == 0.0
+
+
 def test_print_table_dims_unknown_depth_and_simple_quality(capsys):
     cands = _scored_candidates()
     cands[1]["quality_unlabeled"] = {
@@ -14955,7 +15481,7 @@ def test_print_table_legends_redefine_dash_and_explain_unknown(capsys):
     simple = capsys.readouterr().out
     assert "'-' = unknown" not in simple
     assert "no AA measurement at all" in simple
-    assert "- · unknown = AA measured without an effort label" in simple
+    assert "NN.N · unknown = QUAL measured without an effort label" in simple
 
 
 def test_depth_detail_unknown_only_without_supported_efforts(capsys):
@@ -14979,12 +15505,12 @@ def test_depth_detail_unknown_only_without_supported_efforts(capsys):
     assert "unknown = measured without an effort label" in out
     assert "(no label)" not in out
     assert any(
-        line.startswith("unknown  ") and "never fills QUAL" in line
+        line.startswith("unknown  ") and "fills QUAL in a default run" in line
         for line in out.splitlines()
     )
 
 
-def test_run_unlabeled_aa_keeps_json_qual_null_and_renders_unknown(monkeypatch, capsys):
+def test_run_unlabeled_aa_promotes_json_quality_and_renders_unknown(monkeypatch, capsys):
     models = [
         make_model(
             id="z-ai/glm-5.3-flash",
@@ -15006,7 +15532,8 @@ def test_run_unlabeled_aa_keeps_json_qual_null_and_renders_unknown(monkeypatch, 
     _stub_quality_run(monkeypatch, models, aa_entries=aa_entries, catalog_raises=True)
     assert mc.run(make_args(aa_api_key="k", json=True), models, False) == 0
     (row,) = json.loads(capsys.readouterr().out)
-    assert row["quality_index"] is None
+    assert row["quality_index"] == 27.8
+    assert row["quality_source"] == "aa"
     assert row["quality_effort"] is None
     assert row["reasoning"]["aa_unlabeled"]["index"] == 27.8
 
@@ -15424,6 +15951,11 @@ def _deal_row(**overrides):
     return row
 
 
+def test_print_deals_marks_unknown_effort(capsys):
+    mc.print_deals([_deal_row(quality=27.8, quality_effort=None)], bare=True)
+    assert "27.8 · unknown" in capsys.readouterr().out
+
+
 def test_deals_legend_expands_markers_instead_of_leaking(monkeypatch, capsys):
     # The inline markers are the one rule set for every legend, deals
     # included: markup must expand, never leak, and the label column is
@@ -15508,6 +16040,43 @@ def test_require_quality_filters_unscored_models(monkeypatch, capsys):
     assert "acme/unscored" not in out
 
 
+def test_require_quality_keeps_promoted_unlabeled_model_by_default(monkeypatch, capsys):
+    models = [
+        make_model(
+            id="z-ai/glm-5.3-flash",
+            name="Z.AI: GLM 5.3 Flash",
+            reasoning={"default_effort": "max", "supported_efforts": ["max", "high"]},
+        )
+    ]
+    aa_entries = [
+        {
+            "id": "u1",
+            "name": "GLM 5.3 Flash",
+            "slug": "glm-5-3-flash",
+            "creator": "Z.AI",
+            "index": 27.8,
+            "cost_per_task": 0.58,
+            "as_of": "t1",
+        }
+    ]
+    _stub_quality_run(monkeypatch, models, aa_entries=aa_entries, catalog_raises=True)
+    assert mc.run(make_args(aa_api_key="k", require_quality=True), models, False) == 0
+    assert "z-ai/glm-5.3-flash" in capsys.readouterr().out
+
+    _stub_quality_run(monkeypatch, models, aa_entries=aa_entries, catalog_raises=True)
+    assert (
+        mc.run(
+            make_args(
+                aa_api_key="k", require_quality=True, reasoning_effort="max"
+            ),
+            models,
+            False,
+        )
+        == 2
+    )
+    assert "require-quality" in capsys.readouterr().err
+
+
 def test_require_quality_empty_pool_exits_2(monkeypatch, capsys):
     models = [make_model(id="acme/unscored")]
     _stub_quality_run(monkeypatch, models, catalog={"by_id": {}})
@@ -15551,6 +16120,42 @@ def test_run_off_peak_uses_published_schedule_quality(monkeypatch, capsys):
     deal = next(line for line in out.splitlines() if line.startswith("acme/reasoner"))
     assert "42.0" in deal
     assert "99.0" not in deal
+
+
+def test_run_off_peak_promotes_unlabeled_schedule_quality(monkeypatch, capsys):
+    models = [
+        make_model(id="acme/plain"),
+        make_model(
+            id="acme/sched",
+            name="Acme: Sched",
+            pricing=deepseek_pricing(),
+            context_length=262144,
+            reasoning={"default_effort": "high", "supported_efforts": ["high"]},
+        ),
+    ]
+    aa_entries = [
+        {
+            "id": "u1",
+            "name": "Sched",
+            "slug": "sched",
+            "creator": "Acme",
+            "index": 27.8,
+            "cost_per_task": 0.58,
+            "as_of": "t1",
+        }
+    ]
+    _stub_quality_run(monkeypatch, models, aa_entries=aa_entries, catalog_raises=True)
+    assert (
+        mc.run(
+            make_args(aa_api_key="k", off_peak=True, min_context=1_000_000),
+            models,
+            False,
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    deal = next(line for line in out.splitlines() if line.startswith("acme/sched"))
+    assert "27.8 · unknown" in deal
 
 
 def test_run_off_peak_honors_requested_effort(monkeypatch, capsys):
@@ -16720,3 +17325,34 @@ def test_no_pager_after_help_also_suppresses_the_help_pager(monkeypatch, capsys)
         mc.parse_args(["--help", "--no-pager"])
     assert offered == []
     assert "usage: model_compare.py" in capsys.readouterr().out
+
+
+def test_parse_catalog_v6_hydrates_promoted_unlabeled_quality():
+    doc = {
+        "schema_version": 6,
+        "models": [
+            {
+                "id": "acme/model-a",
+                "quality": 27.8,
+                "quality_match": "aa",
+                "quality_as_of": "t1",
+                "quality_effort": None,
+                "reasoning": {
+                    "default_effort": "high",
+                    "supported_efforts": ["high"],
+                    "depths": [],
+                    "aa_unlabeled": {
+                        "index": 27.8,
+                        "cost_per_task_usd": 0.58,
+                        "source": "aa",
+                        "as_of": "t1",
+                    },
+                },
+            }
+        ],
+        "filtered": [],
+    }
+    by_id, depths = mc._parse_catalog_v6(doc)
+    assert by_id["acme/model-a"]["index"] == 27.8
+    assert by_id["acme/model-a"]["effort"] is None
+    assert depths["acme/model-a"]["unlabeled"]["index"] == 27.8

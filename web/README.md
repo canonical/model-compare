@@ -25,7 +25,11 @@ All web assets, generators, and site tests are maintained in this directory. The
 
 The Flex service-tier correction bumped `history.json` to schema 6, so the
 `7-DAY` column and the price-move highlights restart blank for one week
-after the first v6 publish.
+after the first v6 publish. The unlabeled-quality promotion bumped it to
+schema 7 for the same reason: promoted models move from no quality record to
+a real AA index, so their scores and ranks are not comparable with v6
+snapshots. The catalog stays schema 6 and `data.json` stays 4; neither shape
+changed.
 
 ## Local preview
 

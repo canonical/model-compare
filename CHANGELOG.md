@@ -52,6 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Quality: an AA index measured without a reasoning-effort label now fills
+  `QUAL` in a default run, as the last tier after every measured depth and the
+  known non-reasoning OpenRouter trio. The record keeps `quality_effort: null`
+  and `reasoning.aa_unlabeled` carries the measurement and its `$/task`;
+  `DEPTH` shows `unknown` and the Simple view/site show `NN.N · unknown`. An
+  explicit `--reasoning-effort` never uses the unlabeled row, and an
+  unrecognized effort parenthetical stays display-only. Catalog and `data.json`
+  shapes are unchanged (v6 / v4); `history.json` moves to schema 7 so the
+  changed ranks start clean.
 - Default quotes are standard-tier. Priority, ultrafast and unknown tiers are
   never quotation candidates.
 - The per-model `steering` block orders the baseline first and ignores every

@@ -361,10 +361,11 @@ def make_catalog_entry(**overrides):
         "quality_as_of": None,
         "quality_drift": None,
         # Schema v5 (thinking depth): the effort the main quality was
-        # measured at, and the reasoning metadata plus measured depths. The
-        # producer emits the block on every entry; a model with no metadata
-        # and no AA depth rows degrades to this empty shape.
-        "quality_effort": None,
+        # measured at (the OR trio is always "none"), and the reasoning
+        # metadata plus measured depths. The producer emits the block on
+        # every entry; a model with no metadata and no AA depth rows
+        # degrades to this empty shape.
+        "quality_effort": "none",
         "reasoning": {
             "default_effort": None,
             "supported_efforts": [],
@@ -641,6 +642,7 @@ def test_validate_catalog_accepts_aa_modes(mode, counts):
     doc = make_catalog()
     doc["sources"]["aa"].update(mode=mode, **counts)
     if mode == "none":
+        doc["models"][0]["quality"] = None
         doc["models"][0]["quality_match"] = None
         doc["models"][0]["quality_as_of"] = None
         doc["models"][0]["quality_drift"] = None
@@ -652,6 +654,43 @@ def test_validate_catalog_accepts_aa_modes(mode, counts):
         doc["models"][0]["quality_as_of"] = "2026-10-23T13:15:07Z"
         doc["models"][0]["quality_drift"] = False
     bsd.validate_catalog(doc)  # must not raise
+
+
+def test_validate_catalog_rejects_quality_without_match():
+    doc = make_catalog()
+    doc["models"][0]["quality"] = 55.0
+    doc["models"][0]["quality_match"] = None
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_rejects_openrouter_without_effort():
+    doc = make_catalog()
+    doc["models"][0]["quality"] = 55.0
+    doc["models"][0]["quality_match"] = "openrouter"
+    doc["models"][0]["quality_effort"] = None
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_accepts_promoted_unlabeled_entry():
+    doc = make_catalog()
+    doc["models"][0]["quality"] = 27.8
+    doc["models"][0]["quality_match"] = "aa"
+    doc["models"][0]["quality_effort"] = None
+    bsd.validate_catalog(doc)  # must not raise
+
+
+def test_validate_catalog_rejects_out_of_range_aa_unlabeled():
+    doc = make_catalog()
+    doc["models"][0]["reasoning"]["aa_unlabeled"] = {
+        "index": 150.0,
+        "cost_per_task_usd": None,
+        "source": "aa",
+        "as_of": None,
+    }
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
 
 
 @pytest.mark.parametrize(
@@ -679,7 +718,9 @@ def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
         "coding_index": None,
         "agentic_index": None,
     }
+    doc["models"][0]["quality"] = None
     doc["models"][0]["quality_match"] = None
+    doc["models"][0]["quality_effort"] = None
     doc["models"][0]["quality_as_of"] = None
     doc["models"][0]["quality_drift"] = None
     doc["sources"]["aa"] = {
@@ -691,6 +732,7 @@ def test_validate_catalog_accepts_null_aa_fields_and_all_provenances():
         "intelligence_index_version": None,
     }
     bsd.validate_catalog(doc)  # must not raise
+    doc["models"][0]["quality"] = 55.0
     doc["models"][0]["quality_match"] = "aa"
     doc["models"][0]["quality_as_of"] = "2026-10-23T13:15:07Z"
     doc["models"][0]["quality_drift"] = False
@@ -943,7 +985,7 @@ def make_history_snapshot(date, generated_at, **overrides):
 
 def make_history(**overrides):
     doc = {
-        "schema_version": 6,
+        "schema_version": 7,
         "updated_at": "2026-08-26T09:15:00+00:00",
         "snapshots": {
             "2026-08-26": make_history_snapshot(
@@ -1077,7 +1119,7 @@ def test_merge_history_upserts_and_prunes():
     assert len(merged["snapshots"]) == 10
     assert merged["snapshots"][today] == snap
     assert merged["updated_at"] == "2026-09-02T09:15:00+00:00"
-    assert merged["schema_version"] == 6
+    assert merged["schema_version"] == 7
 
 
 def test_merge_history_same_day_last_write_wins():
@@ -1144,12 +1186,12 @@ def test_merge_history_drops_prev_snapshot_with_corrupt_ranks():
 
 def test_merge_history_rejects_unknown_schema_version():
     prev = make_history()
-    prev["schema_version"] = 7
+    prev["schema_version"] = 8
     merged = bsd.merge_history(
         prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
     )
     assert list(merged["snapshots"]) == ["2026-09-02"]
-    assert merged["schema_version"] == 6
+    assert merged["schema_version"] == 7
 
 
 def test_merge_history_tolerates_prev_without_schema_version():
@@ -1824,6 +1866,36 @@ def test_validate_catalog_accepts_48_window_schedule_drift():
     bsd.validate_catalog(doc)  # must not raise
 
 
+def test_validate_catalog_rejects_openrouter_with_non_none_effort():
+    doc = make_catalog()
+    doc["models"][0]["quality"] = 55.0
+    doc["models"][0]["quality_match"] = "openrouter"
+    doc["models"][0]["quality_effort"] = "high"
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_rejects_schedule_quality_without_source():
+    doc = make_catalog()
+    schedules = make_schedules()
+    schedules[0]["quality"] = 44.0
+    schedules[0]["quality_source"] = None
+    doc["schedules"] = schedules
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
+def test_validate_catalog_rejects_schedule_openrouter_with_non_none_effort():
+    doc = make_catalog()
+    schedules = make_schedules()
+    schedules[0]["quality"] = 44.0
+    schedules[0]["quality_source"] = "openrouter"
+    schedules[0]["quality_effort"] = "high"
+    doc["schedules"] = schedules
+    with pytest.raises(ValueError):
+        bsd.validate_catalog(doc)
+
+
 def test_validate_catalog_schedules_entries():
     doc = make_catalog()
     schedules = make_schedules()
@@ -1997,7 +2069,7 @@ def test_merge_history_resets_v1():
         prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
     )
     assert list(merged["snapshots"]) == ["2026-09-02"]
-    assert merged["schema_version"] == 6
+    assert merged["schema_version"] == 7
 
 
 # ---------------------------------------------------------------------------
@@ -2292,7 +2364,7 @@ def test_merge_history_resets_on_v4_history():
         prev, make_history_snapshot("2026-09-02", "2026-09-02T09:15:00+00:00")
     )
     assert list(merged["snapshots"]) == ["2026-09-02"]
-    assert merged["schema_version"] == 6
+    assert merged["schema_version"] == 7
 
 
 # ---------------------------------------------------------------------------
@@ -2354,7 +2426,7 @@ def test_data_v3_rows_require_depth_fields_and_drop_reasoning():
 
 
 def test_history_v6_discards_v5_and_keeps_highlights_v1():
-    assert bsd.HISTORY_SCHEMA_VERSION == 6
+    assert bsd.HISTORY_SCHEMA_VERSION == 7
     assert bsd.HIGHLIGHTS_SCHEMA_VERSION == 1
     prev = {
         "schema_version": 5,
@@ -2367,7 +2439,7 @@ def test_history_v6_discards_v5_and_keeps_highlights_v1():
     merged = bsd.merge_history(
         prev, make_history_snapshot("2026-10-26", "2026-10-26T00:00:00+00:00")
     )
-    assert merged["schema_version"] == 6
+    assert merged["schema_version"] == 7
     assert list(merged["snapshots"]) == ["2026-10-26"]
 
 
@@ -2377,13 +2449,13 @@ def test_history_v6_discards_v5():
         prev, make_history_snapshot("2026-11-22", "2026-11-22T09:15:00+00:00")
     )
     assert list(merged["snapshots"]) == ["2026-11-22"]
-    assert merged["schema_version"] == 6
+    assert merged["schema_version"] == 7
 
 
 def test_validate_catalog_accepts_reasoning_block():
     doc = make_catalog()
     doc["models"][0]["reasoning"] = _reasoning_block()
-    doc["models"][0]["quality_effort"] = "high"
+    doc["models"][0]["quality_effort"] = "none"
     bsd.validate_catalog(doc)  # must not raise
     # The keyless degradation shape: no metadata, no measured depths.
     bsd.validate_catalog(make_catalog())  # must not raise

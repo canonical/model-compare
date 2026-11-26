@@ -235,8 +235,8 @@ def test_site_references_the_external_assets():
     # links them, and its CSP allows same-origin assets but no inline
     # code (the hand-marked JSON highlighting is markup, not script).
     html = SITE_HTML.read_text()
-    assert '<link rel="stylesheet" href="style.css?v=0.8.0-9" />' in html
-    assert '<script src="app.js?v=0.8.0-9" defer></script>' in html
+    assert '<link rel="stylesheet" href="style.css?v=0.8.0-10" />' in html
+    assert '<script src="app.js?v=0.8.0-10" defer></script>' in html
     assert "style-src 'self'" in html
     assert "script-src 'self'" in html
     assert "unsafe-inline" not in html
@@ -1035,16 +1035,18 @@ def test_render_row_shapes_follow_view():
         "   expertQuality: expertTr.children[4].textContent,"
         "   expertCell8: expertTr.children[8].textContent,"
         "   simpleCells: simpleTr.children.length,"
+        "   simpleQuality: simpleTr.children[3].textContent,"
         "   simpleCell7: simpleTr.children[7].textContent"
         " };"
         "})()"
     )
     assert out == {
         "expertCells": 14,
-        "expertDepth": "-",
+        "expertDepth": "unknown",
         "expertQuality": "40.0",
         "expertCell8": "fp8",
         "simpleCells": 8,
+        "simpleQuality": "40.0 · unknown",
         "simpleCell7": "30d",
     }
 
@@ -1054,6 +1056,7 @@ DEALS_ROW = {
     "sched_note": "-30%",
     "sched_detail": "00:00-08:00 UTC daily",
     "quality": 50.0,
+    "quality_effort": "none",
     "input_per_1m": 0.5,
     "output_per_1m": 1.5,
     "context": 128000,
@@ -1101,6 +1104,27 @@ def test_render_deals_rows_are_view_independent():
     }
 
 
+def test_render_deals_promoted_quality_marks_unknown():
+    row = dict(DEALS_ROW, quality=50.0, quality_effort=None)
+    data_fix = {"priorities": {"balanced": []}, "schedules": [row]}
+    out = run_js(
+        "(function () {"
+        f" data = {json.dumps(data_fix)};"
+        " var captured = null;"
+        " var realGet = document.getElementById;"
+        " document.getElementById = function (id) {"
+        "   var e = realGet(id);"
+        '   if (id === "deals-tbody") captured = e;'
+        "   return e;"
+        " };"
+        " renderDeals();"
+        " document.getElementById = realGet;"
+        " return captured.children[0].children[3].textContent;"
+        "})()"
+    )
+    assert out == "50.0 · unknown"
+
+
 # ---------------------------------------------------------------------------
 # QUAL provenance tooltip: per-source as_of, drift note, silent degradation
 
@@ -1110,6 +1134,7 @@ def test_render_deals_rows_are_view_independent():
 AA_PROVENANCE = {
     "quality_source": "aa",
     "quality_as_of": "2026-10-23T13:15:07Z",
+    "quality_effort": "high",
     "quality_drift": False,
     "quality_or_index": 57.5,
     "quality_or_as_of": "20260915",
@@ -1127,34 +1152,38 @@ def test_quality_tooltip_names_source_and_as_of_per_source():
     assert (
         run_js(
             "qualityTooltip({quality_source: 'aa',"
-            " quality_as_of: '2026-10-23T13:15:07Z', quality_drift: null,"
+            " quality_as_of: '2026-10-23T13:15:07Z', quality_effort: 'high',"
+            " quality_drift: null,"
             " quality_or_index: null, quality_or_as_of: null})"
         )
-        == "AA intelligence index - source: aa, checked 13:15Z"
+        == "AA intelligence index - source: aa, checked 13:15Z, measured at high"
     )
     assert (
         run_js(
             "qualityTooltip({quality_source: 'catalog',"
-            " quality_as_of: '2026-10-23T13:15:07Z', quality_drift: false,"
+            " quality_as_of: '2026-10-23T13:15:07Z', quality_effort: 'high',"
+            " quality_drift: false,"
             " quality_or_index: 57.5, quality_or_as_of: '20260915'})"
         )
-        == "AA intelligence index - source: catalog, as of 2026-10-23 13:15Z"
+        == "AA intelligence index - source: catalog, as of 2026-10-23 13:15Z, measured at high"
     )
     assert (
         run_js(
             "qualityTooltip({quality_source: 'openrouter',"
-            " quality_as_of: '20261017', quality_drift: null,"
+            " quality_as_of: '20261017', quality_effort: 'none',"
+            " quality_drift: null,"
             " quality_or_index: null, quality_or_as_of: null})"
         )
-        == "AA intelligence index - source: openrouter, as of 2026-10-17"
+        == "AA intelligence index - source: openrouter, as of 2026-10-17, measured at none"
     )
     assert (
         run_js(
             "qualityTooltip({quality_source: 'catalog',"
-            " quality_as_of: '20261017', quality_drift: null,"
+            " quality_as_of: '20261017', quality_effort: 'high',"
+            " quality_drift: null,"
             " quality_or_index: null, quality_or_as_of: null})"
         )
-        == "AA intelligence index - source: catalog, as of 2026-10-17"
+        == "AA intelligence index - source: catalog, as of 2026-10-17, measured at high"
     )
     # Delivery: the rendered QUAL cell carries the tooltip in both views
     # (the column stays visible in simple view as QUALITY). render() clears
@@ -1176,8 +1205,8 @@ def test_quality_tooltip_names_source_and_as_of_per_source():
         "})()"
     )
     assert out == {
-        "expertTitle": "AA intelligence index - source: aa, checked 13:15Z",
-        "simpleTitle": "AA intelligence index - source: aa, checked 13:15Z",
+        "expertTitle": "AA intelligence index - source: aa, checked 13:15Z, measured at high",
+        "simpleTitle": "AA intelligence index - source: aa, checked 13:15Z, measured at high",
     }
     # Both QUAL column headers advertise the provenance hover (the cells'
     # own title is where the details live).
@@ -1192,7 +1221,8 @@ def test_quality_tooltip_names_source_and_as_of_per_source():
     assert (
         html.count(
             "AA intelligence index — hover a cell for its source and as-of"
-            " date. Shown at the reasoning effort noted after the value."
+            " date. Shown at the reasoning effort noted after the value; unknown"
+            " = AA measured without an effort label (used in a default run)."
         )
         == 1
     )
@@ -1204,18 +1234,20 @@ def test_quality_tooltip_drift_appends_the_row_or_pair():
     # one-decimal quality form and the OR benchmark date as a plain date.
     assert run_js(
         "qualityTooltip({quality_source: 'catalog',"
-        " quality_as_of: '2026-10-23T13:15:07Z', quality_drift: true,"
+        " quality_as_of: '2026-10-23T13:15:07Z', quality_effort: 'high',"
+        " quality_drift: true,"
         " quality_or_index: 39.5, quality_or_as_of: '20261017'})"
     ) == (
-        "AA intelligence index - source: catalog, as of 2026-10-23 13:15Z"
-        " differs from OpenRouter snapshot (39.5, 2026-10-17)"
+        "AA intelligence index - source: catalog, as of 2026-10-23 13:15Z, "
+        "measured at high; differs from OpenRouter snapshot (39.5, 2026-10-17)"
     )
     # false (agrees with OR) and null (the row IS the OR snapshot, or no
     # OR value exists) stay note-free.
     for verdict in ("false", "null"):
         out = run_js(
             "qualityTooltip({quality_source: 'aa',"
-            f" quality_as_of: '2026-10-23T13:15:07Z', quality_drift: {verdict},"
+            f" quality_as_of: '2026-10-23T13:15:07Z', quality_effort: 'high',"
+            f" quality_drift: {verdict},"
             " quality_or_index: 39.5, quality_or_as_of: '20261017'})"
         )
         assert "differs from OpenRouter snapshot" not in out
@@ -1234,8 +1266,8 @@ def test_quality_tooltip_drift_appends_the_row_or_pair():
         "})()"
     )
     assert out == (
-        "AA intelligence index - source: aa, checked 13:15Z"
-        " differs from OpenRouter snapshot (39.5, 2026-10-17)"
+        "AA intelligence index - source: aa, checked 13:15Z, measured at high; "
+        "differs from OpenRouter snapshot (39.5, 2026-10-17)"
     )
 
 
@@ -1301,6 +1333,7 @@ def test_quality_tooltip_deals_row_with_provenance():
         {
             "quality_source": "catalog",
             "quality_as_of": "20261017",
+            "quality_effort": "high",
         }
     )
     deals_fix = {"priorities": {"balanced": []}, "schedules": [deal]}
@@ -1319,7 +1352,10 @@ def test_quality_tooltip_deals_row_with_provenance():
         " return captured.children[0].children[3].title;"
         "})()"
     )
-    assert out == "AA intelligence index - source: catalog, as of 2026-10-17"
+    assert out == (
+        "AA intelligence index - source: catalog, as of 2026-10-17, "
+        "measured at high"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1373,6 +1409,17 @@ def test_fmt_effort_marks_default_and_missing():
     assert run_js("fmtEffort({quality_effort:'max', default_effort:'high'})") == "max"
     assert run_js("fmtEffort({quality_effort:'high'})") == "high"
     assert run_js("fmtEffort({})") == "-"
+
+
+def test_fmt_effort_promoted_row_is_unknown():
+    assert run_js("fmtEffort({quality_index:27.8,quality_effort:null})") == "unknown"
+    assert (
+        run_js(
+            "fmtEffort({quality_index:27.8,quality_effort:null,"
+            "reasoning:{aa_unlabeled:{index:27.8}}})"
+        )
+        == "unknown"
+    )
 
 
 def test_quality_tooltip_deals_row_includes_effort():
@@ -1559,13 +1606,15 @@ def test_depth_detail_row_messages():
 def test_unlabeled_reference_note():
     assert (
         run_js("unlabeledCaveat({index: 27.8, cost_per_task_usd: 0.58})")
-        == "unknown = measured without a reasoning-effort label; reference only, "
-        "may not be the quality you get at a selectable effort."
+        == "AA measured this model without a reasoning-effort label; the "
+        "score fills QUAL in a default run but is not selectable, so a "
+        "selectable effort may score differently."
     )
     assert (
         run_js("unlabeledCaveat({index: 27.8, cost_per_task_usd: null})")
-        == "unknown = measured without a reasoning-effort label; reference only, "
-        "may not be the quality you get at a selectable effort."
+        == "AA measured this model without a reasoning-effort label; the "
+        "score fills QUAL in a default run but is not selectable, so a "
+        "selectable effort may score differently."
     )
     assert run_js("unlabeledCaveat(null)") is None
     assert run_js("unlabeledRecord({reasoning: {aa_unlabeled: {index: 27.8}}})") == {
@@ -1582,15 +1631,59 @@ def test_quality_tooltip_explains_unlabeled_reference():
             "as_of: '2026-11-04T12:27:03+00:00'}}})"
         )
         == "AA measures this model at 27.8, checked 12:27Z, without a "
-        "reasoning-effort label, so QUAL stays blank; it may not be the "
-        "quality you get at a selectable effort."
+        "reasoning-effort label; this run pins an effort, so QUAL stays blank. "
+        "Expand the row for the reference."
     )
     assert (
         run_js("qualityTooltip({reasoning: {aa_unlabeled: {index: 27.8}}})")
-        == "AA measures this model at 27.8, without a reasoning-effort label, "
-        "so QUAL stays blank; it may not be the quality you get at a "
-        "selectable effort."
+        == "AA measures this model at 27.8, without a reasoning-effort label; "
+        "this run pins an effort, so QUAL stays blank. Expand the row for the "
+        "reference."
     )
+
+
+def test_depth_tooltip_promoted_record():
+    assert (
+        run_js("depthTooltip({quality_index:27.8,quality_effort:null})")
+        == "This model's quality was measured without a reasoning-effort "
+        "label, so QUAL uses that score in a default run; no selectable "
+        "effort can be pinned to it."
+    )
+
+
+def test_depth_rows_marks_unlabeled_selected_when_promoted():
+    out = run_js(
+        "depthRows({quality:27.8,quality_effort:null,default_effort:'high',"
+        "supported_efforts:['high'],reasoning:{aa_unlabeled:{index:27.8}}})"
+    )
+    assert out[-1]["selected"] is True
+    assert out[-1]["selectable"] is False
+
+
+def test_depth_rows_omitted_quality_stays_unselected():
+    out = run_js("depthRows({reasoning:{aa_unlabeled:{index:27.8}}})")
+    assert out[-1]["selected"] is False
+
+
+def test_quality_tooltip_unknown_effort():
+    text = run_js(
+        "qualityTooltip({quality_source:'aa',quality_as_of:'t1',"
+        "quality_index:27.8,quality_effort:null})"
+    )
+    assert "measured without an effort label" in text
+    assert "a selectable effort may score differently" in text
+    text = run_js(
+        "qualityTooltip({quality_source:'openrouter',quality_as_of:'t1',"
+        "quality_index:27.8,quality_effort:'none'})"
+    )
+    assert "measured without an effort label" not in text
+    # A null effort on an OpenRouter row is fixture/legacy data, not an AA
+    # unlabeled measurement: the source guard must still suppress the clause.
+    text = run_js(
+        "qualityTooltip({quality_source:'openrouter',quality_as_of:'t1',"
+        "quality_index:27.8,quality_effort:null})"
+    )
+    assert "measured without an effort label" not in text
 
 
 def test_depth_detail_row_shows_unlabeled_reference():
@@ -1629,8 +1722,9 @@ def test_depth_detail_row_shows_unlabeled_reference():
         "lastClass": "depth-unlabeled",
         "lastCells": ["unknown", "27.8", "0.58", "-", "not selectable"],
         "caveatClass": "endpoint-note",
-        "caveat": "unknown = measured without a reasoning-effort label; "
-        "reference only, may not be the quality you get at a selectable effort.",
+        "caveat": "AA measured this model without a reasoning-effort label; "
+        "the score fills QUAL in a default run but is not selectable, so a "
+        "selectable effort may score differently.",
     }
 
 
@@ -1665,8 +1759,9 @@ def test_depth_detail_row_unlabeled_reference_replaces_no_data_line():
         "children": 3,
         "tableRows": 1,
         "rowCells": ["unknown", "26.7", "-", "-", "not selectable"],
-        "caveat": "unknown = measured without a reasoning-effort label; "
-        "reference only, may not be the quality you get at a selectable effort.",
+        "caveat": "AA measured this model without a reasoning-effort label; "
+        "the score fills QUAL in a default run but is not selectable, so a "
+        "selectable effort may score differently.",
     }
 
 
@@ -1684,8 +1779,9 @@ def test_fmt_effort_and_depth_tooltip_for_unlabeled_aa():
     assert out["effort"] == "unknown"
     assert (
         out["tip"]
-        == "AA measured this model without a reasoning-effort label, so QUAL "
-        "stays blank; expand the row for the reference score."
+        == "AA measured this model without a reasoning-effort label; this "
+        "run pins an effort, so QUAL stays blank. Expand the row for the "
+        "reference."
     )
     assert out["rows"] == [
         {
@@ -1851,10 +1947,12 @@ def test_index_html_tooltips_and_style_css_muted_rules():
     assert "#effort" in depth_th
     assert "any selectable effort" in depth_th
     assert "unknown =" in depth_th
+    assert "used for QUAL in a default run" in depth_th
     assert "best measured selectable depth" in qual_th
     assert "drift notes" in qual_th
     assert "- = not measured" in qual_th
-    assert "- · unknown" in qual_th
+    assert "a value marked unknown" in qual_th
+    assert "(not scored)" not in qual_th
 
     deals_tbl = re.search(r'<table id="deals".*?</table>', html).group(0)
     deals_qual_th = next(
@@ -1862,13 +1960,20 @@ def test_index_html_tooltips_and_style_css_muted_rules():
         for t in re.findall(r"<th.*?</th>", deals_tbl)
         if re.search(r">\s*QUAL\s*<", t)
     )
-    assert "- · unknown" in deals_qual_th
+    assert "unknown = AA measured without an effort label" in deals_qual_th
 
     css = SITE_CSS.read_text()
     assert "#table .na" in css
     assert "#deals .na" in css
     assert ".depth-unlabeled" in css
     assert "var(--muted)" in css
+
+
+def test_faq_explains_unlabeled_quality_is_scored_in_default_run():
+    faq = re.sub(r"\s+", " ", (SITE_DIR / "faq.html").read_text())
+    assert "still uses that score in a default run" in faq
+    assert "does not affect the ranking" not in faq
+    assert "no quality record at all" in faq
 
 
 def test_render_expanded_row_shows_depth_before_endpoints():
@@ -2702,7 +2807,7 @@ def test_plugin_lightbox_ignores_modified_clicks_and_closes_on_backdrop():
 def test_every_page_has_the_tight_csp():
     for name in PAGE_FILES:
         html = (SITE_DIR / name).read_text()
-        assert '<link rel="stylesheet" href="style.css?v=0.8.0-9" />' in html, name
+        assert '<link rel="stylesheet" href="style.css?v=0.8.0-10" />' in html, name
         assert "Content-Security-Policy" in html, name
         assert "default-src 'none'" in html, name
         assert "unsafe-inline" not in html, name
@@ -2721,7 +2826,7 @@ def test_every_page_has_the_tight_csp():
 
 def test_pages_load_only_the_scripts_they_need():
     index = (SITE_DIR / "index.html").read_text()
-    assert '<script src="app.js?v=0.8.0-9" defer></script>' in index
+    assert '<script src="app.js?v=0.8.0-10" defer></script>' in index
     assert "copy.js" not in index
     assert "Weekly highlights" in index
     assert "<h3>News from OpenRouter</h3>" in index

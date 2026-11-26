@@ -13,7 +13,7 @@ from test_build_site_data import make_catalog, make_catalog_entry, make_dropped
 def _entry(
     model_id,
     *,
-    quality_effort=None,
+    quality_effort="none",
     default_effort=None,
     supported=None,
     mandatory=False,
@@ -29,6 +29,9 @@ def _entry(
     quantizations=("fp8",),
 ):
     entry = make_catalog_entry(id=model_id, quality_effort=quality_effort)
+    # An effort other than "none" is an AA depth record, not the OR trio.
+    if quality_effort != "none":
+        entry["quality_match"] = "aa"
     entry["zdr_status"] = "strict"
     entry["max_output_tokens"] = max_output
     entry["input_modalities"] = list(modalities)
@@ -103,10 +106,14 @@ def _catalog(entries):
     }
     doc["filtered"] = []
     doc["schedules"] = []
+    matched_aa = sum(1 for entry in entries if entry["quality_match"] == "aa")
+    matched_openrouter = sum(
+        1 for entry in entries if entry["quality_match"] == "openrouter"
+    )
     doc["sources"]["aa"].update(
-        matched_aa=0,
+        matched_aa=matched_aa,
         matched_catalog=0,
-        matched_openrouter=len(entries),
+        matched_openrouter=matched_openrouter,
         depth_rows=0,
         matched_depth=0,
         matched_default=len(entries),
